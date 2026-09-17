@@ -54,6 +54,15 @@ agent-relay = "agent_relay.cli.main:main"
 [tool.setuptools.packages.find]
 include = ["agent_relay*"]
 
+[tool.setuptools.package-data]
+agent_relay = [
+    "web/templates/*.html",
+    "web/static/*.png",
+    "web/static/*.jpg",
+    "web/static/vendor/*.js",
+    "web/static/vendor/fonts/*.woff2",
+]
+
 [tool.ruff]
 target-version = "py310"
 exclude = [".venv", "agent_relay/web/static/vendor"]
