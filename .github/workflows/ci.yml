@@ -12,7 +12,7 @@ concurrency:
 jobs:
   test:
     name: lint and test (python ${{ matrix.python-version }})
-    runs-on: [self-hosted, linux, x64, ci001]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
