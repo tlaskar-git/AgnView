@@ -1,0 +1,14 @@
+version: "3.8"
+
+services:
+  agnview:
+    build: .
+    container_name: agnview
+    ports:
+      - "8765:8765"
+    volumes:
+      - agnview-data:/home/agnview/.agnview
+    restart: unless-stopped
+
+volumes:
+  agnview-data:

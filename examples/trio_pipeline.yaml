@@ -1,0 +1,25 @@
+id: job-user-auth-system
+title: User Authentication & Dashboard Pipeline
+description: Multi-agent build coordinated across Codex, AntiGravity, and Claude Code.
+
+tasks:
+  - id: task-A-backend-api
+    title: Generate Authentication REST API
+    assigned_agent: codex
+    dependencies: []
+    description: Build FastAPI JWT authentication endpoints, /login, /register, and token verification with unit tests.
+
+  - id: task-B-db-schema
+    title: Create Database Schema & Migrations
+    assigned_agent: antigravity
+    dependencies:
+      - task-A-backend-api
+    description: Provision SQLite user models, password hashing utilities, and schema migrations matching the API specs.
+
+  - id: task-C-frontend-integration
+    title: Fullstack UI Integration & End-to-End Tests
+    assigned_agent: claude_code
+    dependencies:
+      - task-A-backend-api
+      - task-B-db-schema
+    description: Integrate React login form with the backend API, verify token flow, and run integration tests. If any defects or mismatches are found, issue a revision request back to Codex (Task A) or AntiGravity (Task B).

@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agnview"
+version = "0.2.0"
+description = "One screen for the coding agents already running on your machine."
+authors = [{ name = "tlaskar-git" }]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Environment :: Web Environment",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Build Tools",
+    "Topic :: Software Development :: User Interfaces",
+    "Topic :: Utilities"
+]
+dependencies = [
+    "fastapi==0.141.1",
+    "uvicorn[standard]==0.52.4",
+    "pydantic==2.13.5",
+    "pyyaml==6.0.3",
+    "httpx==0.28.1",
+    "rich==15.0.0",
+    "sse-starlette==3.4.11",
+    "qrcode==8.2",
+    "iroh==1.1.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/tlaskar-git/AgnView"
+Repository = "https://github.com/tlaskar-git/AgnView"
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "ruff==0.15.4"
+]
+
+[project.scripts]
+agnview = "agent_relay.cli.main:main"
+agent-relay = "agent_relay.cli.main:main"
+
+[tool.setuptools.packages.find]
+include = ["agent_relay*"]
+
+[tool.ruff]
+target-version = "py310"
+exclude = [".venv", "agent_relay/web/static/vendor"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
