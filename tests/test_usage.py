@@ -22,7 +22,7 @@ def test_fetch_account_usage_unit():
         name="Personal Claude Pro",
         plan_name="Claude Pro",
         auth_type="api_key",
-        auth_credential="sk-ant-api03-test-abcdef1234567890",
+        auth_credential="sk-test-placeholder-anthropic-key",
         tokens_limit=1_000_000
     )
     res_claude = fetch_account_usage(acc_claude)
@@ -38,7 +38,7 @@ def test_fetch_account_usage_unit():
         name="Team ChatGPT",
         plan_name="ChatGPT Team",
         auth_type="api_key",
-        auth_credential="sk-proj-chatgpt-test-token-1234",
+        auth_credential="sk-test-placeholder-chatgpt-token",
         cost_limit_usd=150.0
     )
     res_chatgpt = fetch_account_usage(acc_chatgpt)
@@ -53,7 +53,7 @@ def test_fetch_account_usage_unit():
         name="Gemini 1.5 Pro Account",
         plan_name="Gemini Advanced",
         auth_type="api_key",
-        auth_credential="AIzaSyDummyGeminiKey987654321",
+        auth_credential="AIza-mock-gemini-test-key",
         tokens_limit=2_000_000
     )
     res_gemini = fetch_account_usage(acc_gemini)
@@ -75,7 +75,7 @@ def test_multi_account_api_lifecycle(client):
         "name": "Personal Claude Code",
         "plan_name": "Claude Pro",
         "auth_type": "api_key",
-        "auth_credential": "sk-ant-api03-personal-token-1111",
+        "auth_credential": "sk-test-personal-token-placeholder",
         "tokens_limit": 1_000_000
     })
     assert res_c1.status_code == 200
@@ -91,7 +91,7 @@ def test_multi_account_api_lifecycle(client):
         "name": "Work Enterprise Claude",
         "plan_name": "Claude Team",
         "auth_type": "api_key",
-        "auth_credential": "sk-ant-api03-work-token-2222",
+        "auth_credential": "sk-test-work-token-placeholder",
         "tokens_limit": 5_000_000
     })
     assert res_c2.status_code == 200
@@ -103,7 +103,7 @@ def test_multi_account_api_lifecycle(client):
         "name": "Codex / ChatGPT Plus",
         "plan_name": "ChatGPT Plus",
         "auth_type": "api_key",
-        "auth_credential": "sk-proj-chatgpt-codex-key-3333",
+        "auth_credential": "sk-test-chatgpt-codex-key-placeholder",
         "cost_limit_usd": 100.0
     })
     assert res_gpt.status_code == 200
@@ -116,7 +116,7 @@ def test_multi_account_api_lifecycle(client):
         "name": "Google Gemini Advanced",
         "plan_name": "Gemini Advanced 1.5 Pro",
         "auth_type": "api_key",
-        "auth_credential": "AIzaSyGeminiApiKey-4444",
+        "auth_credential": "AIza-mock-gemini-api-key-test",
         "tokens_limit": 2_000_000
     })
     assert res_gem.status_code == 200

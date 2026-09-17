@@ -88,6 +88,14 @@ Only needed if you are changing AgnView itself.
    agnview serve --port 8765
    ```
 
+6. Install the pre-commit hooks (runs Gitleaks secret scanning on every
+   commit; you need the `gitleaks` binary on your `PATH` too — download it
+   from the [gitleaks releases page](https://github.com/gitleaks/gitleaks/releases)):
+   ```bash
+   pip install pre-commit
+   pre-commit install
+   ```
+
 ## Pull Request Guidelines
 
 - Ensure all existing and new unit tests pass before submitting.
