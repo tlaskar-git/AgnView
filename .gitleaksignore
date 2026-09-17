@@ -1,10 +1,20 @@
 # Historical false positive: GitHub secret scanning alert #1 (gcp-api-key).
 # agent_relay/web/templates/index.html line 5486 held a sample/placeholder
-# Gemini quota-display value ("AIzaSySampleGoogleGeminiApiKey987654321"),
-# never a live credential. It has been replaced with an unambiguous
-# placeholder (YOUR_GOOGLE_API_KEY) on HEAD, but the old value is baked
-# into historical commit 621e35e (and any commit descended from it) and
-# cannot be removed without rewriting published history, which is out of
-# scope here. Ignored by fingerprint, not by rule or path, so any new
-# occurrence of this pattern elsewhere still fails the scan.
+# Gemini quota-display value shaped like a Google API key, never a live
+# credential (the exact value is deliberately not repeated here, so this
+# file itself does not re-trigger the same rule). It has been replaced
+# with an unambiguous placeholder (YOUR_GOOGLE_API_KEY) on HEAD, but the
+# old value is baked into historical commit 621e35e (and any commit
+# descended from it) and cannot be removed without rewriting published
+# history, which is out of scope here. Ignored by fingerprint, not by
+# rule or path, so any new occurrence of this pattern elsewhere still
+# fails the scan.
 621e35e34526c485c94f6bfbdfa5aad7faafba7b:agent_relay/web/templates/index.html:gcp-api-key:5486
+
+# Self-inflicted follow-up: an earlier draft of this exact ignore comment
+# quoted that same placeholder value in full to explain what it was. That
+# reproduced the gcp-api-key shape inside this file's own history, so
+# gitleaks correctly flagged commit 4375b955 too. That draft is already
+# pushed and, again, not rewritten (no force-push). This file's current
+# wording no longer repeats the literal value.
+4375b955a619b1d0d06c26b15751a1e9bf6d65d7:.gitleaksignore:gcp-api-key:3
