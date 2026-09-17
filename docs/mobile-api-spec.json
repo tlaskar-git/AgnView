@@ -1,0 +1,295 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AgnView Mobile Companion Gateway API",
+    "version": "1.0.0",
+    "description": "Unified REST & Server-Sent Events (SSE) contract for AgnView iOS (SwiftUI) and Android (Jetpack Compose) mobile clients. Enables remote live terminal observation, cross-agent prompt dispatch, pipeline management, and multi-account AI quota telemetry."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:8765",
+      "description": "Workstation Local Loopback"
+    },
+    {
+      "url": "http://{lan_ip}:8765",
+      "description": "Local Wi-Fi Network (RFC1918 Private Subnet)"
+    },
+    {
+      "url": "http://{tailscale_ip}:8765",
+      "description": "Private Tailscale Mesh VPN (100.64.0.0/10 CGNAT)"
+    }
+  ],
+  "security": [
+    {
+      "AgnViewToken": []
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "AgnViewToken": {
+        "type": "apiKey",
+        "name": "X-AgnView-Token",
+        "in": "header",
+        "description": "Cryptographically secure 32-byte CSPRNG token generated during local pairing setup. Alternatively supports Authorization: Bearer <token>"
+      }
+    },
+    "schemas": {
+      "MobileStatus": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "example": "healthy" },
+          "service": { "type": "string", "example": "AgnView Mobile Gateway" },
+          "version": { "type": "string", "example": "0.2.0" },
+          "endpoints": { "type": "object" },
+          "paired_agents_online": { "type": "integer", "example": 3 }
+        },
+        "required": ["status", "service", "version"]
+      },
+      "PairingPayload": {
+        "type": "object",
+        "properties": {
+          "pairing_token": { "type": "string" },
+          "pair_id": { "type": "string" },
+          "deep_link": { "type": "string", "example": "agnview://pair?v=1&name=MacBook&lan=192.168.1.50:8765&fp=abcdef...&id=xyz&k=secretkey" },
+          "active_endpoint": { "type": "string" },
+          "endpoints": {
+            "type": "object",
+            "properties": {
+              "local": { "type": "string" },
+              "lan": { "type": "string" },
+              "tailscale": { "type": "string" }
+            }
+          },
+          "qr_svg": { "type": "string" }
+        }
+      },
+      "ConsoleEntry": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "agent": { "type": "string", "enum": ["claude_code", "codex", "antigravity", "deepseek", "custom", "user", "system"] },
+          "source": { "type": "string", "enum": ["stdout", "stderr", "user_input", "system_notice"] },
+          "content": { "type": "string" },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "session_id": { "type": "string", "nullable": true }
+        }
+      },
+      "ConsoleDispatch": {
+        "type": "object",
+        "properties": {
+          "target_agent": { "type": "string", "enum": ["claude_code", "codex", "antigravity", "deepseek", "custom"] },
+          "prompt": { "type": "string" },
+          "working_dir": { "type": "string", "nullable": true },
+          "session_id": { "type": "string", "nullable": true }
+        },
+        "required": ["target_agent", "prompt"]
+      },
+      "Job": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending", "in_progress", "completed", "revision_in_progress", "failed"] },
+          "created_at": { "type": "string", "format": "date-time" },
+          "updated_at": { "type": "string", "format": "date-time" },
+          "tasks": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/Task" }
+          }
+        }
+      },
+      "Task": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "job_id": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "assigned_agent": { "type": "string", "description": "Adapter id from agents.yaml, optionally suffixed with @host" },
+          "status": { "type": "string", "enum": ["pending", "ready", "in_progress", "completed", "revision_requested", "failed", "blocked"] },
+          "dependencies": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "output_summary": { "type": "string", "nullable": true }
+        }
+      },
+      "UsageAccount": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "provider": { "type": "string", "enum": ["claude", "chatgpt", "gemini"] },
+          "plan_name": { "type": "string" },
+          "tokens_used": { "type": "integer" },
+          "tokens_limit": { "type": "integer", "nullable": true },
+          "cost_used": { "type": "number" },
+          "cost_limit": { "type": "number", "nullable": true },
+          "requests_count": { "type": "integer" },
+          "last_probed": { "type": "string", "format": "date-time", "nullable": true },
+          "is_active": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/api/mobile/status": {
+      "get": {
+        "summary": "Health check & gateway probe for mobile clients",
+        "responses": {
+          "200": {
+            "description": "Gateway online",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/MobileStatus" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/mobile/pairing": {
+      "get": {
+        "summary": "Get pairing credentials, discovered endpoints, and SVG QR code",
+        "responses": {
+          "200": {
+            "description": "Pairing payload",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/PairingPayload" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/events": {
+      "get": {
+        "summary": "Server-Sent Events (SSE) stream for real-time console lines and pipeline status changes",
+        "description": "Streams event packets with types: connected, agent_output_chunk, agent_finished, job_created, task_claimed, task_completed, task_failed, job_deleted, revision_requested, agent_heartbeat, usage_all_refreshed.",
+        "responses": {
+          "200": {
+            "description": "SSE stream",
+            "content": {
+              "text/event-stream": {}
+            }
+          }
+        }
+      }
+    },
+    "/api/console/logs": {
+      "get": {
+        "summary": "Fetch historical interactive console log buffer",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/ConsoleEntry" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/console/dispatch": {
+      "post": {
+        "summary": "Dispatch command/prompt to local agent runner CLI",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ConsoleDispatch" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Command dispatched successfully"
+          }
+        }
+      }
+    },
+    "/api/jobs": {
+      "get": {
+        "summary": "List all multi-agent pipelines",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/Job" }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create and launch a new multi-agent pipeline",
+        "responses": {
+          "201": {
+            "description": "Job created"
+          }
+        }
+      }
+    },
+    "/api/tasks/{task_id}/request-revision": {
+      "post": {
+        "summary": "Request revision/defect fix from an upstream agent",
+        "parameters": [
+          { "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Revision queued"
+          }
+        }
+      }
+    },
+    "/api/tasks/{task_id}/fail": {
+      "post": {
+        "summary": "Mark a task failed and block every task downstream of it",
+        "parameters": [
+          { "name": "task_id", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Task failed"
+          }
+        }
+      }
+    },
+    "/api/usage/accounts": {
+      "get": {
+        "summary": "List all AI subscription accounts and quota telemetry",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": { "$ref": "#/components/schemas/UsageAccount" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/usage/refresh-all": {
+      "post": {
+        "summary": "Trigger live quota probe across all Claude, ChatGPT, and Gemini subscriptions",
+        "responses": {
+          "200": {
+            "description": "All accounts refreshed"
+          }
+        }
+      }
+    }
+  }
+}

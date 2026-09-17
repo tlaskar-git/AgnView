@@ -1,0 +1,208 @@
+<div align="center">
+  <img src="docs/agnview_logo.png" alt="AgnView" width="140" />
+  <h1>AgnView</h1>
+  <p><strong>One screen for the coding agents already running on your machine.</strong></p>
+</div>
+
+---
+
+## What AgnView is
+
+AgnView is a local dashboard and coordination hub for the agent CLIs you have
+installed: Claude Code, Codex, AntiGravity, DeepSeek, and any local model you
+run yourself. There are five known agent roles a task can be assigned to:
+`claude_code`, `codex`, `antigravity`, `deepseek` and `custom`. It does three
+things.
+
+**Watch.** Every agent's output streams into one console, colour-coded by
+agent, instead of being scattered across terminal tabs.
+
+**Coordinate.** Describe a job as a set of tasks with dependencies. A task
+stays blocked until the tasks it depends on complete, and when it starts, the
+agent picks it up with the upstream summaries and artefacts attached. If one
+agent finds a defect in another's work, it can send the task back for revision,
+or mark it failed, which blocks everything downstream.
+
+**Keep an eye on quotas.** Session and weekly limits for your Claude, ChatGPT
+and Gemini subscriptions, in one place.
+
+AgnView runs entirely on your own machine. It is free, and there is nothing to
+sign up for.
+
+## Screenshots
+
+| | Light | Dark |
+|---|---|---|
+| **Console** | ![Console, light](docs/screenshots/console-light.png) | ![Console, dark](docs/screenshots/console-dark.png) |
+| **Pipelines** | ![Pipelines, light](docs/screenshots/pipelines-light.png) | ![Pipelines, dark](docs/screenshots/pipelines-dark.png) |
+| **Usage** | ![Usage, light](docs/screenshots/usage-light.png) | ![Usage, dark](docs/screenshots/usage-dark.png) |
+
+## Supported platforms
+
+| | |
+|---|---|
+| Windows | 10 and 11 |
+| macOS | 12 Monterey and later, Intel and Apple silicon |
+| Linux | any distribution with Python 3.10 or newer |
+| Python | 3.10 or newer |
+| Browser | any current Chrome, Edge, Firefox or Safari |
+
+The companion mobile client is iOS and iPadOS.
+
+## Clients
+
+The AgnView hub in this repo covers Windows, macOS and Linux.
+
+- **iOS and iPadOS**: a separate repository
+  holds the design prototype and mobile spec for the iOS and iPadOS client.
+- **Android**: an Android client will live at
+  a separate repository
+  (reference only, not yet created).
+
+AgnView does not install any coding agent for you. It watches and dispatches to
+the CLIs already on your machine: Claude Code, Codex, AntiGravity or any other
+tool you add as an adapter. Install the CLIs you want to use yourself, before
+or after installing AgnView.
+
+## Install
+
+The quickest way is not to install at all. [uv](https://docs.astral.sh/uv/)
+fetches and runs AgnView in one command, with no clone and no virtualenv:
+
+```bash
+uvx agnview serve
+```
+
+To keep it around permanently:
+
+```bash
+uv tool install agnview      # or: pipx install agnview / pip install agnview
+```
+
+Working on AgnView itself? Install from source:
+
+```bash
+git clone https://github.com/tlaskar-git/AgnView.git
+cd AgnView
+pip install -e .
+```
+
+`agent-relay` is supported as an alias for the `agnview` command.
+
+## Start
+
+```bash
+agnview serve
+```
+
+The dashboard is then at <http://127.0.0.1:8765>.
+
+By default AgnView binds `127.0.0.1`, so only your own machine can reach it. To
+let your phone or another computer on the same network connect, opt in
+explicitly:
+
+```bash
+agnview serve --listen-lan
+```
+
+Choose a different port with `--port`, and require a token from connecting
+clients with `--token`.
+
+## Pair a phone
+
+1. Start the hub with `agnview serve --listen-lan`.
+2. Open the dashboard and choose the mobile option in the header to show the
+   pairing QR code.
+3. Scan it with the AgnView app on a device on the same network.
+
+The QR code carries the hub's LAN address, its certificate fingerprint, and a
+pairing key. Regenerating the code invalidates every device already paired.
+`docs/PAIRING.md` is the full contract.
+
+**Treat the pairing QR code like a password.** Anyone who can read it can reach
+the hub, and the hub can run commands on this machine. See `SECURITY.md`.
+
+## LAN pairing, plus a remote path if you want it
+
+On your own local network, your machine and your phone talk to each other
+directly. Nothing goes through anybody else's infrastructure, and no account
+or setup is needed.
+
+If your phone is off your home or office Wi-Fi, LAN pairing alone cannot reach
+it. AgnView also accepts connections over iroh, which can carry the pairing QR
+code and the console beyond the LAN without a VPN. See "Remote access" below
+for what that depends on and how to opt out of it.
+
+## Remote access
+
+`docs/REMOTE-ACCESS.md` covers every path in order: LAN, bundled iroh, what
+iroh depends on, running your own relay, and the overlay alternatives
+(Tailscale, NetBird, an SSH local port forward, or an existing WireGuard
+tunnel) via `--listen-overlay`.
+
+Remote access uses iroh's free public relays. Most connections are direct and never touch a relay. Relayed connections are rate limited and carry no uptime guarantee. You can point AgnView at your own relay in Settings.
+
+## Docker, and what a container cannot do
+
+```bash
+docker compose up -d
+```
+
+The hub is then at <http://localhost:8765>. The image runs as an unprivileged
+`agnview` user and carries a `HEALTHCHECK` against the dashboard root, and the
+compose file keeps `~/.agnview` (pairing token, adapters, notification config)
+in a named volume so it survives rebuilds and restarts.
+
+**A containerised hub cannot dispatch to CLI agents.** AgnView dispatches work
+by executing the agent binaries on the host: `claude`, `codex`, `antigravity`
+and the rest, with their own credentials, config and your working tree. A
+container sees none of that.
+
+- Docker suits watching and managing a pipeline: the dashboard, the REST and
+  SSE API, job and dependency state, web-LLM prompt generation, quota
+  monitoring, and mobile pairing, with remote worker daemons doing the actual
+  execution.
+- A native install suits dispatch. If you want AgnView to run Claude Code,
+  Codex or AntiGravity for you, install it on the machine where those CLIs
+  live.
+
+## Command line
+
+`agnview serve` runs the hub. The rest of the commands drive it, so an agent
+can take part in a pipeline from a script:
+
+| Command | Purpose |
+|---|---|
+| `create-job` | Create a job from a YAML or JSON pipeline file |
+| `status` | Show job and task status |
+| `wait` | Block until a task's dependencies are satisfied |
+| `claim` | Claim a task and begin work |
+| `complete` | Mark a task complete with a summary |
+| `reject` | Send a task back to its agent for revision |
+| `my-tasks` | List tasks assigned to an agent |
+| `nodes` | List connected agent instances |
+| `worker` | Poll for assigned tasks as a daemon |
+| `export-prompt` | Build a context prompt for a web LLM |
+| `usage` | Show live subscription quotas |
+
+Run any of them with `--help` for the full set of options.
+
+## How a pipeline runs
+
+1. Create a job whose tasks name their dependencies. Tasks with no unmet
+   dependencies start ready; the rest start pending.
+2. An agent claims a ready task, which moves it to in progress.
+3. Completing a task records its summary and artefacts, and unlocks every task
+   whose dependencies are now met.
+4. An agent that finds a defect upstream requests a revision. The upstream task
+   reopens and its dependents go back to pending until it is fixed.
+5. A task that cannot be finished is marked failed, which blocks everything
+   downstream of it and fails the job.
+
+Every one of these changes is pushed to open dashboards over Server-Sent
+Events, so a second tab or a paired phone follows along without a reload.
+
+## Licence
+
+MIT, as declared in `pyproject.toml`. The repository does not yet carry a
+`LICENSE` file; one should be added before public release.
