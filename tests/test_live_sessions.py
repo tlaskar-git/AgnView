@@ -12,9 +12,11 @@ across turns and killing it on shutdown are live checks, not unit tests.
 import asyncio
 import json
 import os
+import sys
 import time
 
 from agent_relay.core.live_sessions import (
+    LIVE_SESSION_STDERR_KEEP_CHARS,
     LiveSession,
     StreamUpdate,
     encode_antigravity_turn,
@@ -26,6 +28,7 @@ from agent_relay.core.live_sessions import (
     parse_codex_stream_line,
 )
 from agent_relay.core.runner import (
+    CLI_STREAM_LINE_LIMIT_BYTES,
     build_antigravity_live_args,
     build_claude_live_args,
     build_live_args_from_adapter,
@@ -469,3 +472,204 @@ def test_describe_identifies_the_session_for_the_sessions_view():
 
 def test_describe_carries_the_console_thread_and_turn_count():
     asyncio.run(_test_describe_carries_the_console_thread_and_turn_count())
+
+
+# --------------------------------------------------------------------------
+# Diagnostics when a live session stops
+#
+# Both cases below used to surface as the same sentence, "the process ended
+# unexpectedly", with the real reason thrown away.
+# --------------------------------------------------------------------------
+
+class _FakeStdout:
+    """An async-iterable stdout that can also raise part way through."""
+
+    def __init__(self, lines, raising=None):
+        self._lines = list(lines)
+        self._raising = raising
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self._lines:
+            return (self._lines.pop(0) + "\n").encode("utf-8")
+        if self._raising is not None:
+            raising, self._raising = self._raising, None
+            raise raising
+        raise StopAsyncIteration
+
+
+class _FakeStderr:
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+
+    async def read(self, _size):
+        if not self._chunks:
+            return b""
+        return self._chunks.pop(0).encode("utf-8")
+
+
+class _ReadableProcess(_FakeProcess):
+    def __init__(self, stdout=None, stderr=None, returncode=None):
+        super().__init__()
+        self.stdout = stdout
+        self.stderr = stderr
+        self.returncode = returncode
+
+    async def wait(self):
+        return self.returncode
+
+
+async def _drive(session):
+    session.start_reader()
+    await asyncio.wait_for(session.reader_task, timeout=5.0)
+    if session.stderr_task is not None:
+        await asyncio.wait_for(session.stderr_task, timeout=5.0)
+
+
+async def _test_a_callback_that_raises_is_reported_not_blamed_on_the_process():
+    lost = []
+
+    async def boom(*args):
+        raise RuntimeError("bubble write failed")
+
+    async def noop(*args):
+        return None
+
+    async def on_lost(session, reason):
+        lost.append(reason)
+
+    line = json.dumps({"type": "stream_event", "event": {
+        "type": "content_block_delta", "delta": {"type": "text_delta", "text": "hi"}}})
+    session = LiveSession(
+        agent="claude_code", cwd="C:/tmp", dialect="claude",
+        process=_ReadableProcess(stdout=_FakeStdout([line]), returncode=0),
+        on_delta=boom, on_complete=noop, on_process_lost=on_lost,
+    )
+    turn = await session.submit("one")
+    await _drive(session)
+
+    # The exception is kept, not swallowed, and the operator is told what threw.
+    assert session.read_failure == "RuntimeError: bubble write failed"
+    assert turn.is_error and turn.done.is_set()
+    assert "RuntimeError: bubble write failed" in turn.failure
+    assert "stopped reading output after an error" in turn.failure
+    assert lost and "RuntimeError: bubble write failed" in lost[0]
+
+
+async def _test_an_overlong_output_line_names_the_real_error():
+    """The exact failure a large tool result caused: readline gives up."""
+    async def noop(*args):
+        return None
+
+    session = LiveSession(
+        agent="claude_code", cwd="C:/tmp", dialect="claude",
+        process=_ReadableProcess(
+            stdout=_FakeStdout([], raising=ValueError("Separator is found, but chunk is longer than limit")),
+            returncode=None,
+        ),
+        on_delta=noop, on_complete=noop, on_process_lost=noop,
+    )
+    turn = await session.submit("one")
+    await _drive(session)
+
+    assert "chunk is longer than limit" in turn.failure
+    # The old wording blamed a process that was still running.
+    assert "ended unexpectedly" not in turn.failure
+
+
+async def _test_stderr_is_drained_and_shown_when_the_session_dies():
+    async def noop(*args):
+        return None
+
+    session = LiveSession(
+        agent="claude_code", cwd="C:/tmp", dialect="claude",
+        process=_ReadableProcess(
+            stdout=_FakeStdout([]),
+            stderr=_FakeStderr(["error: unknown option ", "'--include-partial-messages'\n"]),
+            returncode=2,
+        ),
+        on_delta=noop, on_complete=noop, on_process_lost=noop,
+    )
+    turn = await session.submit("one")
+    await _drive(session)
+
+    assert session.stderr_tail == "error: unknown option '--include-partial-messages'\n"
+    assert "unknown option '--include-partial-messages'" in turn.failure
+    assert "Its stderr said:" in turn.failure
+
+
+async def _test_the_kept_stderr_tail_is_bounded():
+    async def noop(*args):
+        return None
+
+    session = LiveSession(
+        agent="claude_code", cwd="C:/tmp", dialect="claude",
+        process=_ReadableProcess(
+            stdout=_FakeStdout([]),
+            stderr=_FakeStderr(["x" * 5000, "tail marker"]),
+            returncode=1,
+        ),
+        on_delta=noop, on_complete=noop, on_process_lost=noop,
+    )
+    await session.submit("one")
+    await _drive(session)
+
+    assert len(session.stderr_tail) == LIVE_SESSION_STDERR_KEEP_CHARS
+    assert session.stderr_tail.endswith("tail marker")
+
+
+def test_a_callback_that_raises_is_reported_not_blamed_on_the_process():
+    asyncio.run(_test_a_callback_that_raises_is_reported_not_blamed_on_the_process())
+
+
+def test_an_overlong_output_line_names_the_real_error():
+    asyncio.run(_test_an_overlong_output_line_names_the_real_error())
+
+
+def test_stderr_is_drained_and_shown_when_the_session_dies():
+    asyncio.run(_test_stderr_is_drained_and_shown_when_the_session_dies())
+
+
+def test_the_kept_stderr_tail_is_bounded():
+    asyncio.run(_test_the_kept_stderr_tail_is_bounded())
+
+
+async def _test_a_real_process_can_write_a_line_far_over_the_stdlib_limit():
+    """A tool result carrying a file used to kill the session at 64 KiB."""
+    big = "y" * 300_000
+    # The payload is built inside the child, because Windows refuses a command
+    # line this long.
+    script = (
+        "import json, sys;"
+        "sys.stdout.write(json.dumps({'type': 'result', 'subtype': 'success',"
+        " 'session_id': 's1', 'result': 'y' * 300000}) + '\\n');"
+        "sys.stdout.flush()"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", script,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        limit=CLI_STREAM_LINE_LIMIT_BYTES,
+    )
+
+    async def noop(*args):
+        return None
+
+    session = LiveSession(
+        agent="claude_code", cwd="C:/tmp", dialect="claude", process=process,
+        on_delta=noop, on_complete=noop, on_process_lost=noop,
+    )
+    turn = await session.submit("one")
+    await _drive(session)
+
+    assert session.read_failure is None
+    assert turn.text == big
+    assert turn.failure is None
+    await session.close()
+
+
+def test_a_real_process_can_write_a_line_far_over_the_stdlib_limit():
+    asyncio.run(_test_a_real_process_can_write_a_line_far_over_the_stdlib_limit())

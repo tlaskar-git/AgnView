@@ -7,6 +7,7 @@ and broadcasts live chunks via Server-Sent Events (SSE).
 
 import asyncio
 import json
+import logging
 import os
 import sys
 import shutil
@@ -27,6 +28,9 @@ from .live_sessions import (
 )
 
 
+logger = logging.getLogger("agent_relay.runner")
+
+
 def _get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -41,6 +45,12 @@ DISPATCH_TIMEOUT_SECONDS = float(os.environ.get("AGENT_RELAY_DISPATCH_TIMEOUT", 
 # arrives in bursts, and without this the SSE stream carries one event per
 # fragment for no visible gain.
 STREAM_EMIT_INTERVAL_SECONDS = float(os.environ.get("AGENT_RELAY_STREAM_EMIT_INTERVAL", "0.15"))
+
+# Longest single NDJSON line a CLI can write before asyncio gives up on it.
+# The stdlib default is 64 KiB, and one tool result carrying a file easily beats
+# that: readline then raises and the whole session dies. Claude Code caps a file
+# read at 256 KB, so this leaves room for that plus the JSON around it.
+CLI_STREAM_LINE_LIMIT_BYTES = int(os.environ.get("AGENT_RELAY_CLI_LINE_LIMIT", str(16 * 1024 * 1024)))
 
 
 # ---------------------------------------------------------------------------
@@ -819,8 +829,10 @@ class AgentRunner:
                     stderr=asyncio.subprocess.PIPE,
                     cwd=run_cwd or cwd,
                     env=env,
+                    limit=CLI_STREAM_LINE_LIMIT_BYTES,
                 )
             except Exception:
+                logger.exception("Could not start a live %s process in %s", agent, run_cwd or cwd)
                 return None
 
             session = LiveSession(
@@ -905,7 +917,8 @@ class AgentRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=run_cwd or cwd,
-                env=env
+                env=env,
+                limit=CLI_STREAM_LINE_LIMIT_BYTES,
             )
             if process.stdin:
                 process.stdin.close()

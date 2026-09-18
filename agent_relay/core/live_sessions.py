@@ -41,10 +41,19 @@ keeps one process per dispatch and only gains incremental output here.
 
 import asyncio
 import json
+import logging
 import os
 import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
+
+
+logger = logging.getLogger("agent_relay.live_sessions")
+
+# How much of the CLI's stderr is kept for the failure message. Enough to carry
+# a stack trace or a usage error, small enough that a chatty CLI cannot grow the
+# session without bound.
+LIVE_SESSION_STDERR_KEEP_CHARS = 4000
 
 
 # A live CLI process with no traffic for this long is closed and dropped from
@@ -321,6 +330,13 @@ class LiveSession:
         self.cli_session_id: Optional[str] = None
         self.closed = False
         self.reader_task: Optional[asyncio.Task] = None
+        self.stderr_task: Optional[asyncio.Task] = None
+
+        # Diagnostics. Without these two, a crash inside the read loop and a CLI
+        # that explains itself on stderr both surface as the same useless
+        # "process ended unexpectedly" line.
+        self.read_failure: Optional[str] = None
+        self.stderr_tail: str = ""
 
         # Everything below exists so the Sessions view can identify this
         # process without reaching into the runner. started_at is wall clock
@@ -343,6 +359,8 @@ class LiveSession:
 
     def start_reader(self) -> None:
         self.reader_task = asyncio.ensure_future(self._read_loop())
+        if getattr(self.process, "stderr", None) is not None:
+            self.stderr_task = asyncio.ensure_future(self._drain_stderr())
 
     def describe(self, now: Optional[float] = None) -> dict:
         """Describe this process for the Sessions view.
@@ -406,9 +424,37 @@ class LiveSession:
                 await self._handle_line(line)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            # Anything thrown here used to be dropped, and the EOF handler then
+            # blamed the CLI for dying. Keep the traceback and say what really
+            # happened.
+            self.read_failure = f"{type(exc).__name__}: {exc}"
+            logger.exception(
+                "Live %s session reader failed in %s: %s",
+                self.agent, self.cwd, self.read_failure,
+            )
         await self._handle_eof()
+
+    async def _drain_stderr(self) -> None:
+        """Read the CLI's stderr so it cannot fill its pipe buffer and stall.
+
+        The tail is kept for the failure message, because a live session that
+        dies usually said why on stderr.
+        """
+        try:
+            while True:
+                chunk = await self.process.stderr.read(4096)
+                if not chunk:
+                    break
+                text = chunk.decode("utf-8", errors="replace")
+                self.stderr_tail = (self.stderr_tail + text)[-LIVE_SESSION_STDERR_KEEP_CHARS:]
+                logger.debug("Live %s session stderr in %s: %s", self.agent, self.cwd, text.strip())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "Live %s session stderr drain failed in %s: %s", self.agent, self.cwd, exc,
+            )
 
     async def _handle_line(self, line: str) -> None:
         update = self._parse(line)
@@ -463,7 +509,16 @@ class LiveSession:
         except Exception:
             code = None
 
-        reason = f"The live {self.agent} process ended unexpectedly (exit code {code})."
+        # stdout and stderr end independently, so give the stderr drain a moment
+        # to land. Without this the failure message can be written before the
+        # CLI's own explanation has been read.
+        if self.stderr_task is not None and not self.stderr_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(self.stderr_task), timeout=2.0)
+            except Exception:
+                pass
+
+        reason = self._failure_reason(code)
         open_turn = self.current
         self.current = None
         if open_turn is not None:
@@ -472,6 +527,20 @@ class LiveSession:
             open_turn.done.set()
         await self._fail_pending(reason)
         await self._on_process_lost(self, reason)
+
+    def _failure_reason(self, code) -> str:
+        """Say why the live session stopped, with the evidence we have."""
+        if self.read_failure:
+            reason = (
+                f"The live {self.agent} session stopped reading output after an error "
+                f"({self.read_failure}). The process itself reported exit code {code}."
+            )
+        else:
+            reason = f"The live {self.agent} process ended unexpectedly (exit code {code})."
+        tail = self.stderr_tail.strip()
+        if tail:
+            reason += f" Its stderr said: {tail}"
+        return reason
 
     async def _fail_pending(self, reason: str) -> None:
         pending, self.queue = self.queue, []
@@ -495,8 +564,9 @@ class LiveSession:
                 self.current.done.set()
                 self.current = None
 
-        if self.reader_task is not None:
-            self.reader_task.cancel()
+        for task in (self.reader_task, self.stderr_task):
+            if task is not None:
+                task.cancel()
 
         try:
             if self.process.stdin is not None and not self.process.stdin.is_closing():
