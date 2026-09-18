@@ -17,19 +17,20 @@ def client(tmp_path):
     return TestClient(app)
 
 
-def test_deepseek_usage_fetcher_synthetic_and_live():
-    # 1. Test synthetic demo credential
+def test_deepseek_usage_fetcher_reports_only_the_balance_it_reads():
+    # 1. An account with no key has nothing to read. It used to answer with an
+    #    invented $45.40 balance and an 18.4% meter.
     acc_demo = UsageAccount(
         provider="deepseek",
         name="DeepSeek Demo",
         plan_name="DeepSeek V3",
         auth_type="api_key",
-        auth_credential="sk-deepseek-sample-key",
+        auth_credential="",
     )
     res_demo = fetch_account_usage(acc_demo)
-    assert res_demo.status == "active"
-    assert res_demo.cost_limit_usd == 50.00
-    assert "Balance: $45.40 USD remaining" in res_demo.reset_time
+    assert res_demo.status == "unavailable"
+    assert res_demo.cost_used_usd is None
+    assert res_demo.percent_used is None
 
     # 2. Test live API probe parsing with mocked responses
     acc_live = UsageAccount(

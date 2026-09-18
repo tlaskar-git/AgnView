@@ -1,6 +1,10 @@
-"""Live Usage & Quota Fetcher for Claude, ChatGPT, and Google Gemini.
+"""Live usage for Claude Code, Codex, Gemini, DeepSeek and custom harnesses.
 
-Pulls live quota, rate-limit headers, and subscription metrics directly from provider APIs.
+Every number here comes from a real source: a file the tool itself wrote, or a
+response from the provider. When there is no source to read, the account is
+marked unavailable with the reason, and the dashboard says so. Nothing in this
+module invents a figure, and nothing carries a placeholder forward as if it had
+been measured.
 """
 
 import json
@@ -8,11 +12,35 @@ from pathlib import Path
 import httpx
 from datetime import datetime, timezone
 
+from .claude_code_usage import (
+    SESSION_WINDOW_HOURS,
+    WEEK_WINDOW_DAYS,
+    read_usage as read_claude_code_usage,
+)
 from .models import UsageAccount
 
 
 def _get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _mark_unavailable(account: UsageAccount, reason: str) -> UsageAccount:
+    """Say plainly that nothing could be measured, rather than showing a zero."""
+    account.status = "unavailable"
+    account.error_message = reason
+    account.session_percent_used = None
+    account.session_percent_left = None
+    account.weekly_percent_used = None
+    account.weekly_percent_left = None
+    account.percent_used = None
+    account.tokens_used = None
+    account.tokens_limit = None
+    account.tokens_remaining = None
+    account.requests_used = None
+    account.requests_limit = None
+    account.requests_remaining = None
+    account.last_checked = _get_utc_now_iso()
+    return account
 
 
 def fetch_account_usage(account: UsageAccount) -> UsageAccount:
@@ -38,149 +66,224 @@ def fetch_account_usage(account: UsageAccount) -> UsageAccount:
         return account
 
 
+def _format_tokens(count: int) -> str:
+    """Render a token count the way a person reads it."""
+    if count >= 1_000_000_000:
+        return f"{count / 1_000_000_000:.1f}B"
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}K"
+    return str(count)
+
+
+def _read_claude_plan(account: UsageAccount) -> bool:
+    """Name the plan from the Claude Code profile on disk. True when it is read.
+
+    ~/.claude.json is written by Claude Code itself, so organizationType and
+    organizationRateLimitTier are the real plan of the signed-in account. It
+    carries no quota figures, which is why nothing else is taken from it.
+    """
+    profile = Path.home() / ".claude.json"
+    if not profile.exists():
+        return False
+    try:
+        data = json.loads(profile.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+
+    oauth = data.get("oauthAccount") or {}
+    org_type = (oauth.get("organizationType") or "").strip()
+    rate_tier = (oauth.get("organizationRateLimitTier") or "").strip()
+    if not org_type and not rate_tier:
+        return False
+
+    if org_type:
+        account.plan_name = org_type.replace("_", " ").title()
+    if rate_tier:
+        # "default_claude_max_20x" is the tier as Anthropic writes it.
+        label = rate_tier.removeprefix("default_").replace("claude_", "")
+        # Title case each word except the ones carrying a number, so a tier
+        # like 20x stays 20x rather than becoming 20X.
+        account.plan_label = " ".join(
+            word if any(ch.isdigit() for ch in word) else word.title()
+            for word in label.split("_")
+        )
+    return True
+
+
 def _fetch_claude_live(account: UsageAccount) -> UsageAccount:
-    """Pull live quota & rate-limit state from Anthropic / Claude.ai."""
+    """Report Claude Code usage measured from the transcripts on this machine.
+
+    Anthropic publishes no local file and no endpoint that says how much of a
+    subscription window is spent, so no percentage is reported for a Claude
+    Code account. What can be counted exactly is the tokens Claude Code has
+    recorded, and that is what the dashboard shows.
+    """
     cred = (account.credential or "").strip()
     now = _get_utc_now_iso()
 
-    # Default plan and limit telemetry matching Claude.ai settings/usage screenshot
-    account.plan_name = account.plan_name or "Claude Max"
-    account.plan_label = "Max (20x)"
-    account.session_title = "Current session"
-    account.session_reset_time = account.session_reset_time or "Resets in 1 hr 34 min"
-    account.session_percent_used = account.session_percent_used if account.session_percent_used is not None else 4.0
-    account.session_percent_left = round(100.0 - (account.session_percent_used or 0.0), 1)
-
-    account.weekly_title = "Weekly limits"
-    account.weekly_reset_time = account.weekly_reset_time or "Resets Sat 7:00 PM"
-    account.weekly_percent_used = account.weekly_percent_used if account.weekly_percent_used is not None else 0.0
-    account.weekly_percent_left = round(100.0 - (account.weekly_percent_used or 0.0), 1)
-    if not account.weekly_breakdown:
-        account.weekly_breakdown = [
-            {"label": "All models", "percent_used": 0.0, "reset_time": "Resets Sat 7:00 PM"},
-            {"label": "Fable", "percent_used": 0.0, "reset_time": "Resets Sat 7:00 PM"}
-        ]
-
-    # Handle local Claude Code CLI OAuth profile
-    claude_cfg = Path.home() / ".claude.json"
-    if (account.auth_type == "cli" or cred.startswith("claude-cli") or cred.startswith("claude-oauth") or (not cred and claude_cfg.exists())):
-        if claude_cfg.exists():
-            try:
-                cj = json.loads(claude_cfg.read_text(encoding="utf-8"))
-                oa = cj.get("oauthAccount") or {}
-                org_type = oa.get("organizationType", "claude_max").replace("_", " ").title()
-                rate_tier = oa.get("organizationRateLimitTier") or "20x Tier"
-                account.plan_name = f"{org_type}"
-                account.plan_label = "Max (20x)" if "20x" in rate_tier or "max" in org_type.lower() else "Pro"
-                account.status = "active"
-                default_tok_limit = 20000000 if "20x" in rate_tier or "max" in org_type.lower() else 2000000
-                tok_limit = account.tokens_limit or default_tok_limit
-                account.tokens_limit = tok_limit
-                account.tokens_used = int(tok_limit * ((account.session_percent_used or 4.0) / 100.0))
-                account.tokens_remaining = max(0, tok_limit - account.tokens_used)
-                account.requests_limit = 5000
-                account.requests_used = int(5000 * ((account.session_percent_used or 4.0) / 100.0))
-                account.requests_remaining = max(0, 5000 - account.requests_used)
-                account.percent_used = account.session_percent_used
-                account.reset_time = account.session_reset_time
-                account.error_message = None
-                account.last_checked = now
-                return account
-            except Exception:
-                pass
-
-    # Handle test / mock credentials for testing or preview
-    if cred.startswith("mock-") or any(k in cred.lower() for k in ("test", "demo", "sample", "dummy")):
-        tok_limit = account.tokens_limit or 10000000
-        account.tokens_limit = tok_limit
-        account.tokens_used = int(tok_limit * 0.04)
-        account.tokens_remaining = max(0, tok_limit - account.tokens_used)
-        account.percent_used = account.session_percent_used
-        account.reset_time = account.session_reset_time
-        account.status = "active"
-        account.error_message = None
-        account.last_checked = now
-        return account
-
-    # Live HTTP probe to Anthropic API if sk-ant key provided
     if cred.startswith("sk-ant-"):
-        headers = {
-            "x-api-key": cred,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json"
-        }
-        try:
-            with httpx.Client(timeout=10.0) as client:
-                res = client.get("https://api.anthropic.com/v1/models", headers=headers)
-                if res.status_code in (200, 400):
-                    h = res.headers
-                    req_limit = int(h.get("anthropic-ratelimit-requests-limit", 1000))
-                    req_rem = int(h.get("anthropic-ratelimit-requests-remaining", req_limit))
-                    tok_limit = int(h.get("anthropic-ratelimit-tokens-limit", 1000000))
-                    tok_rem = int(h.get("anthropic-ratelimit-tokens-remaining", tok_limit))
-                    reset_val = h.get("anthropic-ratelimit-tokens-reset") or h.get("anthropic-ratelimit-requests-reset")
+        return _fetch_anthropic_api_key(account, cred)
 
-                    account.requests_limit = req_limit
-                    account.requests_remaining = req_rem
-                    account.requests_used = max(0, req_limit - req_rem)
-                    account.tokens_limit = tok_limit
-                    account.tokens_remaining = tok_rem
-                    account.tokens_used = max(0, tok_limit - tok_rem)
+    plan_read = _read_claude_plan(account)
+    usage = read_claude_code_usage()
+    if usage is None:
+        if not plan_read:
+            return _mark_unavailable(
+                account,
+                "No Claude Code data on this machine. Sign in to Claude Code, or "
+                "add an Anthropic API key to this account.",
+            )
+        return _mark_unavailable(
+            account,
+            f"Claude Code is signed in but has written no transcripts under "
+            f"{Path.home() / '.claude' / 'projects'}, so there is nothing to count yet.",
+        )
 
-                    if tok_limit > 0 and account.tokens_used > 0:
-                        account.session_percent_used = round(account.tokens_used / tok_limit * 100.0, 1)
-                        account.session_percent_left = round(100.0 - account.session_percent_used, 1)
-                    if reset_val:
-                        account.session_reset_time = f"Resets at {reset_val}"
+    account.session_title = f"Last {SESSION_WINDOW_HOURS} hours"
+    account.session_reset_time = (
+        f"{_format_tokens(usage.session_tokens)} tokens over {usage.session_turns} turns"
+    )
+    account.session_tokens_used = usage.session_tokens
+    account.weekly_title = f"Last {WEEK_WINDOW_DAYS} days"
+    account.weekly_reset_time = (
+        f"{_format_tokens(usage.week_tokens)} tokens over {usage.week_turns} turns"
+    )
+    account.weekly_tokens_used = usage.week_tokens
 
-                    account.percent_used = account.session_percent_used
-                    account.reset_time = account.session_reset_time
-                    account.status = "active"
-                    account.error_message = None
-                elif res.status_code == 401:
-                    account.status = "error"
-                    account.error_message = "Invalid Anthropic API Key or Session Key."
-        except Exception as e:
-            account.status = "error"
-            account.error_message = str(e)
-
-    account.percent_used = account.session_percent_used or 4.0
-    account.reset_time = account.session_reset_time or "Resets in 1 hr 34 min"
+    # Counted, not estimated. The share of the plan limit stays unknown, so
+    # every percentage field stays empty and the dashboard renders no bar.
+    account.tokens_used = usage.session_tokens
+    account.tokens_limit = None
+    account.tokens_remaining = None
+    account.session_percent_used = None
+    account.session_percent_left = None
+    account.weekly_percent_used = None
+    account.weekly_percent_left = None
+    account.percent_used = None
+    account.weekly_breakdown = None
+    account.reset_time = account.session_reset_time
+    account.status = "active"
+    account.error_message = None
     account.last_checked = now
     return account
 
 
+def _fetch_anthropic_api_key(account: UsageAccount, cred: str) -> UsageAccount:
+    """Read the per-minute rate limit an Anthropic API key is subject to.
+
+    This is a rate limit, not a subscription window, and it is labelled as one.
+    """
+    headers = {
+        "x-api-key": cred,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    try:
+        with httpx.Client(timeout=10.0) as client:
+            res = client.get("https://api.anthropic.com/v1/models", headers=headers)
+    except Exception as e:
+        return _mark_unavailable(account, f"Could not reach the Anthropic API: {e}")
+
+    if res.status_code == 401:
+        account.status = "error"
+        account.error_message = "Invalid Anthropic API key."
+        account.last_checked = _get_utc_now_iso()
+        return account
+    if res.status_code not in (200, 400):
+        return _mark_unavailable(
+            account, f"The Anthropic API returned status {res.status_code}."
+        )
+
+    headers_back = res.headers
+    req_limit = _header_int(headers_back, "anthropic-ratelimit-requests-limit")
+    req_rem = _header_int(headers_back, "anthropic-ratelimit-requests-remaining")
+    tok_limit = _header_int(headers_back, "anthropic-ratelimit-tokens-limit")
+    tok_rem = _header_int(headers_back, "anthropic-ratelimit-tokens-remaining")
+    reset_val = headers_back.get("anthropic-ratelimit-tokens-reset") or headers_back.get(
+        "anthropic-ratelimit-requests-reset"
+    )
+
+    if tok_limit is None and req_limit is None:
+        return _mark_unavailable(
+            account,
+            "The Anthropic API key is valid but returned no rate-limit headers, "
+            "so there is no usage figure to show.",
+        )
+
+    account.plan_name = account.plan_name or "Anthropic API"
+    account.plan_label = "API key"
+    account.session_title = "API rate limit"
+    account.requests_limit = req_limit
+    account.requests_remaining = req_rem
+    account.requests_used = (
+        max(0, req_limit - req_rem) if req_limit is not None and req_rem is not None else None
+    )
+    account.tokens_limit = tok_limit
+    account.tokens_remaining = tok_rem
+    account.tokens_used = (
+        max(0, tok_limit - tok_rem) if tok_limit is not None and tok_rem is not None else None
+    )
+
+    if tok_limit and account.tokens_used is not None:
+        account.session_percent_used = round(account.tokens_used / tok_limit * 100.0, 1)
+        account.session_percent_left = round(100.0 - account.session_percent_used, 1)
+        account.percent_used = account.session_percent_used
+    account.session_reset_time = f"Resets at {reset_val}" if reset_val else None
+    account.reset_time = account.session_reset_time
+    account.weekly_title = None
+    account.weekly_reset_time = None
+    account.weekly_percent_used = None
+    account.weekly_percent_left = None
+    account.status = "active"
+    account.error_message = None
+    account.last_checked = _get_utc_now_iso()
+    return account
+
+
+def _header_int(headers, name: str):
+    raw = headers.get(name)
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value):
+    """Return a float only when the provider actually sent a number."""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _countdown(seconds, as_days: bool):
+    """Render a reset countdown, or nothing when the provider did not send one."""
+    if seconds is None:
+        return None
+    try:
+        total = int(seconds)
+    except (TypeError, ValueError):
+        return None
+    if total < 0:
+        return None
+    if as_days:
+        return f"Resets in {total // 86400}d {(total % 86400) // 3600}h"
+    return f"Resets in {total // 3600}h {(total % 3600) // 60}m"
+
+
 def _fetch_chatgpt_live(account: UsageAccount) -> UsageAccount:
-    """Pull live billing, spend, and rate limits from OpenAI / ChatGPT."""
+    """Report the Codex usage windows ChatGPT publishes for this sign-in."""
     cred = (account.credential or "").strip()
     now = _get_utc_now_iso()
 
-    account.plan_name = account.plan_name or "ChatGPT Plus"
-    account.plan_label = "Plus (Codex & Agents)"
     account.session_title = "5-hour limit"
-    account.session_reset_time = account.session_reset_time or "Resets in 5h 0m"
-    account.session_percent_used = account.session_percent_used if account.session_percent_used is not None else 0.0
-    account.session_percent_left = round(100.0 - (account.session_percent_used or 0.0), 1)
-
     account.weekly_title = "Weekly limit"
-    account.weekly_reset_time = account.weekly_reset_time or "Resets in 7d 0h"
-    account.weekly_percent_used = account.weekly_percent_used if account.weekly_percent_used is not None else 0.0
-    account.weekly_percent_left = round(100.0 - (account.weekly_percent_used or 0.0), 1)
-
-    # Handle test / mock credentials
-    if cred.startswith("mock-") or any(k in cred.lower() for k in ("test", "demo", "sample", "dummy")):
-        tok_limit = account.tokens_limit or 10000000
-        account.tokens_limit = tok_limit
-        account.tokens_used = int(tok_limit * 0.04)
-        account.tokens_remaining = max(0, tok_limit - account.tokens_used)
-        if account.cost_limit_usd is not None and account.cost_used_usd is None:
-            account.cost_used_usd = round(account.cost_limit_usd * 0.04, 2)
-        account.percent_used = account.session_percent_used
-        account.reset_time = account.session_reset_time
-        account.status = "active"
-        account.error_message = None
-        account.last_checked = now
-        return account
 
     # 1. Probe live ChatGPT wham usage endpoint via local Codex auth token or credential JWT
     codex_auth = Path.home() / ".codex" / "auth.json"
@@ -208,285 +311,267 @@ def _fetch_chatgpt_live(account: UsageAccount) -> UsageAccount:
         try:
             with httpx.Client(timeout=8.0) as client:
                 res = client.get("https://chatgpt.com/backend-api/wham/usage", headers=wham_headers)
-                if res.status_code == 200:
-                    data = res.json()
-                    plan_type = data.get("plan_type", "plus").title()
-                    account.plan_name = f"ChatGPT {plan_type}"
-                    account.plan_label = f"{plan_type} (Codex & Agents)"
+        except Exception as e:
+            return _mark_unavailable(account, f"Could not reach the ChatGPT usage API: {e}")
 
-                    rl = data.get("rate_limit") or {}
-                    pw = rl.get("primary_window") or {}
-                    sw = rl.get("secondary_window") or {}
+        if res.status_code in (401, 403):
+            return _mark_unavailable(
+                account,
+                "ChatGPT refused the Codex sign-in on this machine. Sign in to "
+                "Codex again to refresh it.",
+            )
+        if res.status_code != 200:
+            return _mark_unavailable(
+                account, f"The ChatGPT usage API returned status {res.status_code}."
+            )
 
-                    # Primary window: 5-hour limit
-                    p_used = float(pw.get("used_percent", 0.0))
-                    account.session_percent_used = p_used
-                    account.session_percent_left = round(100.0 - p_used, 1)
-                    p_reset_sec = int(pw.get("reset_after_seconds", 18000))
-                    p_hours = p_reset_sec // 3600
-                    p_mins = (p_reset_sec % 3600) // 60
-                    account.session_reset_time = f"Resets in {p_hours}h {p_mins}m"
+        try:
+            data = res.json()
+        except ValueError:
+            return _mark_unavailable(account, "The ChatGPT usage API returned no usage data.")
 
-                    # Secondary window: Weekly limit
-                    s_used = float(sw.get("used_percent", 0.0))
-                    account.weekly_percent_used = s_used
-                    account.weekly_percent_left = round(100.0 - s_used, 1)
-                    s_reset_sec = int(sw.get("reset_after_seconds", 604800))
-                    s_days = s_reset_sec // 86400
-                    s_rem_hours = (s_reset_sec % 86400) // 3600
-                    account.weekly_reset_time = f"Resets in {s_days}d {s_rem_hours}h"
+        plan_type = (data.get("plan_type") or "").strip()
+        if plan_type:
+            account.plan_name = f"ChatGPT {plan_type.title()}"
+            account.plan_label = plan_type.title()
 
-                    account.percent_used = account.session_percent_used
-                    account.reset_time = account.session_reset_time
-                    account.tokens_limit = 10000000
-                    account.tokens_used = int(account.tokens_limit * (p_used / 100.0))
-                    account.tokens_remaining = account.tokens_limit - account.tokens_used
-                    account.status = "active"
-                    account.error_message = None
-                    account.last_checked = now
-                    return account
-        except Exception:
-            pass
+        rl = data.get("rate_limit") or {}
+        pw = rl.get("primary_window") or {}
+        sw = rl.get("secondary_window") or {}
+        if not pw and not sw:
+            return _mark_unavailable(
+                account, "ChatGPT reported no rate-limit windows for this account."
+            )
 
-    # 2. If API key (sk-...)
-    if cred.startswith("sk-") and not cred.startswith("sk-mock") and not cred.startswith("sk-ant-"):
+        # Primary window: the 5-hour limit, as ChatGPT reports it.
+        p_used = _as_float(pw.get("used_percent"))
+        if p_used is not None:
+            account.session_percent_used = round(p_used, 1)
+            account.session_percent_left = round(100.0 - p_used, 1)
+        account.session_reset_time = _countdown(pw.get("reset_after_seconds"), as_days=False)
+
+        # Secondary window: the weekly limit.
+        s_used = _as_float(sw.get("used_percent"))
+        if s_used is not None:
+            account.weekly_percent_used = round(s_used, 1)
+            account.weekly_percent_left = round(100.0 - s_used, 1)
+        account.weekly_reset_time = _countdown(sw.get("reset_after_seconds"), as_days=True)
+
+        account.percent_used = account.session_percent_used
+        account.reset_time = account.session_reset_time
+        # ChatGPT reports a share of each window and no token count, so the
+        # token fields stay empty rather than being back-derived from a percent.
+        account.tokens_used = None
+        account.tokens_limit = None
+        account.tokens_remaining = None
+        account.status = "active"
+        account.error_message = None
+        account.last_checked = now
+        return account
+
+    # 2. An OpenAI API key reports a per-minute rate limit, not a plan window.
+    if cred.startswith("sk-") and not cred.startswith("sk-ant-"):
         headers = {"Authorization": f"Bearer {cred}"}
         try:
             with httpx.Client(timeout=10.0) as client:
                 res = client.get("https://api.openai.com/v1/models", headers=headers)
-                if res.status_code == 200:
-                    h = res.headers
-                    req_rem = int(h.get("x-ratelimit-remaining-requests", 3000))
-                    req_limit = int(h.get("x-ratelimit-limit-requests", 3000))
-                    tok_rem = int(h.get("x-ratelimit-remaining-tokens", 1000000))
-                    tok_limit = int(h.get("x-ratelimit-limit-tokens", 1000000))
-                    reset_tok = h.get("x-ratelimit-reset-tokens", "Daily")
-
-                    account.requests_limit = req_limit
-                    account.requests_remaining = req_rem
-                    account.requests_used = max(0, req_limit - req_rem)
-                    account.tokens_limit = tok_limit
-                    account.tokens_remaining = tok_rem
-                    account.tokens_used = max(0, tok_limit - tok_rem)
-                    pct = (account.tokens_used / tok_limit * 100.0) if tok_limit > 0 else 0.0
-                    account.session_percent_used = round(pct, 1)
-                    account.session_percent_left = round(100.0 - pct, 1)
-                    account.session_reset_time = f"Resets in {reset_tok}"
-                    account.status = "active"
-                    account.error_message = None
-                elif res.status_code == 401:
-                    account.status = "error"
-                    account.error_message = "Invalid OpenAI API Key or token."
         except Exception as e:
+            return _mark_unavailable(account, f"Could not reach the OpenAI API: {e}")
+
+        if res.status_code == 401:
             account.status = "error"
-            account.error_message = str(e)
+            account.error_message = "Invalid OpenAI API key."
+            account.last_checked = now
+            return account
+        if res.status_code != 200:
+            return _mark_unavailable(
+                account, f"The OpenAI API returned status {res.status_code}."
+            )
 
-    account.percent_used = account.session_percent_used
-    account.reset_time = account.session_reset_time
-    account.last_checked = now
-    return account
+        h = res.headers
+        req_limit = _header_int(h, "x-ratelimit-limit-requests")
+        req_rem = _header_int(h, "x-ratelimit-remaining-requests")
+        tok_limit = _header_int(h, "x-ratelimit-limit-tokens")
+        tok_rem = _header_int(h, "x-ratelimit-remaining-tokens")
+        if tok_limit is None and req_limit is None:
+            return _mark_unavailable(
+                account,
+                "The OpenAI API key is valid but returned no rate-limit headers, "
+                "so there is no usage figure to show.",
+            )
 
-
-def _fetch_gemini_live(account: UsageAccount) -> UsageAccount:
-    """Pull live quota & status from Google Gemini API (gemini.google.com / AI Studio)."""
-    cred = (account.credential or "").strip()
-    now = _get_utc_now_iso()
-
-    # Telemetry matching Google Antigravity / Gemini Desktop IDE usage flyout
-    account.plan_name = account.plan_name or "Gemini Advanced"
-    account.plan_label = "PRO"
-    account.session_title = "Five Hour Limit Remaining"
-    account.session_reset_time = "You have used some of your 5-hour limit"
-    if account.session_percent_left is None or account.session_percent_left == 100.0 or not cred or cred.startswith("gemini-") or cred.startswith("mock-") or cred.startswith("ya29."):
-        account.session_percent_left = 9.0
-    account.session_percent_used = round(100.0 - (account.session_percent_left or 0.0), 1)
-
-    account.weekly_title = "Weekly Limit Remaining"
-    account.weekly_reset_time = "You have used some of your weekly limit"
-    if account.weekly_percent_left is None or account.weekly_percent_left == 97.0 or not cred or cred.startswith("gemini-") or cred.startswith("mock-") or cred.startswith("ya29."):
-        account.weekly_percent_left = 52.0
-    account.weekly_percent_used = round(100.0 - (account.weekly_percent_left or 0.0), 1)
-
-    account.weekly_breakdown = [
-        {
-            "group": "Gemini Models",
-            "label": "Gemini Models",
-            "weekly_title": "Weekly Limit Remaining",
-            "weekly_percent_left": float(account.weekly_percent_left or 52.0),
-            "weekly_percent_used": float(account.weekly_percent_used or 48.0),
-            "weekly_sub": "You have used some of your weekly limit",
-            "session_title": "Five Hour Limit Remaining",
-            "session_percent_left": float(account.session_percent_left or 9.0),
-            "session_percent_used": float(account.session_percent_used or 91.0),
-            "session_sub": "You have used some of your 5-hour limit",
-            "models": "Gemini 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.1 Pro",
-        },
-        {
-            "group": "Claude and GPT models",
-            "label": "Claude and GPT models",
-            "weekly_title": "Weekly Limit Remaining",
-            "weekly_percent_left": 100.0,
-            "weekly_percent_used": 0.0,
-            "weekly_sub": "Full weekly limit available",
-            "session_title": "Five Hour Limit Remaining",
-            "session_percent_left": 100.0,
-            "session_percent_used": 0.0,
-            "session_sub": "Full 5-hour limit available",
-            "models": "Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B",
-        }
-    ]
-
-    # Handle local OAuth credentials or web token
-    if cred.startswith("ya29.") or "1PSID" in cred or cred.startswith("gemini-") or not cred or cred.startswith("mock-"):
-        acc_file = Path.home() / ".gemini" / "google_accounts.json"
-        display_user = "User"
-        if acc_file.exists():
-            try:
-                display_user = json.loads(acc_file.read_text(encoding="utf-8")).get("active", "User").split("@")[0]
-            except Exception:
-                pass
-        account.name = account.name or f"Gemini Pro ({display_user})"
-        account.plan_name = "Gemini Advanced"
-        account.plan_label = "PRO"
-        account.status = "active"
+        account.session_title = "API rate limit"
+        account.weekly_title = None
+        account.weekly_reset_time = None
+        account.requests_limit = req_limit
+        account.requests_remaining = req_rem
+        account.requests_used = (
+            max(0, req_limit - req_rem) if req_limit is not None and req_rem is not None else None
+        )
+        account.tokens_limit = tok_limit
+        account.tokens_remaining = tok_rem
+        account.tokens_used = (
+            max(0, tok_limit - tok_rem) if tok_limit is not None and tok_rem is not None else None
+        )
+        if tok_limit and account.tokens_used is not None:
+            account.session_percent_used = round(account.tokens_used / tok_limit * 100.0, 1)
+            account.session_percent_left = round(100.0 - account.session_percent_used, 1)
+        reset_tok = h.get("x-ratelimit-reset-tokens")
+        account.session_reset_time = f"Resets in {reset_tok}" if reset_tok else None
         account.percent_used = account.session_percent_used
         account.reset_time = account.session_reset_time
-        account.tokens_limit = 2000000
-        account.tokens_used = int(account.tokens_limit * ((account.session_percent_used or 0.0) / 100.0))
-        account.tokens_remaining = account.tokens_limit - account.tokens_used
+        account.status = "active"
         account.error_message = None
         account.last_checked = now
         return account
 
-    # If standard AI Studio API Key (starts with AIza)
-    if cred.startswith("AIza") and not cred.startswith("AIza-mock"):
+    return _mark_unavailable(
+        account,
+        "No Codex sign-in was found at ~/.codex/auth.json and this account "
+        "carries no OpenAI API key, so there is nothing to read usage from.",
+    )
+
+
+def _fetch_gemini_live(account: UsageAccount) -> UsageAccount:
+    """Report Gemini and AntiGravity usage, when there is any to report.
+
+    Neither Gemini nor AntiGravity writes a quota file on this machine, and
+    neither publishes an endpoint that says how much of a window is spent. An
+    AI Studio API key can be checked for validity and nothing more. So the only
+    honest answer for a signed-in Gemini or AntiGravity account is that usage is
+    unavailable, with the reason attached.
+    """
+    cred = (account.credential or "").strip()
+
+    if cred.startswith("AIza"):
         try:
             with httpx.Client(timeout=10.0) as client:
-                url = f"https://generativelanguage.googleapis.com/v1beta/models?key={cred}"
-                res = client.get(url)
-                if res.status_code == 200:
-                    account.status = "active"
-                    account.plan_name = "Gemini AI Studio / Advanced"
-                    account.plan_label = "PRO"
-                    account.error_message = None
-                elif res.status_code in (400, 403):
-                    account.status = "error"
-                    account.error_message = "Invalid Google Gemini API Key."
+                res = client.get(
+                    "https://generativelanguage.googleapis.com/v1beta/models",
+                    params={"key": cred},
+                )
         except Exception as e:
-            account.status = "error"
-            account.error_message = str(e)
+            return _mark_unavailable(account, f"Could not reach the Gemini API: {e}")
 
-    account.percent_used = account.session_percent_used
-    account.reset_time = account.session_reset_time
-    account.last_checked = now
-    return account
+        if res.status_code in (400, 403):
+            account.status = "error"
+            account.error_message = "Invalid Google Gemini API key."
+            account.last_checked = _get_utc_now_iso()
+            return account
+        if res.status_code != 200:
+            return _mark_unavailable(
+                account, f"The Gemini API returned status {res.status_code}."
+            )
+
+        account.plan_name = "Gemini AI Studio"
+        account.plan_label = "API key"
+        # The models endpoint confirms the key works. Google publishes no quota
+        # figure with it, so there is no usage number to show.
+        return _mark_unavailable(
+            account,
+            "The Gemini API key is valid. Google publishes no quota figure for "
+            "it, so there is no usage to show.",
+        )
+
+    account_file = Path.home() / ".gemini" / "google_accounts.json"
+    if account_file.exists():
+        try:
+            active = json.loads(account_file.read_text(encoding="utf-8")).get("active")
+        except Exception:
+            active = None
+        if active:
+            account.plan_name = "Gemini"
+            return _mark_unavailable(
+                account,
+                f"Signed in as {active}. Neither Gemini nor AntiGravity reports "
+                "usage on this machine, so there is no figure to show.",
+            )
+
+    return _mark_unavailable(
+        account,
+        "No Gemini or AntiGravity sign-in was found on this machine, and neither "
+        "tool reports usage locally.",
+    )
 
 
 def _fetch_deepseek_live(account: UsageAccount) -> UsageAccount:
-    """Pull live quota, balance, and status from DeepSeek (chat.deepseek.com / platform.deepseek.com)."""
+    """Report the DeepSeek balance the account API returns, and nothing else."""
     cred = (account.credential or "").strip()
     now = _get_utc_now_iso()
     base_url = (account.base_url or "https://api.deepseek.com").rstrip("/")
 
-    account.plan_name = account.plan_name or "DeepSeek V3 / R1"
-    account.plan_label = "V3 / R1 Pay-As-You-Go"
-    account.session_title = "Daily Usage"
-    account.session_reset_time = "Prepaid Balance: $45.40 USD remaining"
-    account.session_percent_used = 18.4
-    account.session_percent_left = 81.6
-    account.weekly_title = "Weekly Usage"
-    account.weekly_reset_time = "Monthly rolling window"
-    account.weekly_percent_used = 9.2
-    account.weekly_percent_left = 90.8
+    account.plan_name = account.plan_name or "DeepSeek"
+    account.plan_label = "Pay as you go"
+    account.session_title = "Balance"
+    account.weekly_title = None
+    account.weekly_reset_time = None
 
-    # Handle test / mock credentials
-    if cred.startswith("mock-") or cred.startswith("sk-mock") or any(k in cred.lower() for k in ("test", "demo", "sample", "dummy")):
-        tok_limit = account.tokens_limit or 10000000
-        account.tokens_limit = tok_limit
-        account.tokens_used = 1840000
-        account.tokens_remaining = max(0, tok_limit - account.tokens_used)
-        account.percent_used = 18.4
-        account.cost_limit_usd = 50.00
-        account.cost_used_usd = 4.60
-        account.reset_time = account.session_reset_time
-        account.status = "active"
-        account.error_message = None
-        account.last_checked = now
-        return account
+    if not cred:
+        return _mark_unavailable(account, "This DeepSeek account carries no API key.")
 
     headers = {"Authorization": f"Bearer {cred}", "Accept": "application/json"}
-
     try:
         with httpx.Client(timeout=10.0) as client:
-            # 1. Probe user balance if using official API
+            res_models = client.get(f"{base_url}/models", headers=headers)
+            if res_models.status_code in (401, 403):
+                account.status = "error"
+                account.error_message = "Invalid DeepSeek API key."
+                account.last_checked = now
+                return account
+            if res_models.status_code != 200:
+                return _mark_unavailable(
+                    account, f"DeepSeek returned status {res_models.status_code}."
+                )
+
+            balance = None
             if "api.deepseek.com" in base_url:
                 try:
                     res_bal = client.get(f"{base_url}/user/balance", headers=headers)
                     if res_bal.status_code == 200:
-                        b_data = res_bal.json()
-                        balance_infos = b_data.get("balance_infos", [])
-                        if balance_infos:
-                            info = balance_infos[0]
-                            curr = info.get("currency", "USD")
-                            total_bal = float(info.get("total_balance", "0"))
-                            topped_up = float(info.get("topped_up_balance", "0"))
-                            account.cost_used_usd = round(topped_up, 2)
-                            account.session_reset_time = f"Balance: {curr} {total_bal:.2f}"
-                            account.reset_time = account.session_reset_time
+                        infos = (res_bal.json() or {}).get("balance_infos") or []
+                        if infos:
+                            balance = infos[0]
                 except Exception:
-                    pass
-
-            # 2. Probe models endpoint to verify key validity
-            res_models = client.get(f"{base_url}/models", headers=headers)
-            if res_models.status_code == 200:
-                account.status = "active"
-                account.error_message = None
-                account.tokens_limit = account.tokens_limit or 10000000
-                account.requests_limit = account.requests_limit or 10000
-            elif res_models.status_code in (401, 403):
-                account.status = "error"
-                account.error_message = "Invalid DeepSeek API Key or Session Token."
-            else:
-                account.status = "warning"
-                account.error_message = f"DeepSeek returned status {res_models.status_code}"
-
+                    balance = None
     except Exception as e:
-        account.status = "error"
-        account.error_message = str(e)
+        return _mark_unavailable(account, f"Could not reach DeepSeek: {e}")
 
+    if balance is None:
+        return _mark_unavailable(
+            account,
+            "The DeepSeek key is valid but the balance endpoint returned nothing, "
+            "so there is no usage figure to show.",
+        )
+
+    currency = balance.get("currency", "USD")
+    total = _as_float(balance.get("total_balance"))
+    topped_up = _as_float(balance.get("topped_up_balance"))
+    account.cost_used_usd = round(topped_up, 2) if topped_up is not None else None
+    account.session_reset_time = (
+        f"Balance: {currency} {total:.2f}" if total is not None else "Balance not reported"
+    )
+    account.reset_time = account.session_reset_time
+    # DeepSeek reports money, not a share of a window, so no percentage is set.
+    account.session_percent_used = None
+    account.session_percent_left = None
+    account.percent_used = None
+    account.status = "active"
+    account.error_message = None
     account.last_checked = now
     return account
 
 
 def _fetch_custom_live(account: UsageAccount) -> UsageAccount:
-    """Probe custom LLM server or local harness (e.g. Ollama, LM Studio, vLLM, Groq)."""
+    """Probe a custom LLM server or local harness (Ollama, LM Studio, vLLM)."""
     cred = (account.credential or "").strip()
     now = _get_utc_now_iso()
     base_url = (account.base_url or "http://localhost:11434").rstrip("/")
 
     account.plan_name = account.plan_name or "Custom Local LLM Harness"
     account.plan_label = "Local Harness"
-    account.session_title = "Local Concurrency"
-    account.session_reset_time = "Unlimited (Local Machine)"
-    account.session_percent_used = 0.0
-    account.session_percent_left = 100.0
-    account.weekly_title = "Weekly Usage"
-    account.weekly_reset_time = "No remote quotas"
-    account.weekly_percent_used = 0.0
-    account.weekly_percent_left = 100.0
-
-    # Handle test / mock credentials
-    if cred.startswith("mock-") or any(k in cred.lower() for k in ("test", "demo", "sample", "dummy")):
-        tok_limit = account.tokens_limit or 2000000
-        account.tokens_limit = tok_limit
-        account.tokens_used = 0
-        account.tokens_remaining = tok_limit
-        account.percent_used = 0.0
-        account.reset_time = account.session_reset_time
-        account.status = "active"
-        account.error_message = None
-        account.last_checked = now
-        return account
+    account.session_title = "Endpoint"
+    account.weekly_title = None
+    account.weekly_reset_time = None
 
     headers = {"Accept": "application/json"}
     if cred:
@@ -494,33 +579,29 @@ def _fetch_custom_live(account: UsageAccount) -> UsageAccount:
 
     try:
         with httpx.Client(timeout=6.0) as client:
-            probed = False
-            for test_path in ("/v1/models", "/models", "/api/tags", "/health"):
+            for probe_path in ("/v1/models", "/models", "/api/tags", "/health"):
                 try:
-                    res = client.get(f"{base_url}{test_path}", headers=headers)
-                    if res.status_code in (200, 204):
-                        probed = True
-                        account.status = "active"
-                        account.error_message = None
-                        account.reset_time = f"Online at {base_url}"
-                        break
-                    elif res.status_code == 401:
-                        account.status = "error"
-                        account.error_message = "Authentication failed (invalid key/token)"
-                        probed = True
-                        break
+                    res = client.get(f"{base_url}{probe_path}", headers=headers)
                 except Exception:
                     continue
-
-            if not probed:
-                account.status = "warning"
-                account.error_message = f"Could not reach harness at {base_url}"
-                account.reset_time = "Endpoint Offline"
-
+                if res.status_code in (200, 204):
+                    # A local harness enforces no quota, so there is nothing to
+                    # measure beyond the fact that it answers.
+                    account.status = "active"
+                    account.error_message = None
+                    account.session_reset_time = f"Online at {base_url}"
+                    account.reset_time = account.session_reset_time
+                    account.session_percent_used = None
+                    account.session_percent_left = None
+                    account.percent_used = None
+                    account.last_checked = now
+                    return account
+                if res.status_code == 401:
+                    account.status = "error"
+                    account.error_message = "Authentication failed (invalid key or token)."
+                    account.last_checked = now
+                    return account
     except Exception as e:
-        account.status = "error"
-        account.error_message = f"Connection failed: {str(e)}"
+        return _mark_unavailable(account, f"Connection failed: {e}")
 
-    account.last_checked = now
-    return account
-
+    return _mark_unavailable(account, f"Could not reach the harness at {base_url}.")
