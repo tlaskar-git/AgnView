@@ -39,7 +39,7 @@
         "properties": {
           "status": { "type": "string", "example": "healthy" },
           "service": { "type": "string", "example": "AgnView Mobile Gateway" },
-          "version": { "type": "string", "example": "0.1.0" },
+          "version": { "type": "string", "example": "0.1.1" },
           "endpoints": { "type": "object" },
           "paired_agents_online": { "type": "integer", "example": 3 }
         },
