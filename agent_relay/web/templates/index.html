@@ -2592,6 +2592,7 @@
       await loadConsoleLogs();
       await loadJobs();
       await loadNodes();
+      setupSessionsListClickDelegation();
       await loadLiveSessions();
       await loadUsageAccounts();
       setInterval(loadNodes, 10000);
@@ -5496,6 +5497,24 @@
       return '...' + text.slice(-35);
     }
 
+    // A session key is "agent::working_directory", and a Windows working
+    // directory is full of backslashes. Building an onclick="fn('...')"
+    // string from it is unsafe: the browser reads that attribute as JS
+    // source, and a backslash there is an escape character, not a literal
+    // one, so "C:\Users\..." silently loses every backslash before
+    // openSessionDetail ever sees it. The key it receives then matches
+    // nothing in liveSessions, and the session looks "ended" the instant
+    // it is opened. A data attribute sidesteps this entirely: the browser
+    // hands back the exact original string, no JS string parsing involved.
+    function setupSessionsListClickDelegation() {
+      const container = document.getElementById('sessions-list');
+      if (!container) return;
+      container.addEventListener('click', (event) => {
+        const button = event.target.closest('[data-session-key]');
+        if (button) openSessionDetail(button.dataset.sessionKey);
+      });
+    }
+
     async function loadLiveSessions() {
       try {
         const res = await fetch('/api/console/live-sessions');
@@ -5566,7 +5585,7 @@
           ? 'border-[var(--color-action)] bg-[var(--bg-raised)]'
           : 'border-[var(--border-color)] bg-[var(--bg-raised)] hover:border-slate-500/40';
         return `
-          <button onclick="openSessionDetail('${escapeHtml(key)}')" aria-label="Open the ${escapeHtml(session.agent)} session"
+          <button data-session-key="${escapeHtml(key)}" aria-label="Open the ${escapeHtml(session.agent)} session"
             class="w-full text-left border ${cardTheme} rounded-xl p-3 transition">
             <div class="flex items-center justify-between gap-2 mb-1">
               <span class="text-xs font-bold text-[var(--text-main)] truncate">${escapeHtml(session.agent)}</span>
