@@ -364,7 +364,10 @@
   <script>
     (function() {
       try {
-        const t = localStorage.getItem('agnview_theme');
+        // ?theme=light|dark overrides the stored preference for one load -
+        // used by automated snapshot/testing tools, does not persist it.
+        const urlTheme = new URLSearchParams(window.location.search).get('theme');
+        const t = (urlTheme === 'light' || urlTheme === 'dark') ? urlTheme : localStorage.getItem('agnview_theme');
         if (t === 'light') {
           document.documentElement.classList.add('light');
         } else {
@@ -2314,6 +2317,15 @@
     // App Initialization
     async function init() {
       initTheme();
+
+      // Deep-link support: ?tab=pipelines or ?tab=usage opens that view directly.
+      // Checked first, before the slower data loads below, so the correct
+      // view is selected as early as possible.
+      const requestedTab = new URLSearchParams(window.location.search).get('tab');
+      if (requestedTab && ['console', 'pipelines', 'usage'].includes(requestedTab)) {
+        switchView(requestedTab);
+      }
+
       safeCreateIcons();
       setupSSE();
       fetchTransportState();
@@ -3101,6 +3113,9 @@
 
     // SSE Connection Setup
     function setupSSE() {
+      // Opt-out for automated snapshot/testing tools that need the page to
+      // reach a settled, network-idle state instead of holding a live stream open.
+      if (new URLSearchParams(window.location.search).get('no_stream') === '1') return;
       const evtSource = new EventSource('/api/events');
       const indicator = document.getElementById('live-indicator');
 
@@ -5962,7 +5977,8 @@
     // THEME MANAGEMENT (DARK / LIGHT MODE)
     // =========================================================================
     function initTheme() {
-      const saved = localStorage.getItem('agnview_theme') || 'dark';
+      const urlTheme = new URLSearchParams(window.location.search).get('theme');
+      const saved = (urlTheme === 'light' || urlTheme === 'dark') ? urlTheme : (localStorage.getItem('agnview_theme') || 'dark');
       applyTheme(saved);
     }
 
