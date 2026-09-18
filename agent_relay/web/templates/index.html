@@ -3798,24 +3798,37 @@
     });
 
     function setupConsoleCollapsibles() {
-      document.querySelectorAll('.console-msg-body').forEach(body => {
-        const id = body.dataset.msgId;
-        const fade = document.getElementById(`msg-fade-${id}`);
-        const toggle = document.getElementById(`msg-toggle-${id}`);
-        if (!fade || !toggle) return;
+      // The console stream markup is injected via innerHTML and styled by the
+      // Tailwind CDN runtime, which compiles CSS for any not-yet-seen utility
+      // class asynchronously (its DOM mutation handling runs as a microtask).
+      // Measuring scrollHeight synchronously, in the same tick as the DOM
+      // replace, can therefore read a body's height and width against rules
+      // that have not been injected yet, which mis-measures short messages
+      // as tall and wires up a "Show more" toggle they should never get.
+      // Deferring with setTimeout (not requestAnimationFrame, which can be
+      // starved while the tab is hidden) guarantees the microtask queue -
+      // and with it Tailwind's style injection - has drained before we read
+      // any layout metric.
+      setTimeout(() => {
+        document.querySelectorAll('.console-msg-body').forEach(body => {
+          const id = body.dataset.msgId;
+          const fade = document.getElementById(`msg-fade-${id}`);
+          const toggle = document.getElementById(`msg-toggle-${id}`);
+          if (!fade || !toggle) return;
 
-        const label = toggle.querySelector('span');
-        body.classList.remove('console-collapsed');
-        fade.classList.add('hidden');
-        toggle.classList.add('hidden');
-        if (label) label.textContent = 'Show more';
+          const label = toggle.querySelector('span');
+          body.classList.remove('console-collapsed');
+          fade.classList.add('hidden');
+          toggle.classList.add('hidden');
+          if (label) label.textContent = 'Show more';
 
-        if (body.scrollHeight > 260) {
-          body.classList.add('console-collapsed');
-          fade.classList.remove('hidden');
-          toggle.classList.remove('hidden');
-        }
-      });
+          if (body.scrollHeight > 260) {
+            body.classList.add('console-collapsed');
+            fade.classList.remove('hidden');
+            toggle.classList.remove('hidden');
+          }
+        });
+      }, 0);
     }
 
     function toggleConsoleMessage(id) {
