@@ -3797,11 +3797,6 @@
         if (last && !isNotice && !lastIsNotice && last.agent === entry.agent && isUser === lastIsUser) {
           last.content += "\n" + entry.content;
           last.timestamp = entry.timestamp || last.timestamp;
-          // A later turn's session id (if any) is the one worth offering to
-          // copy, since it is the one a --resume would actually continue.
-          if (entry.metadata && entry.metadata.cli_session_id) {
-            last.metadata = entry.metadata;
-          }
         } else {
           merged.push({ ...entry });
         }
@@ -3832,24 +3827,6 @@
         console.error('Markdown render failed, falling back to plain text', err);
         return escapeHtml(content).replace(/\n/g, '<br>');
       }
-    }
-
-    // Copies the CLI's own session id (not the cosmetic UI grouping one) to
-    // the clipboard, so it can be pasted into a terminal to resume the exact
-    // same conversation natively, e.g. `claude --resume <id>`.
-    async function copySessionId(sessionId, btn) {
-      try {
-        await navigator.clipboard.writeText(sessionId);
-      } catch (err) {
-        console.error('Clipboard copy failed', err);
-        return;
-      }
-      if (!btn) return;
-      const label = btn.querySelector('span');
-      if (!label) return;
-      const original = label.textContent;
-      label.textContent = 'Copied';
-      setTimeout(() => { label.textContent = original; }, 1500);
     }
 
     // After the console stream is (re)rendered, collapse any message body
@@ -4038,7 +4015,6 @@
         : "bg-[var(--bg-surface)] border border-[var(--border-color)] text-[var(--text-main)]";
       const fadeVar = isError ? '' : `style="--console-fade-color: var(--bg-surface);"`;
       const bodyHtml = renderAgentMarkdown(content);
-      const cliSessionId = entry.metadata && entry.metadata.cli_session_id ? entry.metadata.cli_session_id : '';
 
       return `
         <div class="console-turn flex justify-start select-text w-full">
@@ -4052,12 +4028,6 @@
                 <span class="text-xs font-bold text-[var(--text-main)]">${escapeHtml(agentName)}</span>
                 <span class="border px-1.5 py-0.2 text-[9px] rounded-full font-mono uppercase font-semibold ${badgeStyle}">Agent</span>
                 <span class="text-[10px] text-[var(--text-secondary)] font-mono">${timeStr}</span>
-                ${cliSessionId ? `
-                <button type="button" onclick="copySessionId('${escapeHtml(cliSessionId)}', this)" class="flex items-center gap-1 text-[9px] text-[var(--text-secondary)] hover:text-[var(--text-main)] font-mono px-1 py-0.5 rounded hover:bg-[var(--bg-raised)] transition" title="Copy session ID to resume in a terminal (e.g. claude --resume &lt;id&gt;)">
-                  <i data-lucide="copy" class="w-3 h-3"></i>
-                  <span>Session</span>
-                </button>
-                ` : ''}
               </div>
               <div class="console-msg-shell">
                 <div id="msg-body-${msgIndex}" data-msg-id="${msgIndex}" class="console-msg-body console-markdown ${bubbleBg} px-3 py-2 rounded-xl rounded-tl-xs text-xs sm:text-[13px] break-words font-sans text-left text-start shadow-xs" ${fadeVar}>${bodyHtml}</div>
