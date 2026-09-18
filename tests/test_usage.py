@@ -40,6 +40,31 @@ def test_an_account_with_no_readable_source_reports_unavailable():
         assert result.masked_credential == "plac...-key", provider
 
 
+def test_unavailable_clears_a_stale_weekly_breakdown():
+    """A per-model breakdown from an earlier, working check (or from the old
+    fabricated defaults) must not survive into an "unavailable" result.
+
+    Reproduces a real gap: the top-level fields were correctly nulled out for
+    an unavailable account, but weekly_breakdown was left untouched, so the
+    dashboard still rendered an invented per-model percentage table under a
+    summary that said "unavailable".
+    """
+    account = UsageAccount(
+        provider="gemini",
+        name="gemini account",
+        auth_type="api_key",
+        auth_credential="placeholder-not-a-real-key",
+        weekly_breakdown=[
+            {"group": "Gemini Models", "session_percent_used": 91.0, "weekly_percent_used": 48.0},
+        ],
+    )
+
+    result = fetch_account_usage(account)
+
+    assert result.status == "unavailable"
+    assert result.weekly_breakdown is None
+
+
 def test_multi_account_api_lifecycle(client):
     """Test full multi-account CRUD and live refresh via REST API."""
     # 1. Initially empty

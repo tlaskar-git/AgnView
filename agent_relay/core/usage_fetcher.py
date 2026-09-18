@@ -39,6 +39,11 @@ def _mark_unavailable(account: UsageAccount, reason: str) -> UsageAccount:
     account.requests_used = None
     account.requests_limit = None
     account.requests_remaining = None
+    # A per-model breakdown left over from an earlier, working check (or from
+    # the old fabricated defaults) must not survive into an "unavailable"
+    # result, or the summary says unavailable while the detail table below it
+    # still shows invented per-model percentages.
+    account.weekly_breakdown = None
     account.last_checked = _get_utc_now_iso()
     return account
 
