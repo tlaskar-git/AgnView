@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import re
-import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +32,7 @@ from ..core.network import (
     get_bind_mode, get_network_endpoints, get_resolved_transport_label,
     get_transport_label, resolve_hub_transport
 )
+from ..core import autostart
 from ..core.config import ConfigError, DEFAULT_CONFIG_TEMPLATE, get_config_path, validate_relay_url
 from ..core.iroh_transport import IrohTransport
 
@@ -1062,12 +1062,11 @@ def get_system_capabilities(request: Request):
     }
     default_cwd = cwd
 
-    # 6. Autostart Status
-    autostart_enabled = False
-    if os.name == "nt":
-        startup_dir = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup")
-        autostart_file = os.path.join(startup_dir, "AgnView-Server.cmd")
-        autostart_enabled = os.path.exists(autostart_file)
+    # 6. Autostart Status, from the registration the CLI actually writes
+    try:
+        autostart_enabled = autostart.status()
+    except Exception:
+        autostart_enabled = False
 
     installed_clis = [
         {"id": "claude_code", "name": "Claude Code", "available": installed_agents.get("claude_code", {}).get("installed", False)},
@@ -1162,37 +1161,37 @@ def delete_saved_prompt(prompt_id: str, request: Request):
 
 @router.get("/system/autostart")
 def get_autostart_status():
-    """Check if OS startup launch is enabled."""
-    enabled = False
-    if os.name == "nt":
-        startup_dir = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup")
-        autostart_file = os.path.join(startup_dir, "AgnView-Server.cmd")
-        enabled = os.path.exists(autostart_file)
-    return {"enabled": enabled, "os": os.name}
+    """Report whether AgnView is registered to start at login.
+
+    Reads the same registration the CLI writes. It used to look for a .cmd
+    file in the Windows Startup folder that only this route ever wrote, so it
+    reported autostart off on every normal install, where the CLI had already
+    registered it.
+    """
+    return {
+        "enabled": autostart.status(),
+        "command": autostart.registered_command(),
+        "os": os.name,
+    }
 
 
 @router.post("/system/autostart")
 def toggle_autostart(req: Dict[str, bool]):
-    """Enable or disable background launch on OS startup."""
+    """Turn autostart at login on or off, on every platform.
+
+    Off is remembered, so the next `agnview serve` leaves it off rather than
+    registering it again. On Linux and macOS this route used to change nothing
+    at all and report success anyway.
+    """
     enable = req.get("enable", True)
-    if os.name == "nt":
-        startup_dir = os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup")
-        os.makedirs(startup_dir, exist_ok=True)
-        autostart_file = os.path.join(startup_dir, "AgnView-Server.cmd")
+    try:
         if enable:
-            python_exe = sys.executable
-            # Write non-intrusive background runner script
-            content = f'@echo off\r\nstart "" /b "{python_exe}" -m agent_relay.cli.main serve --port 8765\r\n'
-            with open(autostart_file, "w", encoding="utf-8") as f:
-                f.write(content)
+            message = autostart.enable_and_clear_opt_out()
         else:
-            if os.path.exists(autostart_file):
-                try:
-                    os.remove(autostart_file)
-                except Exception:
-                    pass
-        return {"success": True, "enabled": enable, "file": autostart_file}
-    return {"success": True, "enabled": enable, "message": "Autostart configured."}
+            message = autostart.disable_and_remember_opt_out()
+    except Exception as e:
+        return {"success": False, "enabled": autostart.status(), "message": str(e)}
+    return {"success": True, "enabled": autostart.status(), "message": message}
 
 
 

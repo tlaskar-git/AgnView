@@ -108,12 +108,18 @@ agnview serve --listen-lan
 Choose a different port with `--port`, and require a token from connecting
 clients with `--token`.
 
-To start the hub automatically at login, run `agnview autostart enable`
-once after installing. It registers the OS-native autostart mechanism
-(the Windows Registry Run key, a macOS LaunchAgent, or a Linux XDG
-autostart entry, depending on your platform). `agnview autostart disable`
-removes it again, and `agnview autostart status` shows whether it is
-currently registered.
+The hub starts automatically at login. The first `agnview serve` registers the
+OS-native autostart mechanism (the Windows Registry Run key, a macOS
+LaunchAgent, or a Linux XDG autostart entry, depending on your platform) with
+the options you served under, so a hub started with `--listen-lan` or a custom
+`--port` comes back the same way after a reboot. Change those options and the
+next `agnview serve` updates the registration. The pairing token is never
+written into it: the hub reads the persisted one at every start.
+
+`agnview autostart disable` removes it and remembers that you did, so later
+starts leave it off. `agnview autostart enable` puts it back, and
+`agnview autostart status` shows whether it is currently registered. The
+switch in the dashboard settings does the same thing.
 
 ## Pair a phone
 
