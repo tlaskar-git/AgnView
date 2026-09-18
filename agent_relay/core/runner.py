@@ -287,7 +287,7 @@ class AgentRunner:
         self.broadcast_callback = broadcast_callback
         self.adapter_manager = adapter_manager or AdapterManager()
 
-    async def _emit_chunk(self, agent: str, source: str, content: str, session_id: Optional[str] = None, metadata: Optional[Dict[str, str]] = None):
+    async def _emit_chunk(self, agent: str, source: str, content: str, session_id: Optional[str] = None):
         """Save chunk to SQLite and broadcast via SSE."""
         if not content.strip():
             return
@@ -295,8 +295,7 @@ class AgentRunner:
             agent=agent,
             source=source,
             content=content,
-            session_id=session_id,
-            metadata=metadata
+            session_id=session_id
         )
         if self.broadcast_callback:
             await self.broadcast_callback("console", "agent_output_chunk", {
@@ -305,8 +304,7 @@ class AgentRunner:
                 "source": source,
                 "content": content,
                 "timestamp": _get_utc_now_iso(),
-                "session_id": session_id,
-                "metadata": metadata or {}
+                "session_id": session_id
             })
 
     async def _emit_finished(self, agent: str, exit_code: int, summary: str, session_id: Optional[str] = None):
@@ -531,11 +529,7 @@ class AgentRunner:
                     display_text, captured_session = raw_output, None
 
                 if display_text.strip():
-                    # Attach the CLI's own real session id (not the cosmetic
-                    # UI grouping one) so the console can offer a copy button
-                    # for resuming this exact conversation from a terminal.
-                    reply_metadata = {"cli_session_id": captured_session} if captured_session else None
-                    await self._emit_chunk(agent, "agent_stdout", display_text, session_id, metadata=reply_metadata)
+                    await self._emit_chunk(agent, "agent_stdout", display_text, session_id)
 
                 if exit_code != 0:
                     stderr_out = await process.stderr.read()
