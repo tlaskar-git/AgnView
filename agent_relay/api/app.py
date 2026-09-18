@@ -144,6 +144,12 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
     async def _stop_iroh_transport():
         await iroh_transport.stop()
 
+    @app.on_event("shutdown")
+    async def _stop_live_agent_sessions():
+        # Every CLI process AgnView holds open is a child of this one. Close
+        # them here so stopping the hub never leaves an agent running.
+        await engine.runner.shutdown_live_sessions()
+
     app.include_router(api_router)
 
     # Web Dashboard Static UI & Assets

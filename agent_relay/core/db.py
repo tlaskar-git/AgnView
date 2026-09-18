@@ -362,6 +362,21 @@ class Database:
             conn.commit()
             return cur.lastrowid
 
+    def update_console_log(self, log_id: int, content: str) -> bool:
+        """Replace the text of one console row.
+
+        A streaming turn writes its row once and then rewrites it as more text
+        arrives, so the console keeps one growing bubble per reply and the
+        stored row ends up holding the complete final text.
+        """
+        with self._get_connection() as conn:
+            cur = conn.execute(
+                "UPDATE console_logs SET content = ? WHERE id = ?",
+                (content, log_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
     def get_console_logs(
         self,
         agent: Optional[str] = None,
