@@ -18,6 +18,11 @@ ALLOWED_ADAPTER_KEYS = {"display", "command", "cwd", "icon", "colour", "enabled"
 DEFAULT_AGENTS_YAML = """# AgnView Agent Adapters Specification
 # Each adapter defines a CLI agent execution command and metadata.
 # Available placeholders: {prompt}, {workspace}, {session_id}, {model}, {effort}, {skill}
+#
+# For the CLIs AgnView knows how to resume (claude, codex, agy) it adds the
+# resume flag and the structured-output flag itself, so a follow-up message to
+# the same target continues the same conversation. Name {session_id} in a
+# command only to place that flag yourself, which turns the automatic one off.
 
 agents:
   claude_code:

@@ -6,10 +6,11 @@ and broadcasts live chunks via Server-Sent Events (SSE).
 """
 
 import asyncio
+import json
 import os
 import sys
 import shutil
-from typing import Optional, Dict, Callable, List
+from typing import Optional, Dict, Callable, List, Tuple
 from datetime import datetime, timezone
 
 from .db import Database
@@ -18,6 +19,254 @@ from .adapters import AdapterManager, AgentAdapter
 
 def _get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Command construction and output parsing.
+#
+# These are deliberately pure functions so the resume-flag wiring and the
+# session-id capture can be unit tested without launching a real CLI.
+#
+# Each supported CLI keeps its own conversation store and hands back its own
+# session id. AgnView records that id per (agent, working directory) and replays
+# it on the next dispatch, so a follow-up message continues the same
+# conversation and the same session stays openable from the native CLI.
+# ---------------------------------------------------------------------------
+
+def build_claude_args(
+    claude_bin: str,
+    prompt: str,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
+) -> List[str]:
+    """Build the Claude Code CLI command.
+
+    ``--resume <session-id>`` continues an existing conversation and
+    ``--output-format json`` makes the CLI report the session id it used, which
+    is the id AgnView stores for the next turn.
+    """
+    args = [claude_bin, "-p", prompt, "--output-format", "json"]
+    if resume_session_id:
+        args.extend(["--resume", resume_session_id])
+    if model and model != "auto":
+        args.extend(["--model", model])
+    if effort and effort not in ("default", "none"):
+        args.extend(["--effort", effort])
+    return args
+
+
+def build_codex_args(
+    codex_bin: str,
+    prompt: str,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
+) -> List[str]:
+    """Build the Codex CLI command.
+
+    Codex resumes through the ``codex exec resume <SESSION_ID> <PROMPT>``
+    subcommand, and ``--json`` emits a ``thread.started`` event carrying the
+    thread id to store.
+    """
+    if resume_session_id:
+        args = [codex_bin, "exec", "resume", resume_session_id, prompt]
+    else:
+        args = [codex_bin, "exec", prompt]
+    args.extend(["--skip-git-repo-check", "--json"])
+    if model and model != "auto":
+        args.extend(["-m", model])
+    if effort and effort not in ("default", "none"):
+        args.extend(["-c", f"reasoning_effort={effort}"])
+    return args
+
+
+ANTIGRAVITY_MODEL_MAP = {
+    "gemini-3.8-flash": "gemini-3.8-flash-high",
+    "gemini-3.7-flash": "gemini-3.7-flash-high",
+    "gemini-3.6-flash": "gemini-3.6-flash-high",
+    "gemini-3.1-pro": "gemini-3.1-pro-high",
+    "gpt-oss-120b": "gpt-oss-120b-medium",
+}
+
+
+def build_antigravity_args(
+    agy_bin: Optional[str],
+    gemini_bin: Optional[str],
+    prompt: str,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
+) -> List[str]:
+    """Build the AntiGravity command, or the Gemini CLI fallback.
+
+    ``agy`` resumes with ``--conversation <ID>`` and reports ``conversation_id``
+    under ``--output-format json``.
+
+    The Gemini CLI fallback gets NO resume flag on purpose. Its ``--resume``
+    takes "latest" or a positional index rather than a session id, so it cannot
+    reliably target one stored conversation. That path stays stateless rather
+    than pretending to continue a conversation it cannot address.
+    """
+    if agy_bin:
+        args = [agy_bin, "--print", prompt, "--dangerously-skip-permissions", "--output-format", "json"]
+        if resume_session_id:
+            args.extend(["--conversation", resume_session_id])
+        if model and model != "auto":
+            args.extend(["--model", ANTIGRAVITY_MODEL_MAP.get(model, model)])
+        if effort and effort != "default":
+            args.extend(["--effort", effort])
+        return args
+
+    args = [gemini_bin, "-p", prompt, "--yolo", "--skip-trust"]
+    if model and model != "auto":
+        args.extend(["--model", model])
+    return args
+
+
+def cli_binary_name(binary_path: str) -> str:
+    """Return the bare CLI name for a resolved executable path."""
+    base = os.path.basename(binary_path or "").lower()
+    for ext in (".cmd", ".exe", ".bat", ".ps1"):
+        if base.endswith(ext):
+            return base[: -len(ext)]
+    return base
+
+
+def apply_cli_session_profile(
+    cmd: List[str],
+    resume_id: Optional[str],
+    add_resume: bool = True,
+) -> Tuple[List[str], Optional[Callable[[str], Tuple[str, Optional[str]]]]]:
+    """Add structured output, and optionally a resume flag, to a known CLI command.
+
+    Adapter command templates in ~/.agnview/agents.yaml are plain one-shot
+    invocations, and existing installs already have that file on disk. Detecting
+    the CLI from the command itself means those installs gain session continuity
+    without the operator editing any YAML.
+
+    Returns the command plus the parser that reads the session id back out, or
+    None for a CLI AgnView cannot resume.
+    """
+    if not cmd:
+        return cmd, None
+    name = cli_binary_name(cmd[0])
+
+    if name == "claude":
+        out = list(cmd) + ["--output-format", "json"]
+        if add_resume and resume_id:
+            out += ["--resume", resume_id]
+        return out, parse_claude_output
+
+    if name == "codex":
+        out = list(cmd)
+        # Resume is a subcommand, so it has to sit right after "exec".
+        if add_resume and resume_id and len(out) > 1 and out[1] == "exec":
+            out = out[:2] + ["resume", resume_id] + out[2:]
+        out += ["--json"]
+        return out, parse_codex_output
+
+    if name == "agy":
+        out = list(cmd) + ["--output-format", "json"]
+        if add_resume and resume_id:
+            out += ["--conversation", resume_id]
+        return out, parse_antigravity_output
+
+    # Anything else, including the Gemini CLI, has no resume AgnView can drive.
+    return cmd, None
+
+
+def resolve_adapter_command(command: List[str], subs: Dict[str, str]) -> List[str]:
+    """Substitute placeholders in an adapter command template.
+
+    An argument that is exactly one placeholder and resolves to empty is
+    dropped, and so is the flag right before it. Without that, a template such
+    as ``[..., "--resume", "{session_id}"]`` would leave a dangling ``--resume``
+    on the very first turn, when no session exists yet.
+    """
+    resolved: List[str] = []
+    for part in command:
+        is_bare_placeholder = part.strip() in subs
+        value = part
+        for k, v in subs.items():
+            value = value.replace(k, v)
+        if not value.strip():
+            if is_bare_placeholder and resolved and resolved[-1].startswith("-"):
+                resolved.pop()
+            continue
+        resolved.append(value)
+    return resolved
+
+
+def parse_claude_output(raw: str) -> Tuple[str, Optional[str]]:
+    """Extract the reply text and session id from Claude Code JSON output."""
+    raw = (raw or "").strip()
+    if not raw:
+        return "", None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return raw, None
+    if not isinstance(data, dict):
+        return raw, None
+    text = data.get("result")
+    if not isinstance(text, str):
+        text = raw
+    session_id = data.get("session_id")
+    return text, session_id if isinstance(session_id, str) else None
+
+
+def parse_codex_output(raw: str) -> Tuple[str, Optional[str]]:
+    """Extract the reply text and thread id from Codex JSONL event output."""
+    raw = raw or ""
+    messages: List[str] = []
+    session_id: Optional[str] = None
+    saw_events = False
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        saw_events = True
+        if event.get("type") == "thread.started":
+            thread_id = event.get("thread_id")
+            if isinstance(thread_id, str):
+                session_id = thread_id
+        item = event.get("item")
+        if isinstance(item, dict) and item.get("type") == "agent_message":
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                messages.append(text)
+    if not saw_events:
+        return raw.strip(), None
+    return "\n".join(messages).strip(), session_id
+
+
+def parse_antigravity_output(raw: str) -> Tuple[str, Optional[str]]:
+    """Extract the reply text and conversation id from AntiGravity JSON output."""
+    raw = (raw or "").strip()
+    if not raw:
+        return "", None
+    # agy can print banner lines before the JSON object, so scan for it.
+    start = raw.find("{")
+    if start == -1:
+        return raw, None
+    try:
+        data = json.loads(raw[start:])
+    except (ValueError, TypeError):
+        return raw, None
+    if not isinstance(data, dict):
+        return raw, None
+    text = data.get("response")
+    if not isinstance(text, str):
+        return raw, None
+    conversation_id = data.get("conversation_id")
+    return text.strip(), conversation_id if isinstance(conversation_id, str) else None
 
 
 class AgentRunner:
@@ -74,8 +323,13 @@ class AgentRunner:
         effort: Optional[str] = None,
         files: Optional[List[str]] = None,
         skill: Optional[str] = None,
+        reset_session: bool = False,
     ):
-        """Asynchronously dispatch prompt to the specified agent."""
+        """Asynchronously dispatch prompt to the specified agent.
+
+        Set ``reset_session`` to forget the stored conversation for this target
+        and working directory, so the CLI starts a brand new conversation.
+        """
         target = agent.lower().strip()
 
         # Auto-fallback to provider-native workspace if cwd not specified or generic
@@ -102,6 +356,10 @@ class AgentRunner:
                         break
         if not work_dir:
             work_dir = os.getcwd()
+
+        if reset_session:
+            for agent_key in self._session_agent_keys(target):
+                self._clear_cli_session(agent_key, work_dir)
 
         # Augment prompt if skill or files are provided
         effective_prompt = prompt
@@ -163,6 +421,128 @@ class AgentRunner:
             pass
         return env
 
+    def _session_agent_keys(self, target: str) -> List[str]:
+        """Map a dispatch target onto the agent keys its sessions are stored under."""
+        adapter = self.adapter_manager.get_adapter(target)
+        if adapter and adapter.enabled:
+            return [adapter.id]
+        if target in ("claude", "claude_code"):
+            return ["claude_code"]
+        if target in ("codex", "chatgpt"):
+            return ["codex"]
+        if target in ("antigravity", "agy"):
+            return ["antigravity"]
+        if target == "all":
+            keys = [a_id for a_id, adp in self.adapter_manager.adapters.items() if adp.enabled]
+            return keys or ["claude_code", "codex", "antigravity"]
+        return [target]
+
+    def _get_cli_session(self, agent: str, cwd: Optional[str]) -> Optional[str]:
+        """Look up the CLI's own session id stored for this agent and directory."""
+        try:
+            return self.db.get_agent_session(agent, cwd)
+        except Exception:
+            return None
+
+    def _set_cli_session(self, agent: str, cwd: Optional[str], cli_session_id: Optional[str]) -> None:
+        if not cli_session_id:
+            return
+        try:
+            self.db.set_agent_session(agent, cwd, cli_session_id)
+        except Exception:
+            pass
+
+    def _clear_cli_session(self, agent: str, cwd: Optional[str]) -> None:
+        try:
+            self.db.clear_agent_session(agent, cwd)
+        except Exception:
+            pass
+
+    async def _run_cli_with_session(
+        self,
+        agent: str,
+        proc_args: List[str],
+        cwd: str,
+        env: Dict[str, str],
+        session_id: Optional[str],
+        parser: Optional[Callable[[str], Tuple[str, Optional[str]]]],
+        resume_id: Optional[str] = None,
+        fallback_prompt: str = "",
+        run_cwd: Optional[str] = None,
+    ):
+        """Run a CLI, show its reply, and record the session id it reports back.
+
+        ``parser`` turns the CLI's structured output into (display text, session
+        id). Pass None for a CLI that has no structured mode, and the raw output
+        is shown unchanged with no session captured.
+
+        ``run_cwd`` is where the process runs when an adapter pins its own
+        directory. Sessions stay keyed on ``cwd``, the directory the dispatch
+        asked for, so lookup and reset always agree.
+        """
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *proc_args,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=run_cwd or cwd,
+                env=env
+            )
+            if process.stdin:
+                process.stdin.close()
+                await process.stdin.wait_closed()
+
+            collected: List[str] = []
+
+            async def read_stream():
+                async for line in process.stdout:
+                    text = line.decode("utf-8", errors="replace").rstrip()
+                    if text:
+                        collected.append(text)
+
+            try:
+                await asyncio.wait_for(read_stream(), timeout=45.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
+                exit_code = process.returncode or 0
+
+                raw_output = "\n".join(collected)
+                if parser:
+                    display_text, captured_session = parser(raw_output)
+                else:
+                    display_text, captured_session = raw_output, None
+
+                if display_text.strip():
+                    await self._emit_chunk(agent, "agent_stdout", display_text, session_id)
+
+                if exit_code != 0:
+                    stderr_out = await process.stderr.read()
+                    err_msg = stderr_out.decode("utf-8", errors="replace").strip()
+                    if err_msg:
+                        await self._emit_chunk(agent, "agent_stderr", err_msg, session_id)
+                    # A stored session id can go stale if the conversation was
+                    # deleted outside AgnView. Drop it so the next dispatch
+                    # starts cleanly rather than failing forever.
+                    if resume_id and not captured_session:
+                        self._clear_cli_session(agent, cwd)
+                else:
+                    self._set_cli_session(agent, cwd, captured_session)
+
+                await self._emit_finished(agent, exit_code, "Finished", session_id)
+            except asyncio.TimeoutError:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                await self._emit_chunk(agent, "agent_stderr", "Execution timed out.", session_id)
+                await self._emit_finished(agent, 1, "Timeout", session_id)
+
+        except FileNotFoundError:
+            await self._simulate_agent_execution(agent, fallback_prompt, session_id)
+        except Exception as e:
+            await self._emit_chunk(agent, "agent_stderr", f"Execution error: {str(e)}", session_id)
+            await self._emit_finished(agent, 1, "Error", session_id)
+
     @property
     def _is_testing(self) -> bool:
         return "pytest" in sys.modules or os.environ.get("PYTEST_CURRENT_TEST") is not None or os.environ.get("AGENT_RELAY_TESTING") == "1"
@@ -174,62 +554,23 @@ class AgentRunner:
             await self._simulate_agent_execution("claude_code", prompt, session_id)
             return
 
-        proc_args = [claude_bin, "-p", prompt]
-        if model and model != "auto":
-            proc_args.extend(["--model", model])
-        if effort and effort not in ("default", "none"):
-            proc_args.extend(["--effort", effort])
+        resume_id = self._get_cli_session("claude_code", cwd)
+        proc_args = build_claude_args(claude_bin, prompt, model=model, effort=effort, resume_session_id=resume_id)
 
         env = self._get_env_for_provider("claude")
         env["CI"] = "1"
         env["TERM"] = "dumb"
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *proc_args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env
-            )
-            if process.stdin:
-                process.stdin.close()
-                await process.stdin.wait_closed()
-
-            async def read_stream():
-                collected = []
-                async for line in process.stdout:
-                    text = line.decode("utf-8", errors="replace").rstrip()
-                    if text:
-                        collected.append(text)
-                if collected:
-                    full_text = "\n".join(collected)
-                    await self._emit_chunk("claude_code", "agent_stdout", full_text, session_id)
-
-            try:
-                await asyncio.wait_for(read_stream(), timeout=45.0)
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-                exit_code = process.returncode or 0
-                if exit_code != 0:
-                    stderr_out = await process.stderr.read()
-                    err_msg = stderr_out.decode("utf-8", errors="replace").strip()
-                    if err_msg:
-                        await self._emit_chunk("claude_code", "agent_stderr", err_msg, session_id)
-                await self._emit_finished("claude_code", exit_code, "Finished", session_id)
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-                await self._emit_chunk("claude_code", "agent_stderr", "Execution timed out.", session_id)
-                await self._emit_finished("claude_code", 1, "Timeout", session_id)
-
-        except FileNotFoundError:
-            await self._simulate_agent_execution("claude_code", prompt, session_id)
-        except Exception as e:
-            await self._emit_chunk("claude_code", "agent_stderr", f"Execution error: {str(e)}", session_id)
-            await self._emit_finished("claude_code", 1, "Error", session_id)
+        await self._run_cli_with_session(
+            agent="claude_code",
+            proc_args=proc_args,
+            cwd=cwd,
+            env=env,
+            session_id=session_id,
+            parser=parse_claude_output,
+            resume_id=resume_id,
+            fallback_prompt=prompt,
+        )
 
     async def _run_codex(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using local Codex CLI with direct stdin closure."""
@@ -238,59 +579,21 @@ class AgentRunner:
             await self._simulate_agent_execution("codex", prompt, session_id)
             return
 
-        proc_args = [codex_bin, "exec", "--skip-git-repo-check", prompt]
-        if model and model != "auto":
-            proc_args.extend(["-m", model])
-        if effort and effort not in ("default", "none"):
-            proc_args.extend(["-c", f"reasoning_effort={effort}"])
+        resume_id = self._get_cli_session("codex", cwd)
+        proc_args = build_codex_args(codex_bin, prompt, model=model, effort=effort, resume_session_id=resume_id)
 
         env = self._get_env_for_provider("chatgpt")
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *proc_args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env
-            )
-            if process.stdin:
-                process.stdin.close()
-                await process.stdin.wait_closed()
-
-            async def read_codex_stream():
-                collected = []
-                async for line in process.stdout:
-                    text = line.decode("utf-8", errors="replace").rstrip()
-                    if text:
-                        collected.append(text)
-                if collected:
-                    full_text = "\n".join(collected)
-                    await self._emit_chunk("codex", "agent_stdout", full_text, session_id)
-
-            try:
-                await asyncio.wait_for(read_codex_stream(), timeout=45.0)
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-                exit_code = process.returncode or 0
-                if exit_code != 0:
-                    stderr_out = await process.stderr.read()
-                    err_msg = stderr_out.decode("utf-8", errors="replace").strip()
-                    if err_msg:
-                        await self._emit_chunk("codex", "agent_stderr", err_msg, session_id)
-                await self._emit_finished("codex", exit_code, "Finished", session_id)
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-                await self._emit_chunk("codex", "agent_stderr", "Execution timed out.", session_id)
-                await self._emit_finished("codex", 1, "Timeout", session_id)
-        except FileNotFoundError:
-            await self._simulate_agent_execution("codex", prompt, session_id)
-        except Exception as e:
-            await self._emit_chunk("codex", "agent_stderr", f"Execution error: {str(e)}", session_id)
-            await self._emit_finished("codex", 1, "Error", session_id)
+        await self._run_cli_with_session(
+            agent="codex",
+            proc_args=proc_args,
+            cwd=cwd,
+            env=env,
+            session_id=session_id,
+            parser=parse_codex_output,
+            resume_id=resume_id,
+            fallback_prompt=prompt,
+        )
 
     async def _run_antigravity(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using local AntiGravity (agy) or Gemini CLI."""
@@ -301,75 +604,25 @@ class AgentRunner:
             await self._simulate_agent_execution("antigravity", prompt, session_id)
             return
 
-        if agy_bin:
-            proc_args = [agy_bin, "--print", prompt, "--dangerously-skip-permissions"]
-            if model and model != "auto":
-                model_map = {
-                    "gemini-3.8-flash": "gemini-3.8-flash-high",
-                    "gemini-3.7-flash": "gemini-3.7-flash-high",
-                    "gemini-3.6-flash": "gemini-3.6-flash-high",
-                    "gemini-3.1-pro": "gemini-3.1-pro-high",
-                    "gpt-oss-120b": "gpt-oss-120b-medium"
-                }
-                proc_args.extend(["--model", model_map.get(model, model)])
-            if effort and effort != "default":
-                proc_args.extend(["--effort", effort])
-        else:
-            proc_args = [gemini_bin, "-p", prompt, "--yolo", "--skip-trust"]
-            if model and model != "auto":
-                proc_args.extend(["--model", model])
+        # Only agy can resume by id. The Gemini fallback stays stateless: see
+        # build_antigravity_args for why.
+        resume_id = self._get_cli_session("antigravity", cwd) if agy_bin else None
+        proc_args = build_antigravity_args(
+            agy_bin, gemini_bin, prompt, model=model, effort=effort, resume_session_id=resume_id
+        )
 
-        try:
-            env = self._get_env_for_provider("gemini")
-            process = await asyncio.create_subprocess_exec(
-                *proc_args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-                env=env
-            )
-            if process.stdin:
-                process.stdin.close()
-                await process.stdin.wait_closed()
+        env = self._get_env_for_provider("gemini")
 
-            async def read_stdout():
-                collected = []
-                async for line in process.stdout:
-                    text = line.decode("utf-8", errors="replace").rstrip()
-                    if text:
-                        collected.append(text)
-                if collected:
-                    full_text = "\n".join(collected)
-                    await self._emit_chunk("antigravity", "agent_stdout", full_text, session_id)
-
-            async def read_stderr():
-                collected_err = []
-                async for line in process.stderr:
-                    text = line.decode("utf-8", errors="replace").rstrip()
-                    if text and not text.startswith("Warning:") and "deprecated" not in text.lower():
-                        collected_err.append(text)
-                if collected_err:
-                    full_err = "\n".join(collected_err)
-                    await self._emit_chunk("antigravity", "agent_stderr", full_err, session_id)
-
-            try:
-                await asyncio.wait_for(asyncio.gather(read_stdout(), read_stderr()), timeout=45.0)
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-                exit_code = process.returncode or 0
-                await self._emit_finished("antigravity", exit_code, "Finished", session_id)
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-                await self._emit_chunk("antigravity", "agent_stderr", "Execution timed out.", session_id)
-                await self._emit_finished("antigravity", 1, "Timeout", session_id)
-        except FileNotFoundError:
-            await self._simulate_agent_execution("antigravity", prompt, session_id)
-        except Exception as e:
-            await self._emit_chunk("antigravity", "agent_stderr", f"Execution error: {str(e)}", session_id)
-            await self._emit_finished("antigravity", 1, "Error", session_id)
+        await self._run_cli_with_session(
+            agent="antigravity",
+            proc_args=proc_args,
+            cwd=cwd,
+            env=env,
+            session_id=session_id,
+            parser=parse_antigravity_output if agy_bin else None,
+            resume_id=resume_id,
+            fallback_prompt=prompt,
+        )
 
     async def _run_deepseek(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using DeepSeek reasoning engine."""
@@ -398,24 +651,25 @@ class AgentRunner:
             await self._simulate_agent_execution(adapter.id, prompt, session_id)
             return
 
+        # {session_id} resolves to the CLI's OWN stored session id for this
+        # adapter and directory, so a template carrying a resume flag continues
+        # the same conversation. It is empty on the first turn.
+        resume_id = self._get_cli_session(adapter.id, cwd)
+
         # Prepare placeholder substitutions
         subs = {
             "{prompt}": prompt,
             "{workspace}": cwd,
-            "{session_id}": session_id or "",
+            "{session_id}": resume_id or "",
             "{model}": model or "",
             "{effort}": effort or "",
             "{skill}": skill or ""
         }
 
-        # Resolve command arguments
-        resolved_cmd = []
-        for part in adapter.command:
-            for k, v in subs.items():
-                part = part.replace(k, v)
-            # Only append if not an empty optional flag
-            if part.strip():
-                resolved_cmd.append(part)
+        resolved_cmd = resolve_adapter_command(adapter.command, subs)
+        if not resolved_cmd:
+            await self._simulate_agent_execution(adapter.id, prompt, session_id)
+            return
 
         # Resolve cwd
         target_cwd = adapter.cwd or cwd
@@ -443,49 +697,25 @@ class AgentRunner:
         env["CI"] = "1"
         env["TERM"] = "dumb"
 
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *resolved_cmd,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=target_cwd,
-                env=env
-            )
-            if process.stdin:
-                process.stdin.close()
-                await process.stdin.wait_closed()
+        # A template that names {session_id} means the operator places the
+        # resume flag themselves, so only the structured output is added and the
+        # captured id still gets stored for the next turn.
+        template_owns_resume = any("{session_id}" in part for part in adapter.command)
+        resolved_cmd, parser = apply_cli_session_profile(
+            resolved_cmd, resume_id, add_resume=not template_owns_resume
+        )
 
-            async def read_stream():
-                collected = []
-                async for line in process.stdout:
-                    text = line.decode("utf-8", errors="replace").rstrip()
-                    if text:
-                        collected.append(text)
-                if collected:
-                    full_text = "\n".join(collected)
-                    await self._emit_chunk(adapter.id, "agent_stdout", full_text, session_id)
-
-            try:
-                await asyncio.wait_for(read_stream(), timeout=45.0)
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-                exit_code = process.returncode or 0
-                if exit_code != 0:
-                    stderr_out = await process.stderr.read()
-                    err_msg = stderr_out.decode("utf-8", errors="replace").strip()
-                    if err_msg:
-                        await self._emit_chunk(adapter.id, "agent_stderr", err_msg, session_id)
-                await self._emit_finished(adapter.id, exit_code, "Finished", session_id)
-            except asyncio.TimeoutError:
-                try:
-                    process.kill()
-                except Exception:
-                    pass
-                await self._emit_chunk(adapter.id, "agent_stderr", "Execution timed out.", session_id)
-                await self._emit_finished(adapter.id, 1, "Timeout", session_id)
-        except Exception as e:
-            await self._emit_chunk(adapter.id, "agent_stderr", f"Execution error: {str(e)}", session_id)
-            await self._emit_finished(adapter.id, 1, "Error", session_id)
+        await self._run_cli_with_session(
+            agent=adapter.id,
+            proc_args=resolved_cmd,
+            cwd=cwd,
+            env=env,
+            session_id=session_id,
+            parser=parser,
+            resume_id=resume_id,
+            fallback_prompt=prompt,
+            run_cwd=target_cwd,
+        )
 
     async def _run_custom(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using custom local harness (Ollama / vLLM / LM Studio)."""

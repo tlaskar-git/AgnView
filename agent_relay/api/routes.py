@@ -750,7 +750,16 @@ def refresh_all_usage_accounts(request: Request):
 async def dispatch_console_command(payload: ConsoleDispatchPayload, request: Request):
     """Dispatch prompt/command directly to local Claude Code, Codex, or AntiGravity."""
     engine = get_engine(request)
-    session_id = payload.session_id or f"sess-{uuid.uuid4().hex[:8]}"
+
+    # session_id groups messages in the UI. The client sends back the id it
+    # already holds for this target, so a follow-up message stays in the same
+    # thread. A fresh id is minted only for a genuinely new conversation: the
+    # first one, or one the operator started with "New chat". The real CLI
+    # resume token is tracked separately, per agent and working directory.
+    if payload.reset_session or not payload.session_id:
+        session_id = f"sess-{uuid.uuid4().hex[:8]}"
+    else:
+        session_id = payload.session_id
 
     # Run dispatch in background task
     asyncio.create_task(
@@ -762,7 +771,8 @@ async def dispatch_console_command(payload: ConsoleDispatchPayload, request: Req
             model=payload.model,
             effort=payload.effort,
             files=payload.files,
-            skill=payload.skill
+            skill=payload.skill,
+            reset_session=payload.reset_session
         )
     )
 

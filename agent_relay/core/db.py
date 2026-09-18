@@ -109,6 +109,19 @@ class Database:
                     metadata_json TEXT
                 );
             """)
+            # Remembers the CLI's OWN session id for each (agent, working directory)
+            # pair so a follow-up dispatch resumes the same conversation instead of
+            # starting a stateless one-shot. This is the real resume token, unlike
+            # console_logs.session_id which is only a cosmetic UI grouping label.
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS agent_sessions (
+                    agent TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    cli_session_id TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (agent, cwd)
+                );
+            """)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS saved_prompts (
                     id TEXT PRIMARY KEY,
@@ -408,6 +421,59 @@ class Database:
             else:
                 conn.execute("DELETE FROM console_logs")
             conn.commit()
+
+    # Agent sessions (real CLI resume tokens, keyed on agent + working directory)
+    @staticmethod
+    def _normalise_session_cwd(cwd: Optional[str]) -> str:
+        """Normalise a working directory so lookups are stable.
+
+        Windows paths vary in case and separator, so the same directory must not
+        produce two different rows.
+        """
+        if not cwd:
+            return ""
+        try:
+            return os.path.normcase(os.path.abspath(cwd))
+        except Exception:
+            return cwd
+
+    def get_agent_session(self, agent: str, cwd: Optional[str]) -> Optional[str]:
+        """Return the CLI's own session id last recorded for this agent and directory."""
+        key_cwd = self._normalise_session_cwd(cwd)
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT cli_session_id FROM agent_sessions WHERE agent = ? AND cwd = ?",
+                (agent, key_cwd)
+            ).fetchone()
+            return row["cli_session_id"] if row else None
+
+    def set_agent_session(self, agent: str, cwd: Optional[str], cli_session_id: str) -> None:
+        """Record the CLI's own session id, replacing any previous one for this pair."""
+        if not cli_session_id:
+            return
+        key_cwd = self._normalise_session_cwd(cwd)
+        with self._get_connection() as conn:
+            conn.execute("""
+                INSERT INTO agent_sessions (agent, cwd, cli_session_id, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(agent, cwd) DO UPDATE SET
+                    cli_session_id=excluded.cli_session_id,
+                    updated_at=excluded.updated_at
+            """, (agent, key_cwd, cli_session_id, datetime.now(timezone.utc).isoformat()))
+            conn.commit()
+
+    def clear_agent_session(self, agent: str, cwd: Optional[str] = None) -> int:
+        """Forget the stored session so the next dispatch starts a fresh conversation."""
+        with self._get_connection() as conn:
+            if cwd is None:
+                cur = conn.execute("DELETE FROM agent_sessions WHERE agent = ?", (agent,))
+            else:
+                cur = conn.execute(
+                    "DELETE FROM agent_sessions WHERE agent = ? AND cwd = ?",
+                    (agent, self._normalise_session_cwd(cwd))
+                )
+            conn.commit()
+            return cur.rowcount
 
     # Saved Prompts
     def save_saved_prompt(self, id: str, title: str, prompt: str, category: str = "custom", created_at: Optional[str] = None) -> Dict[str, Any]:
