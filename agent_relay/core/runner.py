@@ -21,6 +21,13 @@ def _get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# How long a single dispatched CLI turn is allowed to run before AgnView kills
+# it and reports a timeout. Coding agents can take several minutes on a real
+# task, so this defaults well above a chat-sized reply. Override with
+# AGENT_RELAY_DISPATCH_TIMEOUT (seconds) for a shorter or longer ceiling.
+DISPATCH_TIMEOUT_SECONDS = float(os.environ.get("AGENT_RELAY_DISPATCH_TIMEOUT", "600"))
+
+
 # ---------------------------------------------------------------------------
 # Command construction and output parsing.
 #
@@ -507,7 +514,7 @@ class AgentRunner:
                         collected.append(text)
 
             try:
-                await asyncio.wait_for(read_stream(), timeout=45.0)
+                await asyncio.wait_for(read_stream(), timeout=DISPATCH_TIMEOUT_SECONDS)
                 await asyncio.wait_for(process.wait(), timeout=5.0)
                 exit_code = process.returncode or 0
 
