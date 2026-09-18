@@ -559,6 +559,11 @@
           <span class="icon-pipelines"></span>
           <span>Pipelines</span>
         </button>
+        <button id="tab-nav-sessions" onclick="switchView('sessions')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-inactive transition select-none">
+          <i data-lucide="radio" class="w-4 h-4"></i>
+          <span>Sessions</span>
+          <span id="tab-nav-sessions-count" class="hidden text-[10px] font-mono bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 px-1.5 rounded-full">0</span>
+        </button>
         <button id="tab-nav-usage" onclick="switchView('usage')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-inactive transition select-none">
           <i data-lucide="gauge" class="w-4 h-4"></i>
           <span>Usage</span>
@@ -1176,6 +1181,84 @@
       <div id="usage-providers-container" class="space-y-6">
         <!-- Rendered dynamically: only providers with added accounts are rendered -->
       </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- VIEW: SESSIONS (live CLI processes AgnView is holding open)               -->
+  <!-- ========================================================================= -->
+  <div id="view-sessions" class="flex-1 overflow-hidden hidden bg-[var(--bg-page)]">
+    <div class="h-full flex flex-col lg:flex-row">
+
+      <!-- Left: the list of live sessions -->
+      <aside class="lg:w-80 xl:w-96 shrink-0 border-b lg:border-b-0 lg:border-r border-[var(--border-color)] flex flex-col bg-[var(--bg-surface)] max-h-64 lg:max-h-none">
+        <div class="px-4 py-3 border-b border-[var(--border-color)] flex items-center justify-between gap-2 shrink-0">
+          <div class="min-w-0">
+            <h2 class="text-sm font-bold text-[var(--text-main)] flex items-center gap-2">
+              <i data-lucide="radio" class="w-4 h-4 text-emerald-500"></i>
+              Live sessions
+            </h2>
+            <p class="text-[11px] text-[var(--text-secondary)] mt-0.5">CLI processes AgnView is holding open</p>
+          </div>
+          <button onclick="loadLiveSessions()" id="btn-refresh-sessions" title="Refresh session list" aria-label="Refresh session list" class="p-1.5 bg-[var(--bg-raised)] hover:bg-[var(--border-color)] text-[var(--text-main)] border border-[var(--border-color)] rounded-lg transition shrink-0">
+            <i data-lucide="refresh-cw" class="w-3.5 h-3.5"></i>
+          </button>
+        </div>
+        <div id="sessions-list" class="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-2">
+          <!-- Rendered dynamically -->
+        </div>
+      </aside>
+
+      <!-- Right: the selected session's live transcript and composer -->
+      <section class="flex-1 flex flex-col min-w-0 min-h-0">
+        <div id="session-detail-empty" class="flex-1 flex items-center justify-center p-8 text-center">
+          <div class="max-w-sm">
+            <i data-lucide="mouse-pointer-click" class="w-8 h-8 text-[var(--text-secondary)] mx-auto mb-3"></i>
+            <p class="text-sm font-semibold text-[var(--text-main)]">Pick a session</p>
+            <p class="text-xs text-[var(--text-secondary)] mt-1.5 leading-relaxed">
+              Every session listed here is a CLI process still running. Open one to read
+              what it is saying and send it another message in the same conversation.
+            </p>
+          </div>
+        </div>
+
+        <div id="session-detail" class="flex-1 flex-col min-h-0 hidden">
+          <header class="px-4 py-3 border-b border-[var(--border-color)] bg-[var(--bg-surface)] shrink-0">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span id="session-detail-agent" class="text-sm font-bold text-[var(--text-main)] truncate"></span>
+                  <span id="session-detail-state" class="text-[10px] uppercase font-mono font-semibold px-2 py-0.5 rounded"></span>
+                </div>
+                <div id="session-detail-cwd" class="text-[11px] text-[var(--text-secondary)] font-mono mt-1 truncate"></div>
+                <div id="session-detail-meta" class="text-[11px] text-[var(--text-secondary)] mt-0.5"></div>
+              </div>
+              <button onclick="closeSessionDetail()" title="Back to the list" aria-label="Back to the session list" class="p-1.5 bg-[var(--bg-raised)] hover:bg-[var(--border-color)] text-[var(--text-main)] border border-[var(--border-color)] rounded-lg transition shrink-0">
+                <i data-lucide="x" class="w-3.5 h-3.5"></i>
+              </button>
+            </div>
+          </header>
+
+          <div id="session-transcript" class="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-3 bg-[var(--bg-page)]">
+            <!-- Rendered dynamically -->
+          </div>
+
+          <div class="border-t border-[var(--border-color)] bg-[var(--bg-surface)] p-3 shrink-0">
+            <div class="flex items-end gap-2">
+              <label for="session-reply" class="sr-only">Message this session</label>
+              <textarea id="session-reply" rows="1" onkeydown="handleSessionReplyKey(event)" oninput="autoResizeComposer(this)"
+                placeholder="Send another message into this session..."
+                class="flex-1 bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-xl px-3 py-2 text-sm text-[var(--text-main)] placeholder-[var(--text-secondary)] focus:outline-none focus:border-[var(--color-action)] resize-none custom-scrollbar max-h-40"></textarea>
+              <button id="btn-session-reply" onclick="sendSessionReply()" aria-label="Send message to this session" class="bg-[var(--color-action)] hover:opacity-90 text-white p-2.5 rounded-xl transition shadow-sm shrink-0">
+                <i data-lucide="send" class="w-4 h-4"></i>
+              </button>
+            </div>
+            <p class="text-[10px] text-[var(--text-secondary)] mt-1.5">
+              Goes to the same process, in the same conversation. Enter sends, Shift+Enter adds a line.
+            </p>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 
@@ -2490,11 +2573,12 @@
     async function init() {
       initTheme();
 
-      // Deep-link support: ?tab=pipelines or ?tab=usage opens that view directly.
+      // Deep-link support: ?tab=pipelines, ?tab=sessions or ?tab=usage opens
+      // that view directly.
       // Checked first, before the slower data loads below, so the correct
       // view is selected as early as possible.
       const requestedTab = new URLSearchParams(window.location.search).get('tab');
-      if (requestedTab && ['console', 'pipelines', 'usage'].includes(requestedTab)) {
+      if (requestedTab && ['console', 'pipelines', 'sessions', 'usage'].includes(requestedTab)) {
         switchView(requestedTab);
       }
 
@@ -2508,6 +2592,7 @@
       await loadConsoleLogs();
       await loadJobs();
       await loadNodes();
+      await loadLiveSessions();
       await loadUsageAccounts();
       setInterval(loadNodes, 10000);
       setupGlobalHotkeys();
@@ -3252,11 +3337,13 @@
       const views = {
         'console': document.getElementById('view-console'),
         'pipelines': document.getElementById('view-pipelines'),
+        'sessions': document.getElementById('view-sessions'),
         'usage': document.getElementById('view-usage')
       };
       const tabs = {
         'console': document.getElementById('tab-nav-console'),
         'pipelines': document.getElementById('tab-nav-pipelines'),
+        'sessions': document.getElementById('tab-nav-sessions'),
         'usage': document.getElementById('tab-nav-usage')
       };
 
@@ -3284,7 +3371,10 @@
         renderConsoleStream();
       } else if (viewName === 'usage') {
         loadUsageAccounts();
+      } else if (viewName === 'sessions') {
+        loadLiveSessions();
       }
+      startSessionsPolling(viewName === 'sessions');
       safeCreateIcons();
     }
 
@@ -3352,6 +3442,9 @@
             updateConsoleCounters();
             appendConsoleLine(consoleLogs[consoleLogs.length - 1]);
           }
+          // A reply streaming into the console is the same reply the open
+          // session is waiting on, so redraw it as it grows.
+          if (activeView === 'sessions' && openSessionKey) renderSessionTranscript();
         } catch (err) {
           console.error("SSE parse error", err);
         }
@@ -3374,6 +3467,10 @@
             updateConsoleCounters();
             appendConsoleLine(consoleLogs[consoleLogs.length - 1]);
           }
+          if (activeView === 'sessions' && openSessionKey) renderSessionTranscript();
+          // Keep the count on the nav tab honest from any view, so a running
+          // session is discoverable without opening the Sessions view first.
+          loadLiveSessions();
         } catch (err) {
           console.error("SSE parse error", err);
         }
@@ -5360,6 +5457,322 @@
       `;
     }
 
+    // =========================================================================
+    // SESSIONS VIEW
+    // =========================================================================
+    // The live CLI processes the hub is holding open. Dispatching already keeps
+    // one process per agent and working directory and feeds follow-up messages
+    // into it; this view is where that becomes visible and clickable.
+    let liveSessions = [];
+    let openSessionKey = null;
+    let sessionsPollTimer = null;
+
+    function sessionKeyOf(session) {
+      return `${session.agent}::${session.working_directory || ''}`;
+    }
+
+    function findLiveSession(key) {
+      return liveSessions.find(s => sessionKeyOf(s) === key) || null;
+    }
+
+    // "4m 12s" reads better than a raw seconds count on a card that updates.
+    function formatDuration(seconds) {
+      const total = Math.max(0, Math.round(Number(seconds) || 0));
+      if (total < 60) return `${total}s`;
+      const mins = Math.floor(total / 60);
+      if (mins < 60) return `${mins}m ${total % 60}s`;
+      const hours = Math.floor(mins / 60);
+      return `${hours}h ${mins % 60}m`;
+    }
+
+    function pluralise(count, word) {
+      return `${count} ${word}${count === 1 ? '' : 's'}`;
+    }
+
+    // Only the tail of a long path is worth the width on a narrow card.
+    function shortenPath(path) {
+      const text = String(path || '');
+      if (text.length <= 38) return text;
+      return '...' + text.slice(-35);
+    }
+
+    async function loadLiveSessions() {
+      try {
+        const res = await fetch('/api/console/live-sessions');
+        if (!res.ok) return;
+        liveSessions = await res.json();
+      } catch (err) {
+        console.error("Failed to load live sessions", err);
+        return;
+      }
+      renderSessionsList();
+      updateSessionsTabCount();
+      // A session that ended while its detail was open must not keep pretending
+      // it is there.
+      if (openSessionKey && !findLiveSession(openSessionKey)) {
+        renderSessionDetailHeader();
+      } else if (openSessionKey) {
+        renderSessionDetailHeader();
+      }
+    }
+
+    function updateSessionsTabCount() {
+      const badge = document.getElementById('tab-nav-sessions-count');
+      if (!badge) return;
+      if (liveSessions.length === 0) {
+        badge.classList.add('hidden');
+        return;
+      }
+      badge.classList.remove('hidden');
+      badge.innerText = String(liveSessions.length);
+    }
+
+    // The list refreshes on a timer only while the view is open, because the
+    // ages on the cards move on their own.
+    function startSessionsPolling(active) {
+      if (sessionsPollTimer) {
+        clearInterval(sessionsPollTimer);
+        sessionsPollTimer = null;
+      }
+      if (!active) return;
+      sessionsPollTimer = setInterval(loadLiveSessions, 5000);
+    }
+
+    function renderSessionsList() {
+      const container = document.getElementById('sessions-list');
+      if (!container) return;
+
+      if (liveSessions.length === 0) {
+        container.innerHTML = `
+          <div class="p-4 text-center">
+            <p class="text-xs font-semibold text-[var(--text-main)]">No live sessions</p>
+            <p class="text-[11px] text-[var(--text-secondary)] mt-1.5 leading-relaxed">
+              Dispatch a prompt from the Console and the process it starts appears here
+              while it stays open.
+            </p>
+          </div>`;
+        safeCreateIcons();
+        return;
+      }
+
+      container.innerHTML = liveSessions.map(session => {
+        const key = sessionKeyOf(session);
+        const selected = key === openSessionKey;
+        const stateLabel = session.busy ? 'working' : 'idle';
+        const stateTheme = session.busy
+          ? 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/30'
+          : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/30';
+        const cardTheme = selected
+          ? 'border-[var(--color-action)] bg-[var(--bg-raised)]'
+          : 'border-[var(--border-color)] bg-[var(--bg-raised)] hover:border-slate-500/40';
+        return `
+          <button onclick="openSessionDetail('${escapeHtml(key)}')" aria-label="Open the ${escapeHtml(session.agent)} session"
+            class="w-full text-left border ${cardTheme} rounded-xl p-3 transition">
+            <div class="flex items-center justify-between gap-2 mb-1">
+              <span class="text-xs font-bold text-[var(--text-main)] truncate">${escapeHtml(session.agent)}</span>
+              <span class="text-[10px] uppercase font-mono font-semibold px-1.5 py-0.5 rounded border shrink-0 ${stateTheme}">${stateLabel}</span>
+            </div>
+            <div class="text-[11px] text-[var(--text-secondary)] font-mono truncate" title="${escapeHtml(session.working_directory || '')}">
+              ${escapeHtml(shortenPath(session.working_directory) || 'no working directory')}
+            </div>
+            <div class="flex items-center gap-3 mt-1.5 text-[10px] text-[var(--text-secondary)] font-mono">
+              <span title="How long this process has been running">up ${formatDuration(session.uptime_seconds)}</span>
+              <span title="Time since the last activity">last ${formatDuration(session.idle_seconds)} ago</span>
+              <span title="Turns completed in this session">${pluralise(session.turns_completed, 'turn')}</span>
+            </div>
+          </button>`;
+      }).join('');
+      safeCreateIcons();
+    }
+
+    async function openSessionDetail(key) {
+      openSessionKey = key;
+      const session = findLiveSession(key);
+      document.getElementById('session-detail-empty')?.classList.add('hidden');
+      const detail = document.getElementById('session-detail');
+      if (detail) {
+        detail.classList.remove('hidden');
+        detail.classList.add('flex');
+      }
+      renderSessionsList();
+      renderSessionDetailHeader();
+
+      // Backfill this thread from the database, then let the SSE stream keep it
+      // moving. The console buffer is shared, so nothing is fetched twice.
+      if (session && session.session_id) {
+        try {
+          const res = await fetch(`/api/console/logs?session_id=${encodeURIComponent(session.session_id)}&limit=300`);
+          if (res.ok) {
+            const rows = await res.json();
+            for (const row of rows) appendConsoleLogEntry(row);
+          }
+        } catch (err) {
+          console.error("Failed to load session transcript", err);
+        }
+      }
+      renderSessionTranscript();
+      document.getElementById('session-reply')?.focus();
+    }
+
+    function closeSessionDetail() {
+      openSessionKey = null;
+      const detail = document.getElementById('session-detail');
+      if (detail) {
+        detail.classList.add('hidden');
+        detail.classList.remove('flex');
+      }
+      document.getElementById('session-detail-empty')?.classList.remove('hidden');
+      renderSessionsList();
+    }
+
+    function renderSessionDetailHeader() {
+      const session = openSessionKey ? findLiveSession(openSessionKey) : null;
+      const agentEl = document.getElementById('session-detail-agent');
+      const stateEl = document.getElementById('session-detail-state');
+      const cwdEl = document.getElementById('session-detail-cwd');
+      const metaEl = document.getElementById('session-detail-meta');
+      if (!agentEl || !stateEl || !cwdEl || !metaEl) return;
+
+      if (!session) {
+        // The process ended. Say so plainly and leave the transcript readable.
+        stateEl.innerText = 'ended';
+        stateEl.className = 'text-[10px] uppercase font-mono font-semibold px-2 py-0.5 rounded bg-[var(--bg-raised)] text-[var(--text-secondary)] border border-[var(--border-color)]';
+        metaEl.innerText = 'This session has closed. The transcript below is what it left behind.';
+        return;
+      }
+
+      agentEl.innerText = session.agent;
+      stateEl.innerText = session.busy ? 'working' : 'idle';
+      stateEl.className = session.busy
+        ? 'text-[10px] uppercase font-mono font-semibold px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/30'
+        : 'text-[10px] uppercase font-mono font-semibold px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30';
+      cwdEl.innerText = session.working_directory || 'no working directory';
+      cwdEl.title = session.working_directory || '';
+      const parts = [
+        `running ${formatDuration(session.uptime_seconds)}`,
+        `last activity ${formatDuration(session.idle_seconds)} ago`,
+        pluralise(session.turns_completed, 'turn'),
+      ];
+      if (session.queued_turns > 0) parts.push(`${session.queued_turns} queued`);
+      metaEl.innerText = parts.join(' · ');
+    }
+
+    // The transcript is the console buffer filtered to this thread, so a reply
+    // streaming into the console appears here as it is written.
+    function renderSessionTranscript() {
+      const container = document.getElementById('session-transcript');
+      if (!container) return;
+      const session = openSessionKey ? findLiveSession(openSessionKey) : null;
+      const threadId = session ? session.session_id : null;
+
+      if (!threadId) {
+        container.innerHTML = `
+          <p class="text-xs text-[var(--text-secondary)] text-center py-6">
+            This session has not taken a turn yet, so there is nothing to show.
+          </p>`;
+        return;
+      }
+
+      const rows = consoleLogs.filter(entry => entry.session_id === threadId);
+      if (rows.length === 0) {
+        container.innerHTML = `
+          <p class="text-xs text-[var(--text-secondary)] text-center py-6">
+            No messages recorded for this session yet.
+          </p>`;
+        return;
+      }
+
+      const nearBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 120;
+      container.innerHTML = rows.map(entry => {
+        const isUser = entry.source === 'user_input' || entry.source === 'user';
+        const isError = entry.source === 'agent_stderr';
+        const isNotice = entry.source === 'system_notice';
+        let theme = 'bg-[var(--bg-surface)] border-[var(--border-color)] text-[var(--text-main)]';
+        let who = entry.agent || 'agent';
+        if (isUser) {
+          theme = 'bg-[var(--color-action)]/10 border-[var(--color-action)]/30 text-[var(--text-main)]';
+          who = 'you';
+        } else if (isError) {
+          theme = 'bg-red-500/10 border-red-500/30 text-[var(--text-main)]';
+        } else if (isNotice) {
+          theme = 'bg-[var(--bg-raised)] border-[var(--border-color)] text-[var(--text-secondary)]';
+        }
+        const stamp = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '';
+        return `
+          <div class="border ${theme} rounded-xl px-3 py-2">
+            <div class="flex items-center justify-between gap-2 mb-1">
+              <span class="text-[10px] uppercase font-mono font-semibold text-[var(--text-secondary)]">${escapeHtml(who)}</span>
+              <span class="text-[10px] font-mono text-[var(--text-secondary)]">${escapeHtml(stamp)}</span>
+            </div>
+            <div class="text-xs whitespace-pre-wrap break-words leading-relaxed">${escapeHtml(entry.content || '')}</div>
+          </div>`;
+      }).join('');
+
+      if (nearBottom) container.scrollTop = container.scrollHeight;
+    }
+
+    function handleSessionReplyKey(event) {
+      if (event.key === 'Enter' && !event.shiftKey) {
+        event.preventDefault();
+        sendSessionReply();
+      }
+    }
+
+    // Reuses the dispatch endpoint exactly as the console does. Sending the
+    // agent, the working directory and the thread id is what makes the reply
+    // land in the process already running, rather than starting a second one.
+    async function sendSessionReply() {
+      const input = document.getElementById('session-reply');
+      const btn = document.getElementById('btn-session-reply');
+      if (!input || !btn) return;
+      const prompt = input.value.trim();
+      if (!prompt) return;
+
+      const session = openSessionKey ? findLiveSession(openSessionKey) : null;
+      if (!session) {
+        alert('That session has closed. Start a new one from the Console.');
+        return;
+      }
+
+      btn.disabled = true;
+      btn.innerHTML = `<i data-lucide="loader-2" class="w-4 h-4 animate-spin"></i>`;
+      safeCreateIcons();
+      try {
+        const res = await fetch('/api/console/dispatch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            agent: session.agent,
+            prompt,
+            working_directory: session.working_directory || undefined,
+            session_id: session.session_id || undefined,
+            reset_session: false
+          })
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({}));
+          alert("Dispatch error: " + (err.detail || res.statusText));
+          return;
+        }
+        const body = await res.json().catch(() => ({}));
+        if (body && body.session_id) {
+          session.session_id = body.session_id;
+          consoleSessionByTarget[session.agent] = body.session_id;
+        }
+        markAgentWorking(session.agent);
+        input.value = '';
+        autoResizeComposer(input);
+        renderSessionTranscript();
+        loadLiveSessions();
+      } catch (err) {
+        alert("Failed to dispatch: " + err.message);
+      } finally {
+        btn.disabled = false;
+        btn.innerHTML = `<i data-lucide="send" class="w-4 h-4"></i>`;
+        safeCreateIcons();
+      }
+    }
+
     // Render a measured token count the way a person reads it.
     function formatTokenCount(count) {
       const n = Number(count);
@@ -6491,6 +6904,7 @@
       { id: 'theme-dark', title: 'Set Theme: Dark Mode', category: 'Appearance', icon: 'moon', aliases: ['dark', 'black', 'night'], action: () => { localStorage.setItem('agnview_theme', 'dark'); applyTheme('dark'); } },
       { id: 'goto-console', title: 'Switch to Live Console', category: 'Navigation', icon: 'terminal', aliases: ['console', 'terminal', 'logs', 'stream', 'cli'], action: () => switchView('console') },
       { id: 'goto-pipelines', title: 'Switch to Pipelines', category: 'Navigation', icon: 'git-merge', aliases: ['pipelines', 'dag', 'tasks', 'board', 'kanban', 'timeline'], action: () => switchView('pipelines') },
+      { id: 'goto-sessions', title: 'Switch to Live Sessions', category: 'Navigation', icon: 'radio', aliases: ['sessions', 'live', 'running', 'processes', 'active agents'], action: () => switchView('sessions') },
       { id: 'goto-usage', title: 'Switch to Usage & Telemetry', category: 'Navigation', icon: 'gauge', aliases: ['usage', 'quotas', 'billing', 'accounts', 'tokens', 'telemetry', 'limits', 'rate limits'], action: () => switchView('usage') },
       { id: 'mobile-connect', title: 'Open Mobile Companion Gateway (QR Code)', category: 'Mobile', icon: 'smartphone', aliases: ['mobile', 'phone', 'ipad', 'ios', 'qr', 'remote', 'pairing'], action: openMobileModal },
       { id: 'dispatch-claude', title: 'Dispatch to Claude Code CLI', category: 'Execution', icon: 'send', aliases: ['claude', 'anthropic', 'prompt'], action: () => { switchView('console'); document.getElementById('dispatch-target-agent').value = 'claude_code'; document.getElementById('dispatch-prompt').focus(); } },

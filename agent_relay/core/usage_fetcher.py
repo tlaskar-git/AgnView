@@ -71,15 +71,18 @@ def fetch_account_usage(account: UsageAccount) -> UsageAccount:
         return account
 
 
-def _format_tokens(count: int) -> str:
-    """Render a token count the way a person reads it."""
-    if count >= 1_000_000_000:
-        return f"{count / 1_000_000_000:.1f}B"
-    if count >= 1_000_000:
-        return f"{count / 1_000_000:.1f}M"
-    if count >= 1_000:
-        return f"{count / 1_000:.1f}K"
-    return str(count)
+def _scope_sub_line(turns: int, projects: int) -> str:
+    """Say how a Claude Code token total was reached, without restating it.
+
+    The count covers every project Claude Code has run on this machine, and
+    the turns subagents took inside them, because the account is billed for
+    all of it. Naming the project count keeps a large turn count explainable.
+    """
+    turn_word = "turn" if turns == 1 else "turns"
+    if projects <= 0:
+        return f"{turns} {turn_word}"
+    project_word = "project" if projects == 1 else "projects"
+    return f"{turns} {turn_word} across {projects} {project_word}, subagents included"
 
 
 def _read_claude_plan(account: UsageAccount) -> bool:
@@ -146,15 +149,15 @@ def _fetch_claude_live(account: UsageAccount) -> UsageAccount:
             f"{Path.home() / '.claude' / 'projects'}, so there is nothing to count yet.",
         )
 
-    account.session_title = f"Last {SESSION_WINDOW_HOURS} hours"
-    account.session_reset_time = (
-        f"{_format_tokens(usage.session_tokens)} tokens over {usage.session_turns} turns"
-    )
+    # The card prints the token total itself, from session_tokens_used. The
+    # sub-line therefore carries only what the total does not already say:
+    # how many turns produced it and how widely they were spread. Repeating
+    # the token figure here rendered it twice, back to back, on the card.
+    account.session_title = f"Last {SESSION_WINDOW_HOURS} hours, this machine"
+    account.session_reset_time = _scope_sub_line(usage.session_turns, usage.projects_counted)
     account.session_tokens_used = usage.session_tokens
-    account.weekly_title = f"Last {WEEK_WINDOW_DAYS} days"
-    account.weekly_reset_time = (
-        f"{_format_tokens(usage.week_tokens)} tokens over {usage.week_turns} turns"
-    )
+    account.weekly_title = f"Last {WEEK_WINDOW_DAYS} days, this machine"
+    account.weekly_reset_time = _scope_sub_line(usage.week_turns, usage.projects_counted)
     account.weekly_tokens_used = usage.week_tokens
 
     # Counted, not estimated. The share of the plan limit stays unknown, so

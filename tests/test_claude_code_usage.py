@@ -156,3 +156,47 @@ def test_unreadable_lines_are_skipped_rather_than_failing(projects):
     usage = read_usage(projects_dir=projects, now=NOW)
 
     assert usage.session_tokens == 42
+
+
+def test_projects_are_counted_so_a_big_turn_count_is_explainable(projects):
+    """The window covers the whole machine, so the card can say how widely.
+
+    1432 turns in five hours reads as absurd for one person until the card
+    also says how many projects produced them. Subagent transcripts belong to
+    the project above them and must not inflate that count.
+    """
+    _write(
+        projects / "project-one" / "session.jsonl",
+        [_turn(NOW - timedelta(minutes=5), 10, "req-one")],
+    )
+    _write(
+        projects / "project-one" / "session" / "subagents" / "helper.jsonl",
+        [_turn(NOW - timedelta(minutes=4), 20, "req-sub")],
+    )
+    _write(
+        projects / "project-two" / "session.jsonl",
+        [_turn(NOW - timedelta(minutes=3), 30, "req-two")],
+    )
+
+    usage = read_usage(projects_dir=projects, now=NOW)
+
+    assert usage.projects_counted == 2
+    assert usage.session_tokens == 60
+    assert usage.session_turns == 3
+
+
+def test_a_project_with_no_turn_in_the_window_is_not_counted(projects):
+    """Only projects that actually contributed a counted turn are named."""
+    _write(
+        projects / "recent" / "session.jsonl",
+        [_turn(NOW - timedelta(hours=2), 10, "req-recent")],
+    )
+    _write(
+        projects / "stale" / "session.jsonl",
+        [_turn(NOW - timedelta(days=9), 500, "req-stale")],
+    )
+
+    usage = read_usage(projects_dir=projects, now=NOW)
+
+    assert usage.projects_counted == 1
+    assert usage.week_tokens == 10

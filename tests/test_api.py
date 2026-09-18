@@ -196,3 +196,58 @@ def test_app_startup_binds_event_loop(tmp_path):
         # Startup event must have bound the active running event loop
         assert engine._loop is not None
 
+
+
+def test_live_sessions_endpoint_is_empty_before_anything_is_dispatched(client):
+    res = client.get("/api/console/live-sessions")
+    assert res.status_code == 200
+    assert res.json() == []
+
+
+def test_live_sessions_endpoint_describes_and_orders_what_is_running(client):
+    """The Sessions view needs enough to identify each process, busiest first."""
+    import time as _time
+
+    from agent_relay.core.live_sessions import LiveSession, live_session_key
+
+    async def noop(*args):
+        return None
+
+    class _FakeStdin:
+        def write(self, data):
+            return None
+
+        async def drain(self):
+            return None
+
+    class _FakeProcess:
+        pid = 4242
+
+        def __init__(self):
+            self.stdin = _FakeStdin()
+            self.stdout = None
+            self.returncode = None
+
+    runner = client.app.state.engine.runner
+    for agent, cwd, idle in (("claude_code", "C:/one", 5.0), ("codex", "C:/two", 90.0)):
+        session = LiveSession(
+            agent=agent, cwd=cwd, dialect="claude", process=_FakeProcess(),
+            on_delta=noop, on_complete=noop, on_process_lost=noop,
+        )
+        session.ui_session_id = f"sess-{agent}"
+        session.last_activity = _time.monotonic() - idle
+        runner.live_sessions[live_session_key(agent, cwd)] = session
+
+    rows = client.get("/api/console/live-sessions").json()
+
+    assert len(rows) == 2
+    # Neither is busy, so the most recently active one leads.
+    assert rows[0]["agent"] == "claude_code"
+    assert rows[0]["working_directory"] == "C:/one"
+    assert rows[0]["session_id"] == "sess-claude_code"
+    assert rows[0]["busy"] is False
+    assert rows[0]["pid"] == 4242
+    assert rows[0]["idle_seconds"] < rows[1]["idle_seconds"]
+    assert {"uptime_seconds", "turns_completed", "queued_turns"} <= set(rows[0])
+
+    runner.live_sessions.clear()
