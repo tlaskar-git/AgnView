@@ -6,6 +6,7 @@ provider said nothing is asserted absent here.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -16,6 +17,7 @@ from agent_relay.core.usage_fetcher import (
     _fetch_chatgpt_live,
     _fetch_claude_live,
     _fetch_gemini_live,
+    usage_is_stale,
 )
 
 
@@ -63,6 +65,162 @@ def test_claude_reports_measured_tokens_and_no_invented_percentage(tmp_path, mon
     assert acc.weekly_percent_used is None
     assert acc.percent_used is None
     assert acc.weekly_breakdown is None
+
+
+def _ago(**kwargs) -> str:
+    return (datetime.now(timezone.utc) - timedelta(**kwargs)).isoformat()
+
+
+def _claude_with_transcripts(tmp_path, monkeypatch):
+    """Give the Claude fetcher one countable turn to read on this machine."""
+    projects = tmp_path / "projects"
+    session_dir = projects / "a-project"
+    session_dir.mkdir(parents=True)
+    record = {
+        "type": "assistant",
+        "timestamp": "2026-09-18T12:00:00.000Z",
+        "requestId": "req-1",
+        "message": {"usage": {"input_tokens": 10, "output_tokens": 5}},
+    }
+    session_dir.joinpath("session.jsonl").write_text(
+        json.dumps(record) + "\n", encoding="utf-8"
+    )
+
+    import agent_relay.core.usage_fetcher as fetcher
+
+    monkeypatch.setattr(fetcher, "read_claude_code_usage", lambda: _read(projects))
+    monkeypatch.setattr(fetcher, "_read_claude_plan", lambda account: False)
+
+
+def test_a_synced_percentage_survives_the_next_refresh(tmp_path, monkeypatch):
+    """A real percentage from claude.ai outlives a local recompute.
+
+    The telemetry sync reads the share of each window off Anthropic's own usage
+    page. The local recompute has no percentage to offer, and it used to blank
+    the synced one and replace the card with a token count within minutes of the
+    sync. While the synced window is still open, the synced figures stand.
+    """
+    _claude_with_transcripts(tmp_path, monkeypatch)
+
+    acc = _fetch_claude_live(
+        _account(
+            "claude",
+            session_title="Current session",
+            session_reset_time="Resets in 3h 12m",
+            session_percent_used=37.0,
+            session_percent_left=63.0,
+            percent_used=37.0,
+            session_telemetry_synced_at=_ago(hours=1),
+            weekly_title="Weekly limit",
+            weekly_reset_time="Resets Sat 7:00 PM",
+            weekly_percent_used=12.0,
+            weekly_percent_left=88.0,
+            weekly_telemetry_synced_at=_ago(days=2),
+        )
+    )
+
+    assert acc.status == "active"
+    assert acc.session_percent_used == 37.0
+    assert acc.percent_used == 37.0
+    assert acc.session_title == "Current session"
+    assert acc.session_reset_time == "Resets in 3h 12m"
+    assert acc.weekly_percent_used == 12.0
+    assert acc.weekly_reset_time == "Resets Sat 7:00 PM"
+    # The card shows one figure per window. A synced percentage is the figure,
+    # so the local token count does not appear beside it.
+    assert acc.session_tokens_used is None
+    assert acc.weekly_tokens_used is None
+
+
+def test_a_synced_percentage_gives_way_to_tokens_once_its_window_closes(tmp_path, monkeypatch):
+    """Past 5 hours for the session and 7 days for the week, the sync is history."""
+    _claude_with_transcripts(tmp_path, monkeypatch)
+
+    acc = _fetch_claude_live(
+        _account(
+            "claude",
+            session_title="Current session",
+            session_reset_time="Resets in 3h 12m",
+            session_percent_used=37.0,
+            session_percent_left=63.0,
+            percent_used=37.0,
+            session_telemetry_synced_at=_ago(hours=6),
+            weekly_percent_used=12.0,
+            weekly_percent_left=88.0,
+            weekly_telemetry_synced_at=_ago(days=8),
+        )
+    )
+
+    assert acc.status == "active"
+    # Nothing real backs those percentages any more, so none is shown.
+    assert acc.session_percent_used is None
+    assert acc.session_percent_left is None
+    assert acc.percent_used is None
+    assert acc.weekly_percent_used is None
+    # The honest local count takes over.
+    assert acc.session_tokens_used == 15
+    assert acc.weekly_tokens_used == 15
+    assert acc.session_title == "Last 5 hours, this machine"
+
+
+def test_a_stale_row_is_corrected_by_a_plain_get(tmp_path, monkeypatch):
+    """An old row is recomputed on read, with no Refresh click involved.
+
+    The list endpoint used to recompute only when a row had no window titles,
+    so an account computed once by an older version of the code was served
+    unchanged for ever. This row carries the old duplicated sub-line, which no
+    version of the code writes now.
+    """
+    _claude_with_transcripts(tmp_path, monkeypatch)
+
+    db_file = str(tmp_path / "stale.db")
+    db = Database(db_file)
+    db.save_usage_account(
+        UsageAccount(
+            id="acc-stale",
+            provider="claude",
+            name="Personal Claude Code",
+            session_title="Last 5 hours",
+            session_reset_time="15 tokens over 1 turns",
+            session_tokens_used=15,
+            weekly_title="Last 7 days",
+            weekly_reset_time="15 tokens over 1 turns",
+            weekly_tokens_used=15,
+            last_checked=_ago(hours=3),
+        ).model_dump()
+    )
+
+    client = TestClient(create_app(db_path=db_file))
+    listed = client.get("/api/usage/accounts").json()
+
+    assert len(listed) == 1
+    row = listed[0]
+    assert row["session_title"] == "Last 5 hours, this machine"
+    assert row["session_reset_time"] == "1 turn across 1 project, subagents included"
+    assert "tokens over" not in row["weekly_reset_time"]
+
+
+def test_staleness_thresholds_differ_by_what_a_refresh_costs():
+    """A local file walk is cheap and is redone often. A network read is not."""
+    now = datetime.now(timezone.utc)
+    two_minutes_ago = (now - timedelta(minutes=2)).isoformat()
+
+    claude_code = _account("claude", last_checked=two_minutes_ago)
+    assert usage_is_stale(claude_code, now) is True
+
+    # An Anthropic API key is read over the network, so it follows the longer
+    # threshold even though the provider is still Claude.
+    api_key_account = _account(
+        "claude", credential="sk-ant-placeholder", last_checked=two_minutes_ago
+    )
+    assert usage_is_stale(api_key_account, now) is False
+    assert usage_is_stale(_account("chatgpt", last_checked=two_minutes_ago), now) is False
+    assert (
+        usage_is_stale(
+            _account("chatgpt", last_checked=(now - timedelta(minutes=20)).isoformat()), now
+        )
+        is True
+    )
 
 
 def _read(projects):

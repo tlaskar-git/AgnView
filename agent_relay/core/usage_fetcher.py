@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import httpx
 from datetime import datetime, timezone
+from typing import Optional
 
 from .claude_code_usage import (
     SESSION_WINDOW_HOURS,
@@ -20,8 +21,130 @@ from .claude_code_usage import (
 from .models import UsageAccount
 
 
+# How old a stored row may be before a plain read recomputes it.
+#
+# Claude Code usage is summed from transcripts on this machine. It costs one
+# local file walk, hits nothing remote and is subject to no quota, so it is
+# recomputed roughly every minute. That is what stops a fix to how usage is
+# computed or labelled from sitting invisible behind a row written by an older
+# version of the code.
+LOCAL_STALE_SECONDS = 60
+# Every other provider is read over the network from an endpoint that counts
+# requests against a rate limit (ChatGPT, the Anthropic and OpenAI APIs, Gemini,
+# DeepSeek) or from a harness that can be slow to answer. Fifteen minutes keeps
+# a dashboard left open all day well short of anything a provider would object
+# to, and a manual Refresh is always available for a figure needed sooner.
+REMOTE_STALE_SECONDS = 900
+
+
 def _get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso(raw: Optional[str]) -> Optional[datetime]:
+    """Read one of our own ISO stamps back, treating a naive one as UTC."""
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _is_local_claude_code(account: UsageAccount) -> bool:
+    """True when this account is measured from files on this machine."""
+    provider = account.provider.lower()
+    cred = (account.credential or "").strip()
+    is_claude = "claude" in provider or "anthropic" in provider
+    return is_claude and not cred.startswith("sk-ant-")
+
+
+def staleness_seconds(account: UsageAccount) -> int:
+    """The age at which this account's stored figures stop being trusted."""
+    return LOCAL_STALE_SECONDS if _is_local_claude_code(account) else REMOTE_STALE_SECONDS
+
+
+def usage_is_stale(account: UsageAccount, now: Optional[datetime] = None) -> bool:
+    """True when the stored row is old enough that it must be recomputed."""
+    last = _parse_iso(account.last_checked)
+    if last is None:
+        return True
+    now = now or datetime.now(timezone.utc)
+    return (now - last).total_seconds() >= staleness_seconds(account)
+
+
+# A claude.ai session window runs about 5 hours and the weekly window about 7
+# days, so a synced percentage describes a window that is still open for at most
+# that long. After it, the figure is no longer current and the honest local
+# token count takes over again.
+_SESSION_SYNC_MAX_AGE_SECONDS = SESSION_WINDOW_HOURS * 3600
+_WEEKLY_SYNC_MAX_AGE_SECONDS = WEEK_WINDOW_DAYS * 86400
+
+
+def _sync_is_fresh(stamp: Optional[str], max_age_seconds: int, now: datetime) -> bool:
+    synced = _parse_iso(stamp)
+    if synced is None:
+        return False
+    return 0 <= (now - synced).total_seconds() < max_age_seconds
+
+
+_SESSION_SYNCED_FIELDS = (
+    "session_title",
+    "session_reset_time",
+    "session_percent_used",
+    "session_percent_left",
+    "session_tokens_used",
+    "percent_used",
+    "reset_time",
+    "tokens_used",
+    "tokens_limit",
+    "tokens_remaining",
+)
+
+_WEEKLY_SYNCED_FIELDS = (
+    "weekly_title",
+    "weekly_reset_time",
+    "weekly_percent_used",
+    "weekly_percent_left",
+    "weekly_tokens_used",
+    "weekly_breakdown",
+)
+
+
+def _capture_synced_windows(account: UsageAccount, now: datetime) -> dict:
+    """Hold on to the fields a real telemetry sync owns and still stands behind.
+
+    A percentage that came from claude.ai's own usage page is the figure the
+    operator wants to see. A local recompute has no percentage to offer, so it
+    must not blank one that a sync measured while that window is still open.
+    """
+    kept: dict = {}
+    if account.session_percent_used is not None and _sync_is_fresh(
+        account.session_telemetry_synced_at, _SESSION_SYNC_MAX_AGE_SECONDS, now
+    ):
+        kept.update({field: getattr(account, field) for field in _SESSION_SYNCED_FIELDS})
+    if account.weekly_percent_used is not None and _sync_is_fresh(
+        account.weekly_telemetry_synced_at, _WEEKLY_SYNC_MAX_AGE_SECONDS, now
+    ):
+        kept.update({field: getattr(account, field) for field in _WEEKLY_SYNCED_FIELDS})
+    return kept
+
+
+def _restore_synced_windows(account: UsageAccount, kept: dict) -> UsageAccount:
+    """Put a still-valid synced window back over whatever the recompute wrote."""
+    if not kept:
+        return account
+    for field, value in kept.items():
+        setattr(account, field, value)
+    # The restored percentage is a real measurement inside a window that is
+    # still open, so the account has a figure to show even when nothing could be
+    # read locally this time.
+    account.status = "active"
+    account.error_message = None
+    return account
 
 
 def _mark_unavailable(account: UsageAccount, reason: str) -> UsageAccount:
@@ -124,29 +247,43 @@ def _fetch_claude_live(account: UsageAccount) -> UsageAccount:
     """Report Claude Code usage measured from the transcripts on this machine.
 
     Anthropic publishes no local file and no endpoint that says how much of a
-    subscription window is spent, so no percentage is reported for a Claude
-    Code account. What can be counted exactly is the tokens Claude Code has
-    recorded, and that is what the dashboard shows.
+    subscription window is spent, so this function reports no percentage of its
+    own. What can be counted exactly is the tokens Claude Code has recorded, and
+    that is what the dashboard shows.
+
+    The one percentage that can be real is the one the browser telemetry sync
+    reads off claude.ai's own usage page. While that sync still describes an
+    open window, it is kept exactly as it was synced rather than being replaced
+    by this machine's token count.
     """
     cred = (account.credential or "").strip()
-    now = _get_utc_now_iso()
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
 
     if cred.startswith("sk-ant-"):
         return _fetch_anthropic_api_key(account, cred)
+
+    kept = _capture_synced_windows(account, now_dt)
 
     plan_read = _read_claude_plan(account)
     usage = read_claude_code_usage()
     if usage is None:
         if not plan_read:
-            return _mark_unavailable(
-                account,
-                "No Claude Code data on this machine. Sign in to Claude Code, or "
-                "add an Anthropic API key to this account.",
+            return _restore_synced_windows(
+                _mark_unavailable(
+                    account,
+                    "No Claude Code data on this machine. Sign in to Claude Code, or "
+                    "add an Anthropic API key to this account.",
+                ),
+                kept,
             )
-        return _mark_unavailable(
-            account,
-            f"Claude Code is signed in but has written no transcripts under "
-            f"{Path.home() / '.claude' / 'projects'}, so there is nothing to count yet.",
+        return _restore_synced_windows(
+            _mark_unavailable(
+                account,
+                f"Claude Code is signed in but has written no transcripts under "
+                f"{Path.home() / '.claude' / 'projects'}, so there is nothing to count yet.",
+            ),
+            kept,
         )
 
     # The card prints the token total itself, from session_tokens_used. The
@@ -175,7 +312,7 @@ def _fetch_claude_live(account: UsageAccount) -> UsageAccount:
     account.status = "active"
     account.error_message = None
     account.last_checked = now
-    return account
+    return _restore_synced_windows(account, kept)
 
 
 def _fetch_anthropic_api_key(account: UsageAccount, cred: str) -> UsageAccount:

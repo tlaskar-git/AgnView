@@ -23,7 +23,7 @@ from ..core.models import (
     UsageAccount, CreateUsageAccountRequest, UpdateUsageAccountRequest, DetectTokenRequest, UsageTelemetryPayload, ConsoleDispatchPayload
 )
 from ..core.prompts import format_web_prompt_for_agent
-from ..core.usage_fetcher import fetch_account_usage
+from ..core.usage_fetcher import fetch_account_usage, usage_is_stale
 from ..core.pairing import (
     build_pairing_payload, generate_qr_svg, get_or_create_pairing_token,
     regenerate_pairing_token
@@ -371,8 +371,15 @@ def list_usage_accounts(request: Request, provider: Optional[str] = None):
     masked_list = []
     for raw in raw_accounts:
         acc = UsageAccount(**raw)
-        # If dual-limit telemetry is missing from older stored records, enrich via live probe
-        if not acc.session_title or not acc.weekly_title:
+        # Recompute on age, not on whether a row was ever filled in. Serving a
+        # row that has figures but is old meant an account computed once by any
+        # older version of the code was handed back unchanged for ever, so a fix
+        # to how usage is counted or labelled never reached the page until
+        # somebody clicked Refresh. The threshold is per provider: about a
+        # minute for Claude Code, which is a local file walk, and fifteen
+        # minutes for anything read over a rate-limited network endpoint. See
+        # usage_fetcher.LOCAL_STALE_SECONDS and REMOTE_STALE_SECONDS.
+        if usage_is_stale(acc):
             acc = fetch_account_usage(acc)
             db.save_usage_account(acc.model_dump())
         masked_list.append(acc.masked())
@@ -502,6 +509,16 @@ def sync_account_telemetry(account_id: str, payload: UsageTelemetryPayload, requ
     if not raw:
         raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found.")
     acc = UsageAccount(**raw)
+    # A percentage arriving here was read off the provider's own usage page, so
+    # it is the real share of a real window. Stamp the window it belongs to, so
+    # the next local recompute preserves it instead of blanking it and dropping
+    # back to a token count. Only a window that actually carried a percentage
+    # gets stamped.
+    synced_at = datetime.now(timezone.utc).isoformat()
+    if payload.session_percent_used is not None or payload.session_percent_left is not None:
+        acc.session_telemetry_synced_at = synced_at
+    if payload.weekly_percent_used is not None or payload.weekly_percent_left is not None:
+        acc.weekly_telemetry_synced_at = synced_at
     if payload.plan_name:
         acc.plan_name = payload.plan_name
     if payload.plan_label:

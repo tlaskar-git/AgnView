@@ -188,6 +188,13 @@ class UsageAccount(BaseModel):
     weekly_percent_used: Optional[float] = None # e.g. 0.0, 3.0
     weekly_percent_left: Optional[float] = None # e.g. 100.0, 97.0
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None # e.g. [{"label": "All models", "percent_used": 0, "reset_time": "Resets Sat 7:00 PM"}, {"label": "Fable", ...}]
+    # When a genuine telemetry sync last wrote each window's percentage. They
+    # mark a figure as measured on the provider's own usage page rather than
+    # derived here, so a later local recompute knows not to throw it away. Only
+    # the telemetry endpoint sets them, and only for the window whose percentage
+    # the payload actually carried.
+    session_telemetry_synced_at: Optional[str] = None
+    weekly_telemetry_synced_at: Optional[str] = None
 
     def __init__(self, **data):
         if "auth_credential" in data and not data.get("credential"):
