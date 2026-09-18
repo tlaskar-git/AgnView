@@ -26,6 +26,11 @@ MACOS_LABEL = "com.agnview.hub"
 MACOS_PLIST_PATH = Path.home() / "Library" / "LaunchAgents" / f"{MACOS_LABEL}.plist"
 LINUX_AUTOSTART_PATH = Path.home() / ".config" / "autostart" / "agnview.desktop"
 
+# Marker that a person explicitly ran `agnview autostart disable`. Its
+# presence stops `ensure_enabled_by_default` from turning autostart back on
+# behind their back on the next `agnview serve`.
+OPT_OUT_MARKER = Path.home() / ".agnview" / ".autostart_opt_out"
+
 
 def _resolve_command_parts() -> list[str]:
     """Work out the command that should run AgnView at login.
@@ -214,3 +219,41 @@ def status() -> bool:
     if sys.platform == "darwin":
         return _macos_status()
     return _linux_status()
+
+
+def enable_and_clear_opt_out() -> str:
+    """Enable autostart and forget any earlier explicit opt-out, so a
+    person who disables it and later re-enables it gets the default
+    behaviour back."""
+    result = enable()
+    OPT_OUT_MARKER.unlink(missing_ok=True)
+    return result
+
+
+def disable_and_remember_opt_out() -> str:
+    """Disable autostart and remember that a person did it on purpose, so
+    `ensure_enabled_by_default` leaves it off on the next `agnview serve`."""
+    result = disable()
+    OPT_OUT_MARKER.parent.mkdir(parents=True, exist_ok=True)
+    OPT_OUT_MARKER.write_text("")
+    return result
+
+
+def ensure_enabled_by_default() -> bool:
+    """Register autostart on every `agnview serve` unless it is already
+    registered or a person explicitly turned it off before. This is what
+    bakes "starts after reboot" into every install: nobody has to remember
+    to run `agnview autostart enable` themselves. Failures are swallowed,
+    since a hub that cannot register a registry/plist/desktop entry must
+    still be able to serve. Returns True only if it just turned autostart
+    on (so callers can print a one-off notice instead of one on every
+    start)."""
+    if OPT_OUT_MARKER.exists():
+        return False
+    try:
+        if not status():
+            enable()
+            return True
+    except Exception:
+        pass
+    return False
