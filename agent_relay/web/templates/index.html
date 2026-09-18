@@ -32,6 +32,9 @@
   </script>
   <!-- Lucide Icons -->
   <script src="/static/vendor/lucide.min.js"></script>
+  <!-- Markdown rendering for agent console output (self-hosted, see vendor file headers for pinned versions) -->
+  <script src="/static/vendor/marked.min.js"></script>
+  <script src="/static/vendor/purify.min.js"></script>
   <style>
     /* Self-hosted so the dashboard renders fully with no internet connection.
        Both are variable fonts, so one file per family covers every weight. */
@@ -360,6 +363,150 @@
       mask: url("/static/pipelines-icon.png") no-repeat center / contain;
       flex-shrink: 0;
     }
+
+    /* Console message stream: chat-style structure */
+    .console-turn {
+      margin-top: 1.1rem;
+      margin-bottom: 1.1rem;
+    }
+    .console-turn:first-child {
+      margin-top: 0.25rem;
+    }
+
+    /* Rendered markdown inside agent messages */
+    .console-markdown {
+      display: block;
+    }
+    .console-markdown > *:first-child { margin-top: 0; }
+    .console-markdown > *:last-child { margin-bottom: 0; }
+    .console-markdown p {
+      margin: 0.4rem 0;
+      line-height: 1.55;
+    }
+    .console-markdown ul,
+    .console-markdown ol {
+      margin: 0.4rem 0;
+      padding-left: 1.35rem;
+    }
+    .console-markdown ul {
+      list-style: disc;
+    }
+    .console-markdown ol {
+      list-style: decimal;
+    }
+    .console-markdown li {
+      margin: 0.2rem 0;
+      line-height: 1.5;
+    }
+    .console-markdown li::marker {
+      color: var(--color-action);
+    }
+    .console-markdown h1,
+    .console-markdown h2,
+    .console-markdown h3,
+    .console-markdown h4 {
+      font-weight: 700;
+      margin: 0.6rem 0 0.3rem;
+      line-height: 1.3;
+    }
+    .console-markdown h1 { font-size: 1.05rem; }
+    .console-markdown h2 { font-size: 1rem; }
+    .console-markdown h3,
+    .console-markdown h4 { font-size: 0.92rem; }
+    .console-markdown strong { font-weight: 700; }
+    .console-markdown em { font-style: italic; }
+    .console-markdown blockquote {
+      margin: 0.5rem 0;
+      padding: 0.1rem 0 0.1rem 0.75rem;
+      border-left: 3px solid var(--border-color);
+      color: var(--text-secondary);
+    }
+    .console-markdown a {
+      color: var(--color-action);
+      text-decoration: underline;
+      word-break: break-word;
+    }
+    .console-markdown code {
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 0.85em;
+      background-color: var(--bg-raised);
+      border: 1px solid var(--border-color);
+      border-radius: 4px;
+      padding: 0.1rem 0.35rem;
+      word-break: break-word;
+    }
+    .console-markdown pre {
+      margin: 0.5rem 0;
+      padding: 0.6rem 0.75rem;
+      background-color: var(--bg-raised);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      overflow-x: auto;
+    }
+    .console-markdown pre code {
+      background: none;
+      border: none;
+      padding: 0;
+      white-space: pre;
+    }
+    .console-markdown table {
+      border-collapse: collapse;
+      margin: 0.5rem 0;
+      font-size: 0.85em;
+    }
+    .console-markdown th,
+    .console-markdown td {
+      border: 1px solid var(--border-color);
+      padding: 0.25rem 0.5rem;
+    }
+    .console-markdown hr {
+      border: none;
+      border-top: 1px solid var(--border-color);
+      margin: 0.6rem 0;
+    }
+
+    /* Collapse / expand for long agent messages */
+    .console-msg-shell {
+      position: relative;
+    }
+    .console-msg-body.console-collapsed {
+      max-height: 240px;
+      overflow: hidden;
+    }
+    .console-fade-overlay {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 28px;
+      height: 56px;
+      background: linear-gradient(to bottom, transparent, var(--console-fade-color, var(--bg-surface)));
+      pointer-events: none;
+    }
+    .console-show-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      margin-top: 0.35rem;
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--color-action);
+      cursor: pointer;
+      background: none;
+      border: none;
+      padding: 0;
+    }
+    .console-show-toggle:hover {
+      text-decoration: underline;
+    }
+    .console-show-toggle svg,
+    .console-show-toggle i {
+      transition: transform 0.15s ease;
+    }
+    .console-show-toggle-expanded svg,
+    .console-show-toggle-expanded i {
+      transform: rotate(180deg);
+    }
+    .hidden { display: none; }
   </style>
   <script>
     (function() {
@@ -3612,19 +3759,87 @@
         }
       }
 
-      container.innerHTML = merged.map(formatConsoleEntryHtml).join('');
+      container.innerHTML = merged.map((entry, i) => formatConsoleEntryHtml(entry, i)).join('');
 
       if (document.getElementById('console-autoscroll')?.checked) {
         container.scrollTop = container.scrollHeight;
       }
       safeCreateIcons();
+      setupConsoleCollapsibles();
     }
 
     function appendConsoleLine(entry) {
       renderConsoleStream();
     }
 
-    function formatConsoleEntryHtml(entry) {
+    // Parse agent output as markdown and sanitize the result before it ever
+    // touches innerHTML. Never trust agent-produced text as raw HTML.
+    function renderAgentMarkdown(content) {
+      try {
+        const rawHtml = marked.parse(content, { breaks: true, gfm: true });
+        return DOMPurify.sanitize(rawHtml, {
+          ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+        });
+      } catch (err) {
+        console.error('Markdown render failed, falling back to plain text', err);
+        return escapeHtml(content).replace(/\n/g, '<br>');
+      }
+    }
+
+    // After the console stream is (re)rendered, collapse any message body
+    // that is taller than a few lines and reveal a "Show more" toggle.
+    // Short messages are left completely untouched (no control shown).
+    // Re-run on window resize (debounced) so a layout width change never
+    // leaves a stale collapse state behind.
+    let _consoleCollapseResizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(_consoleCollapseResizeTimer);
+      _consoleCollapseResizeTimer = setTimeout(setupConsoleCollapsibles, 150);
+    });
+
+    function setupConsoleCollapsibles() {
+      document.querySelectorAll('.console-msg-body').forEach(body => {
+        const id = body.dataset.msgId;
+        const fade = document.getElementById(`msg-fade-${id}`);
+        const toggle = document.getElementById(`msg-toggle-${id}`);
+        if (!fade || !toggle) return;
+
+        const label = toggle.querySelector('span');
+        body.classList.remove('console-collapsed');
+        fade.classList.add('hidden');
+        toggle.classList.add('hidden');
+        if (label) label.textContent = 'Show more';
+
+        if (body.scrollHeight > 260) {
+          body.classList.add('console-collapsed');
+          fade.classList.remove('hidden');
+          toggle.classList.remove('hidden');
+        }
+      });
+    }
+
+    function toggleConsoleMessage(id) {
+      const body = document.getElementById(`msg-body-${id}`);
+      const fade = document.getElementById(`msg-fade-${id}`);
+      const toggle = document.getElementById(`msg-toggle-${id}`);
+      const label = toggle?.querySelector('span');
+      if (!body) return;
+
+      const isCollapsed = body.classList.contains('console-collapsed');
+      if (isCollapsed) {
+        body.classList.remove('console-collapsed');
+        fade?.classList.add('hidden');
+        toggle?.classList.add('console-show-toggle-expanded');
+        if (label) label.textContent = 'Show less';
+      } else {
+        body.classList.add('console-collapsed');
+        fade?.classList.remove('hidden');
+        toggle?.classList.remove('console-show-toggle-expanded');
+        if (label) label.textContent = 'Show more';
+      }
+    }
+
+    function formatConsoleEntryHtml(entry, msgIndex) {
       let rawContent = (entry.content || '').trim();
       if (!rawContent) return '';
 
@@ -3659,18 +3874,18 @@
 
       if (isUser) {
         return `
-          <div class="flex justify-start my-0.5 select-text w-full">
+          <div class="console-turn flex justify-start select-text w-full">
             <div class="flex items-start gap-2.5 w-full text-left text-start">
               <!-- User Avatar -->
               <div class="w-7 h-7 rounded-lg bg-blue-600 dark:bg-blue-500 text-white flex items-center justify-center shrink-0 shadow-xs mt-0.5" title="You">
                 <i data-lucide="user" class="w-3.5 h-3.5"></i>
               </div>
               <div class="flex-1 min-w-0 text-left text-start">
-                <div class="flex items-center gap-2 mb-0.5 px-0.5 text-left text-start">
+                <div class="flex items-center gap-2 mb-1 px-0.5 text-left text-start">
                   <span class="text-xs font-semibold text-[var(--text-main)]">You</span>
                   <span class="text-[10px] text-[var(--text-secondary)] font-mono">${timeStr}</span>
                 </div>
-                <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] text-[var(--text-main)] px-1 py-0.5 rounded-xl rounded-tl-xs text-xs sm:text-[13px] leading-snug break-words whitespace-pre-wrap font-sans text-left text-start shadow-2xs">${escapeHtml(content)}</div>
+                <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] text-[var(--text-main)] px-3 py-2 rounded-xl rounded-tl-xs text-xs sm:text-[13px] leading-snug break-words whitespace-pre-wrap font-sans text-left text-start shadow-2xs">${escapeHtml(content)}</div>
               </div>
             </div>
           </div>
@@ -3728,7 +3943,7 @@
 
       if (entry.source === 'system_notice') {
         return `
-          <div class="flex items-center justify-center my-1 w-full">
+          <div class="flex items-center justify-center my-2 w-full">
             <div class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-[var(--bg-raised)] border border-[var(--border-color)] text-[11px] text-[var(--text-secondary)] font-mono shadow-2xs">
               <i data-lucide="info" class="w-3 h-3 text-[var(--color-action)]"></i>
               <span>${escapeHtml(content)}</span>
@@ -3739,24 +3954,33 @@
       }
 
       const isError = entry.source === 'agent_stderr' || entry.source === 'stderr';
-      const bubbleBg = isError 
-        ? "bg-red-500/10 border-red-500/20 text-red-700 dark:text-red-300" 
+      const bubbleBg = isError
+        ? "bg-red-500/10 border-red-500/20 text-red-700 dark:text-red-300"
         : "bg-[var(--bg-surface)] border border-[var(--border-color)] text-[var(--text-main)]";
+      const fadeVar = isError ? '' : `style="--console-fade-color: var(--bg-surface);"`;
+      const bodyHtml = renderAgentMarkdown(content);
 
       return `
-        <div class="flex justify-start my-0.5 select-text w-full">
+        <div class="console-turn flex justify-start select-text w-full">
           <div class="flex items-start gap-2.5 w-full text-left text-start">
             <!-- Provider Brand Logo Avatar -->
             <div class="w-8 h-8 rounded-xl ${avatarBg} flex items-center justify-center shrink-0 shadow-xs mt-0.5 p-1.5" title="${escapeHtml(agentName)}">
               ${logoSvg}
             </div>
             <div class="flex-1 min-w-0 text-left text-start">
-              <div class="flex items-center gap-2 mb-0.5 px-0.5 text-left text-start">
+              <div class="flex items-center gap-2 mb-1 px-0.5 text-left text-start">
                 <span class="text-xs font-bold text-[var(--text-main)]">${escapeHtml(agentName)}</span>
                 <span class="border px-1.5 py-0.2 text-[9px] rounded-full font-mono uppercase font-semibold ${badgeStyle}">Agent</span>
                 <span class="text-[10px] text-[var(--text-secondary)] font-mono">${timeStr}</span>
               </div>
-              <div class="${bubbleBg} px-1 py-0.5 rounded-xl rounded-tl-xs text-xs sm:text-[13px] leading-snug break-words whitespace-pre-wrap font-sans text-left text-start shadow-xs">${escapeHtml(content)}</div>
+              <div class="console-msg-shell">
+                <div id="msg-body-${msgIndex}" data-msg-id="${msgIndex}" class="console-msg-body console-markdown ${bubbleBg} px-3 py-2 rounded-xl rounded-tl-xs text-xs sm:text-[13px] break-words font-sans text-left text-start shadow-xs" ${fadeVar}>${bodyHtml}</div>
+                <div id="msg-fade-${msgIndex}" class="console-fade-overlay hidden"></div>
+              </div>
+              <button id="msg-toggle-${msgIndex}" type="button" class="console-show-toggle hidden" onclick="toggleConsoleMessage('${msgIndex}')">
+                <i data-lucide="chevron-down" class="w-3 h-3"></i>
+                <span>Show more</span>
+              </button>
             </div>
           </div>
         </div>
