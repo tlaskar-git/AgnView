@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -800,6 +801,30 @@ async def reset_console_session(
     engine = get_engine(request)
     result = await engine.runner.reset_session(agent, working_directory)
     return {"status": "reset", **result}
+
+
+@router.get("/console/live-sessions", response_model=List[Dict[str, Any]])
+def list_live_sessions(request: Request):
+    """List the CLI processes AgnView is currently holding open.
+
+    These are the sessions a dispatch started and kept alive, one per agent
+    and working directory. The Sessions view lists them so an operator can see
+    what is running and carry on talking to it, instead of having to guess
+    from the console that a process is still there.
+
+    Externally started CLI sessions are not in this registry and are not
+    reported here.
+    """
+    engine = get_engine(request)
+    moment = time.monotonic()
+    sessions = [
+        session.describe(moment)
+        for session in list(engine.runner.live_sessions.values())
+    ]
+    # Busiest first, then most recently active, so the one being worked on is
+    # at the top of the list.
+    sessions.sort(key=lambda s: (not s["busy"], s["idle_seconds"]))
+    return sessions
 
 
 @router.get("/console/logs", response_model=List[Dict[str, Any]])

@@ -421,3 +421,51 @@ def test_a_lost_process_fails_every_waiting_turn():
 
 def test_stream_update_defaults_to_ignoring_the_line():
     assert StreamUpdate().kind == "ignore"
+
+
+# --------------------------------------------------------------------------
+# What the Sessions view reads
+# --------------------------------------------------------------------------
+
+async def _test_describe_identifies_the_session_for_the_sessions_view():
+    session = _fake_live_session()
+    session.started_monotonic = time.monotonic() - 90.0
+    session.last_activity = time.monotonic() - 12.0
+
+    described = session.describe()
+
+    assert described["agent"] == "claude_code"
+    assert described["working_directory"] == "C:/tmp"
+    assert described["busy"] is False
+    assert described["turns_completed"] == 0
+    assert 89.0 <= described["uptime_seconds"] <= 95.0
+    assert 11.0 <= described["idle_seconds"] <= 17.0
+
+
+async def _test_describe_carries_the_console_thread_and_turn_count():
+    """Clicking a session must reach the thread its replies are written into."""
+    session = _fake_live_session()
+    await session.submit("hello", ui_session_id="sess-abc123")
+
+    assert session.describe()["session_id"] == "sess-abc123"
+    assert session.describe()["busy"] is True
+    assert session.describe()["turns_completed"] == 0
+
+    await session._handle_line(json.dumps({
+        "type": "result", "subtype": "success", "session_id": "cli-1", "result": "done",
+    }))
+
+    described = session.describe()
+    assert described["busy"] is False
+    assert described["turns_completed"] == 1
+    assert described["cli_session_id"] == "cli-1"
+    # The thread id survives the turn, so a follow-up lands in the same place.
+    assert described["session_id"] == "sess-abc123"
+
+
+def test_describe_identifies_the_session_for_the_sessions_view():
+    asyncio.run(_test_describe_identifies_the_session_for_the_sessions_view())
+
+
+def test_describe_carries_the_console_thread_and_turn_count():
+    asyncio.run(_test_describe_carries_the_console_thread_and_turn_count())

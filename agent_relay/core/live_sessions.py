@@ -322,6 +322,17 @@ class LiveSession:
         self.closed = False
         self.reader_task: Optional[asyncio.Task] = None
 
+        # Everything below exists so the Sessions view can identify this
+        # process without reaching into the runner. started_at is wall clock
+        # for display; the monotonic pair drives the ages, because wall clock
+        # can move under us.
+        self.started_at = time.time()
+        self.started_monotonic = self.last_activity
+        self.turns_completed = 0
+        # The console thread this process is writing into, so clicking a
+        # session can load its transcript and reply into the same thread.
+        self.ui_session_id: Optional[str] = None
+
     @property
     def busy(self) -> bool:
         return self.current is not None or bool(self.queue)
@@ -333,11 +344,36 @@ class LiveSession:
     def start_reader(self) -> None:
         self.reader_task = asyncio.ensure_future(self._read_loop())
 
+    def describe(self, now: Optional[float] = None) -> dict:
+        """Describe this process for the Sessions view.
+
+        ``now`` is a monotonic reading, passed in so the ages can be tested
+        without waiting for real time to pass.
+        """
+        moment = time.monotonic() if now is None else now
+        return {
+            "agent": self.agent,
+            "working_directory": self.cwd,
+            "dialect": self.dialect,
+            "session_id": self.ui_session_id,
+            "cli_session_id": self.cli_session_id,
+            "busy": self.busy,
+            "alive": self.alive,
+            "queued_turns": len(self.queue),
+            "turns_completed": self.turns_completed,
+            "started_at": self.started_at,
+            "uptime_seconds": max(0.0, moment - self.started_monotonic),
+            "idle_seconds": max(0.0, moment - self.last_activity),
+            "pid": getattr(self.process, "pid", None),
+        }
+
     # -- sending -----------------------------------------------------------
 
     async def submit(self, prompt: str, ui_session_id: Optional[str] = None) -> LiveTurn:
         """Queue a turn, sending it straight away when the process is idle."""
         turn = LiveTurn(prompt=prompt, ui_session_id=ui_session_id)
+        if ui_session_id:
+            self.ui_session_id = ui_session_id
         self.last_activity = time.monotonic()
         if self.current is None:
             await self._start_turn(turn)
@@ -404,6 +440,7 @@ class LiveSession:
                 turn.text = update.text
             turn.session_id = update.session_id or self.cli_session_id
             turn.is_error = update.is_error
+            self.turns_completed += 1
             self.current = None
             await self._on_complete(self, turn)
             turn.done.set()

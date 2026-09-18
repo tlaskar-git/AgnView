@@ -10,6 +10,15 @@ is gone.
 So this module reports what can be counted and nothing else. Tokens are real,
 summed from those records. The share of a plan limit is not derivable here, so
 nothing in this module returns one.
+
+Scope: every project directory under ``~/.claude/projects`` on this machine,
+including the turns subagents took. That is deliberate. Anthropic bills the
+signed-in account for all of it, so narrowing the sum to one repository would
+report less than the account actually spent. What the sum cannot see is Claude
+Code run under a different account or on another machine, so it is reported as
+a per-machine figure and labelled as one. ``projects_counted`` is carried
+alongside the totals so a large turn count can be explained rather than merely
+asserted.
 """
 
 import json
@@ -39,6 +48,10 @@ class ClaudeCodeUsage:
     week_turns: int
     transcripts_read: int
     latest_activity: Optional[datetime]
+    # Distinct project directories that contributed a turn inside the week
+    # window. Shown on the card so the turn count reads as a machine total
+    # rather than as one person's typing.
+    projects_counted: int = 0
 
 
 def _parse_timestamp(raw: object) -> Optional[datetime]:
@@ -101,6 +114,7 @@ def read_usage(
     # files happened to be walked.
     by_request: dict = {}
     unkeyed: list = []
+    projects: set = set()
 
     # rglob, not glob: Claude Code writes a subagent's turns to
     # <project>/<session>/subagents/<agent>.jsonl, two levels below the session
@@ -114,6 +128,14 @@ def read_usage(
             continue
 
         transcripts_read += 1
+        # The first path part under the root is the project directory Claude
+        # Code encoded from the working directory. A subagent transcript sits
+        # deeper, under the same project, so it does not count as another one.
+        try:
+            project = transcript.relative_to(root).parts[0]
+        except (ValueError, IndexError):
+            project = transcript.parent.name
+
         try:
             handle = transcript.open("r", encoding="utf-8", errors="replace")
         except OSError:
@@ -138,6 +160,7 @@ def read_usage(
                     continue
 
                 tokens = _tokens_in(usage)
+                projects.add(project)
                 key = record.get("requestId") or message.get("id")
                 if key is None:
                     unkeyed.append((stamp, tokens))
@@ -163,4 +186,5 @@ def read_usage(
         week_turns=week_turns,
         transcripts_read=transcripts_read,
         latest_activity=latest,
+        projects_counted=len(projects),
     )

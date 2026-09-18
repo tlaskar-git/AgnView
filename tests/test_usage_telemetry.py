@@ -47,7 +47,16 @@ def test_claude_reports_measured_tokens_and_no_invented_percentage(tmp_path, mon
     assert acc.status == "active"
     assert acc.session_tokens_used == 15
     assert acc.weekly_tokens_used == 15
-    assert "15 tokens" in (acc.session_reset_time or "")
+    # The sub-line says how the total was reached. It must not restate the
+    # total itself, which the card already prints from session_tokens_used:
+    # doing both rendered the same figure twice, back to back.
+    assert acc.session_reset_time == "1 turn across 1 project, subagents included"
+    assert "token" not in (acc.session_reset_time or "")
+    assert "token" not in (acc.weekly_reset_time or "")
+    # The window covers every project on this machine, so the label says so
+    # rather than implying it is one repository's usage.
+    assert acc.session_title == "Last 5 hours, this machine"
+    assert acc.weekly_title == "Last 7 days, this machine"
     # No plan limit is published anywhere on this machine, so no share of one
     # may be shown.
     assert acc.session_percent_used is None
