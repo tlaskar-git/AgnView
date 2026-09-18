@@ -2343,8 +2343,11 @@
     }
 
     function updateAgentSelectors() {
-      const adapters = window.loadedAdapters;
-      if (!adapters || adapters.length === 0) return;
+      // A disabled adapter is configured but deliberately switched off (e.g.
+      // its CLI's auth path is broken or deprecated), so it never appears as
+      // a dispatch target or a stream filter, only in the raw /api/agents list.
+      const adapters = (window.loadedAdapters || []).filter(a => a.enabled !== false);
+      if (adapters.length === 0) return;
 
       // 1. Update Dispatch Target Dropdown
       const dispatchSelect = document.getElementById('dispatch-target-agent');
