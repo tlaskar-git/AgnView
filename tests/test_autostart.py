@@ -62,6 +62,11 @@ class FakeWinReg:
 @pytest.fixture
 def fake_windows(monkeypatch):
     monkeypatch.setattr(sys, "platform", "win32")
+    # shutil.which's real implementation branches on sys.platform too, and
+    # calls Windows-only helpers that do not exist when the tests run on
+    # Linux/macOS CI with sys.platform faked to "win32". Give it a
+    # deterministic default here; tests that care override it themselves.
+    monkeypatch.setattr(autostart.shutil, "which", lambda name: None)
     fake = FakeWinReg()
     fake_module = types.SimpleNamespace(**{k: getattr(fake, k) for k in dir(fake) if not k.startswith("_")})
     monkeypatch.setitem(sys.modules, "winreg", fake_module)
