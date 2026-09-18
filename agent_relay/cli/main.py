@@ -117,6 +117,14 @@ def cmd_serve(args):
     os.environ["AGENT_RELAY_TOKEN"] = token
     console.print(f"  • Pairing Token: [bold yellow]{token}[/bold yellow]")
 
+    # Every install should come back up after a reboot with no manual step.
+    # Only touches anything the first time autostart is not yet registered
+    # and nobody has explicitly turned it off with `agnview autostart disable`.
+    from ..core import autostart
+
+    if autostart.ensure_enabled_by_default():
+        console.print("  • Autostart: [bold green]enabled[/bold green] (AgnView will start automatically at login; disable with `agnview autostart disable`)")
+
     # A bad setting stops the iroh transport and nothing else. Say so here
     # rather than letting the hub look like it came up clean.
     from ..core.config import load_config
@@ -797,10 +805,10 @@ def cmd_autostart(args):
 
     try:
         if args.autostart_action == "enable":
-            result = autostart.enable()
+            result = autostart.enable_and_clear_opt_out()
             console.print(Panel(result, title="Autostart", style="bold green"))
         elif args.autostart_action == "disable":
-            result = autostart.disable()
+            result = autostart.disable_and_remember_opt_out()
             console.print(Panel(result, title="Autostart", style="bold yellow"))
         elif args.autostart_action == "status":
             enabled = autostart.status()

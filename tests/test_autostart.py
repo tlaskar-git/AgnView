@@ -111,3 +111,49 @@ def test_windows_enable_then_disable_round_trip(fake_windows):
     result = autostart.disable()
     assert "Autostart disabled" in result
     assert autostart.status() is False
+
+
+@pytest.fixture
+def fake_opt_out_marker(monkeypatch, tmp_path):
+    """Point the opt-out marker at a throwaway path so these tests never
+    touch a real person's ~/.agnview directory."""
+    marker = tmp_path / ".agnview" / ".autostart_opt_out"
+    monkeypatch.setattr(autostart, "OPT_OUT_MARKER", marker)
+    return marker
+
+
+def test_ensure_enabled_by_default_turns_on_a_fresh_install(fake_windows, fake_opt_out_marker):
+    assert autostart.status() is False
+    changed = autostart.ensure_enabled_by_default()
+    assert changed is True
+    assert autostart.status() is True
+
+
+def test_ensure_enabled_by_default_is_a_noop_once_already_on(fake_windows, fake_opt_out_marker):
+    autostart.enable()
+    changed = autostart.ensure_enabled_by_default()
+    assert changed is False
+    assert autostart.status() is True
+
+
+def test_ensure_enabled_by_default_respects_explicit_opt_out(fake_windows, fake_opt_out_marker):
+    autostart.disable_and_remember_opt_out()
+    assert fake_opt_out_marker.exists()
+
+    changed = autostart.ensure_enabled_by_default()
+    assert changed is False
+    assert autostart.status() is False
+
+
+def test_enable_and_clear_opt_out_removes_the_marker(fake_windows, fake_opt_out_marker):
+    autostart.disable_and_remember_opt_out()
+    assert fake_opt_out_marker.exists()
+
+    autostart.enable_and_clear_opt_out()
+    assert not fake_opt_out_marker.exists()
+    assert autostart.status() is True
+
+    # A later `agnview serve` should now leave it alone, not fight the
+    # person's decision to turn it back on by hand.
+    changed = autostart.ensure_enabled_by_default()
+    assert changed is False
