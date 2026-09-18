@@ -49,13 +49,18 @@ agents:
     colour: "#8B5CF6"
     enabled: true
 
+  # Disabled by default: Google has deprecated Gemini Code Assist for
+  # individuals and now points that error message at Antigravity instead
+  # (already enabled above), so this fails out of the box for most people.
+  # It also has no resume support in AgnView. Set enabled: true yourself if
+  # your Gemini CLI auth is eligible (e.g. a paid tier) and you want it back.
   gemini:
     display: Google Gemini
     command: ["gemini", "-p", "{prompt}", "--yolo", "--skip-trust"]
     cwd: "{workspace}"
     icon: cpu
     colour: "#3B82F6"
-    enabled: true
+    enabled: false
 """
 
 
