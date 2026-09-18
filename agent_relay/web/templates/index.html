@@ -751,6 +751,13 @@
               <span>New chat</span>
             </button>
             <span id="dispatch-session-hint" class="text-[10px] text-[var(--text-secondary)]"></span>
+            <!-- Shows that a turn is still running for this target. The
+                 composer stays open throughout, so a follow-up message goes
+                 into the same live session. -->
+            <span id="dispatch-working" class="hidden items-center gap-1 text-[10px] text-[var(--color-action)] font-medium" role="status" aria-live="polite">
+              <i data-lucide="loader-2" class="w-3 h-3 animate-spin"></i>
+              <span id="dispatch-working-label">Working</span>
+            </span>
           </div>
 
           <!-- Model Selector Dropdown -->
@@ -3352,6 +3359,7 @@
         try {
           const raw = JSON.parse(e.data);
           const chunk = raw.payload || raw;
+          clearAgentWorking(chunk.agent);
           const added = appendConsoleLogEntry({
             id: chunk.id,
             agent: chunk.agent || 'system',
@@ -3617,9 +3625,19 @@
       return `fp:${entry.timestamp}|${entry.agent}|${entry.content}`;
     }
 
+    // Upsert, not append-only. A streaming reply rewrites the same row as it
+    // grows, so an entry whose id is already held updates that bubble in place
+    // instead of adding a second one.
     function appendConsoleLogEntry(entry) {
       const key = consoleLogKey(entry);
-      if (consoleLogKeys.has(key)) return false;
+      if (consoleLogKeys.has(key)) {
+        if (!key.startsWith('id:')) return false;
+        const existing = consoleLogs.find(e => consoleLogKey(e) === key);
+        if (!existing || existing.content === entry.content) return false;
+        existing.content = entry.content;
+        existing.timestamp = entry.timestamp || existing.timestamp;
+        return true;
+      }
       consoleLogKeys.add(key);
       consoleLogs.push(entry);
       return true;
@@ -4116,13 +4134,59 @@
     // Tag 07 & 09: Console Dispatch with Model, Effort, Skill & Files
     // Forget the conversation held for the current target. The next dispatch
     // carries reset_session, which is what drops the CLI session server side.
-    function startNewChatForTarget() {
+    async function startNewChatForTarget() {
       const agent = document.getElementById('dispatch-target-agent')?.value || 'claude_code';
+      const cwd = document.getElementById('dispatch-cwd')?.value.trim() || '';
       delete consoleSessionByTarget[agent];
       pendingSessionReset[agent] = true;
       updateSessionHint();
       const promptInput = document.getElementById('dispatch-prompt');
       if (promptInput) promptInput.focus();
+      // End the CLI process still holding the old conversation, so the next
+      // message starts one rather than joining what is already running.
+      try {
+        const qs = new URLSearchParams({ agent });
+        if (cwd) qs.set('working_directory', cwd);
+        await fetch(`/api/console/session/reset?${qs.toString()}`, { method: 'POST' });
+      } catch (err) {
+        console.warn('Could not end the live session for this target', err);
+      }
+    }
+
+    // ---- Live turn indicator -------------------------------------------
+    // Counts the turns still running per target. A second message to a busy
+    // target is allowed and joins the same live session, so this counts rather
+    // than flips a flag.
+    const agentTurnsInFlight = {};
+
+    function markAgentWorking(agent) {
+      if (!agent) return;
+      agentTurnsInFlight[agent] = (agentTurnsInFlight[agent] || 0) + 1;
+      renderWorkingIndicator();
+    }
+
+    function clearAgentWorking(agent) {
+      if (!agent) return;
+      agentTurnsInFlight[agent] = Math.max(0, (agentTurnsInFlight[agent] || 0) - 1);
+      if (!agentTurnsInFlight[agent]) delete agentTurnsInFlight[agent];
+      renderWorkingIndicator();
+    }
+
+    function renderWorkingIndicator() {
+      const box = document.getElementById('dispatch-working');
+      if (!box) return;
+      const agent = document.getElementById('dispatch-target-agent')?.value || 'claude_code';
+      const count = agentTurnsInFlight[agent] || 0;
+      const label = document.getElementById('dispatch-working-label');
+      if (count > 0) {
+        if (label) label.innerText = count > 1 ? `Working (${count} queued)` : 'Working';
+        box.classList.remove('hidden');
+        box.classList.add('inline-flex');
+      } else {
+        box.classList.add('hidden');
+        box.classList.remove('inline-flex');
+      }
+      safeCreateIcons();
     }
 
     // Shows whether the next message continues a conversation or starts one.
@@ -4137,6 +4201,7 @@
       } else {
         hint.innerText = '';
       }
+      renderWorkingIndicator();
     }
 
     async function dispatchConsoleCommand() {
@@ -4187,6 +4252,7 @@
           if (body && body.session_id) {
             consoleSessionByTarget[agent] = body.session_id;
           }
+          if (agent !== 'all') markAgentWorking(agent);
           delete pendingSessionReset[agent];
           updateSessionHint();
           promptInput.value = '';

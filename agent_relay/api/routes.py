@@ -784,6 +784,22 @@ async def dispatch_console_command(payload: ConsoleDispatchPayload, request: Req
     }
 
 
+@router.post("/console/session/reset")
+async def reset_console_session(
+    request: Request,
+    agent: str = Query(..., description="Dispatch target whose conversation is being reset"),
+    working_directory: Optional[str] = Query(None, description="Directory the target runs in"),
+):
+    """Forget a target's conversation and end the CLI process still holding it.
+
+    "New chat" calls this so a fresh conversation really starts fresh, instead
+    of waiting for the next dispatch to drop the stored resume id.
+    """
+    engine = get_engine(request)
+    result = await engine.runner.reset_session(agent, working_directory)
+    return {"status": "reset", **result}
+
+
 @router.get("/console/logs", response_model=List[Dict[str, Any]])
 def get_console_logs(
     request: Request,

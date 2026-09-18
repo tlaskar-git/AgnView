@@ -10,11 +10,23 @@ import json
 import os
 import sys
 import shutil
+import time
 from typing import Optional, Dict, Callable, List, Tuple
 from datetime import datetime, timezone
 
 from .db import Database
 from .adapters import AdapterManager, AgentAdapter
+from .live_sessions import (
+    LIVE_SESSION_IDLE_TIMEOUT_SECONDS,
+    LIVE_SESSION_SWEEP_INTERVAL_SECONDS,
+    LIVE_SESSIONS_ENABLED,
+    LiveSession,
+    find_idle_keys,
+    live_session_key,
+    parse_antigravity_stream_line,
+    parse_claude_stream_line,
+    parse_codex_stream_line,
+)
 
 
 def _get_utc_now_iso() -> str:
@@ -26,6 +38,11 @@ def _get_utc_now_iso() -> str:
 # task, so this defaults well above a chat-sized reply. Override with
 # AGENT_RELAY_DISPATCH_TIMEOUT (seconds) for a shorter or longer ceiling.
 DISPATCH_TIMEOUT_SECONDS = float(os.environ.get("AGENT_RELAY_DISPATCH_TIMEOUT", "600"))
+
+# Smallest gap between two live-progress broadcasts for the same reply. Output
+# arrives in bursts, and without this the SSE stream carries one event per
+# fragment for no visible gain.
+STREAM_EMIT_INTERVAL_SECONDS = float(os.environ.get("AGENT_RELAY_STREAM_EMIT_INTERVAL", "0.15"))
 
 
 # ---------------------------------------------------------------------------
@@ -131,6 +148,62 @@ def build_antigravity_args(
     return args
 
 
+def build_claude_live_args(
+    claude_bin: str,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
+) -> List[str]:
+    """Build the Claude Code command for a long-lived, interactive process.
+
+    No prompt goes on the command line. ``--input-format stream-json`` makes the
+    CLI read one NDJSON turn per line from stdin and keep running, so AgnView
+    can send a follow-up into the same process. ``--verbose`` is required by the
+    CLI whenever ``-p`` is paired with ``--output-format stream-json``.
+    """
+    args = [
+        claude_bin, "-p",
+        "--output-format", "stream-json",
+        "--input-format", "stream-json",
+        "--include-partial-messages",
+        "--verbose",
+    ]
+    if resume_session_id:
+        args.extend(["--resume", resume_session_id])
+    if model and model != "auto":
+        args.extend(["--model", model])
+    if effort and effort not in ("default", "none"):
+        args.extend(["--effort", effort])
+    return args
+
+
+def build_antigravity_live_args(
+    agy_bin: str,
+    model: Optional[str] = None,
+    effort: Optional[str] = None,
+    resume_session_id: Optional[str] = None,
+) -> List[str]:
+    """Build the AntiGravity command for a long-lived, interactive process.
+
+    ``--print=`` with an empty value is deliberate. ``agy`` takes an optional
+    value on ``--print``, so a bare ``--print`` swallows the next argument and
+    the CLI refuses the command.
+    """
+    args = [
+        agy_bin, "--print=",
+        "--output-format", "stream-json",
+        "--input-format", "stream-json",
+        "--dangerously-skip-permissions",
+    ]
+    if resume_session_id:
+        args.extend(["--conversation", resume_session_id])
+    if model and model != "auto":
+        args.extend(["--model", ANTIGRAVITY_MODEL_MAP.get(model, model)])
+    if effort and effort != "default":
+        args.extend(["--effort", effort])
+    return args
+
+
 def cli_binary_name(binary_path: str) -> str:
     """Return the bare CLI name for a resolved executable path.
 
@@ -186,6 +259,79 @@ def apply_cli_session_profile(
 
     # Anything else, including the Gemini CLI, has no resume AgnView can drive.
     return cmd, None
+
+
+def build_live_args_from_adapter(
+    resolved_cmd: List[str],
+    prompt: str,
+    resume_id: Optional[str] = None,
+) -> Optional[Tuple[List[str], str]]:
+    """Rewrite a one-shot adapter command as a long-lived streaming one.
+
+    A live process takes its turns on stdin, so the prompt has to come off the
+    command line along with the flag that carried it. Everything else the
+    operator put in the template is kept.
+
+    Returns ``(args, dialect)``, or None for a command AgnView cannot hold open,
+    in which case the caller runs it one-shot exactly as before.
+    """
+    if not resolved_cmd or not prompt:
+        return None
+    name = cli_binary_name(resolved_cmd[0])
+    if name not in ("claude", "agy"):
+        return None
+    if resolved_cmd.count(prompt) != 1:
+        return None
+
+    prompt_flags = ("-p", "--print", "--prompt", "--prompt-interactive", "-i")
+    paired_flags = ("--output-format", "--input-format", "--resume", "--conversation", "--model")
+
+    trimmed: List[str] = []
+    skip_next = False
+    for part in resolved_cmd[1:]:
+        if skip_next:
+            skip_next = False
+            continue
+        if part == prompt:
+            if trimmed and trimmed[-1] in prompt_flags:
+                trimmed.pop()
+            continue
+        if part in paired_flags:
+            # Dropped here and re-added below, so the live flags always win and
+            # never appear twice.
+            skip_next = True
+            continue
+        if part in ("--verbose", "--include-partial-messages"):
+            continue
+        if part.startswith("--print=") or part.startswith("--output-format="):
+            continue
+        trimmed.append(part)
+
+    model_args: List[str] = []
+    tail = resolved_cmd[1:]
+    for i, part in enumerate(tail):
+        if part == "--model" and i + 1 < len(tail):
+            model_args = ["--model", tail[i + 1]]
+            break
+
+    if name == "claude":
+        args = [resolved_cmd[0], "-p"] + trimmed + model_args + [
+            "--output-format", "stream-json",
+            "--input-format", "stream-json",
+            "--include-partial-messages",
+            "--verbose",
+        ]
+        if resume_id:
+            args += ["--resume", resume_id]
+        return args, "claude"
+
+    args = [resolved_cmd[0], "--print="] + trimmed + model_args + [
+        "--output-format", "stream-json",
+        "--input-format", "stream-json",
+    ]
+    if resume_id:
+        args += ["--conversation", resume_id]
+    return args, "antigravity"
 
 
 def resolve_adapter_command(command: List[str], subs: Dict[str, str]) -> List[str]:
@@ -281,11 +427,140 @@ def parse_antigravity_output(raw: str) -> Tuple[str, Optional[str]]:
     return text.strip(), conversation_id if isinstance(conversation_id, str) else None
 
 
+class StreamingBubble:
+    """One console row that grows while a reply streams in.
+
+    The row is written on the first piece of text and rewritten as more
+    arrives, and each rewrite is broadcast under the same row id. The browser
+    updates the bubble it already shows instead of adding a new one, so a
+    watching operator sees the reply grow. The stored row ends up holding the
+    complete final text.
+    """
+
+    def __init__(self, runner: "AgentRunner", agent: str, session_id: Optional[str], source: str = "agent_stdout"):
+        self.runner = runner
+        self.agent = agent
+        self.session_id = session_id
+        self.source = source
+        self.log_id: Optional[int] = None
+        self.text = ""
+        self._last_emit = 0.0
+
+    async def update(self, text: str, force: bool = False) -> None:
+        self.text = text
+        if not text.strip():
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_emit) < STREAM_EMIT_INTERVAL_SECONDS:
+            return
+        self._last_emit = now
+        await self._write(streaming=True)
+
+    async def finish(self, text: Optional[str] = None) -> Optional[int]:
+        if text is not None:
+            self.text = text
+        if not self.text.strip():
+            return self.log_id
+        await self._write(streaming=False)
+        return self.log_id
+
+    async def _write(self, streaming: bool) -> None:
+        if self.log_id is None:
+            self.log_id = self.runner.db.add_console_log(
+                agent=self.agent,
+                source=self.source,
+                content=self.text,
+                session_id=self.session_id,
+            )
+        else:
+            try:
+                self.runner.db.update_console_log(self.log_id, self.text)
+            except Exception:
+                pass
+        if self.runner.broadcast_callback:
+            await self.runner.broadcast_callback("console", "agent_output_chunk", {
+                "id": self.log_id,
+                "agent": self.agent,
+                "source": self.source,
+                "content": self.text,
+                "timestamp": _get_utc_now_iso(),
+                "session_id": self.session_id,
+                "streaming": streaming,
+            })
+
+
 class AgentRunner:
     def __init__(self, db: Database, broadcast_callback: Optional[Callable] = None, adapter_manager: Optional[AdapterManager] = None):
         self.db = db
         self.broadcast_callback = broadcast_callback
         self.adapter_manager = adapter_manager or AdapterManager()
+        # (agent, normalised cwd) -> the CLI process held open for it.
+        self.live_sessions: Dict[Tuple[str, str], LiveSession] = {}
+        self._live_lock = asyncio.Lock()
+        self._sweeper_task: Optional[asyncio.Task] = None
+
+    # ------------------------------------------------------------------
+    # Live session registry
+    # ------------------------------------------------------------------
+
+    def _ensure_sweeper(self) -> None:
+        """Start the idle sweep once a live process exists.
+
+        The sweep runs on its own timer, so an abandoned process is closed
+        without waiting for another dispatch to notice it.
+        """
+        if self._sweeper_task is not None and not self._sweeper_task.done():
+            return
+        try:
+            self._sweeper_task = asyncio.ensure_future(self._sweep_idle_sessions())
+        except RuntimeError:
+            self._sweeper_task = None
+
+    async def _sweep_idle_sessions(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(LIVE_SESSION_SWEEP_INTERVAL_SECONDS)
+            except asyncio.CancelledError:
+                return
+            try:
+                await self.close_idle_live_sessions()
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                continue
+
+    async def close_idle_live_sessions(self, idle_timeout: Optional[float] = None) -> List[Tuple[str, str]]:
+        """Close and drop every live process idle for longer than the timeout."""
+        timeout = LIVE_SESSION_IDLE_TIMEOUT_SECONDS if idle_timeout is None else idle_timeout
+        async with self._live_lock:
+            stale = find_idle_keys(self.live_sessions, time.monotonic(), timeout)
+            sessions = [self.live_sessions.pop(key) for key in stale]
+        for session in sessions:
+            await session.close()
+        return stale
+
+    async def close_live_sessions_for(self, agent: str, cwd: Optional[str] = None) -> int:
+        """Close the live process for one target, or every one for that agent."""
+        async with self._live_lock:
+            if cwd is None:
+                keys = [k for k in self.live_sessions if k[0] == agent]
+            else:
+                keys = [k for k in self.live_sessions if k == live_session_key(agent, cwd)]
+            sessions = [self.live_sessions.pop(key) for key in keys]
+        for session in sessions:
+            await session.close("The conversation was reset.")
+        return len(sessions)
+
+    async def shutdown_live_sessions(self) -> None:
+        """Terminate every live process. Called when the hub shuts down."""
+        if self._sweeper_task is not None:
+            self._sweeper_task.cancel()
+            self._sweeper_task = None
+        async with self._live_lock:
+            sessions = list(self.live_sessions.values())
+            self.live_sessions.clear()
+        for session in sessions:
+            await session.close("AgnView is shutting down.")
 
     async def _emit_chunk(self, agent: str, source: str, content: str, session_id: Optional[str] = None):
         """Save chunk to SQLite and broadcast via SSE."""
@@ -325,6 +600,39 @@ class AgentRunner:
                 "session_id": session_id
             })
 
+    def resolve_work_dir(self, target: str, cwd: Optional[str]) -> str:
+        """Pick the directory a dispatch runs in.
+
+        Sessions and live processes are keyed on this, so every caller has to
+        resolve it the same way.
+        """
+        work_dir = cwd
+        if not work_dir or work_dir == os.getcwd():
+            home_dir = os.path.expanduser("~")
+            if target in ("claude", "claude_code"):
+                candidates = [os.path.join(home_dir, ".claude"), os.path.join(home_dir, "Claude")]
+            elif target in ("codex", "chatgpt"):
+                candidates = [os.path.join(home_dir, ".codex"), os.path.join(home_dir, "Codex")]
+            elif target in ("antigravity", "agy"):
+                candidates = [os.path.join(home_dir, ".gemini", "antigravity"), os.path.join(home_dir, ".gemini")]
+            else:
+                candidates = []
+            for cand in candidates:
+                if os.path.isdir(cand):
+                    work_dir = cand
+                    break
+        return work_dir or os.getcwd()
+
+    async def reset_session(self, agent: str, cwd: Optional[str] = None) -> Dict[str, object]:
+        """Forget the stored conversation for a target and end its live process."""
+        target = (agent or "").lower().strip()
+        work_dir = self.resolve_work_dir(target, cwd)
+        closed = 0
+        for agent_key in self._session_agent_keys(target):
+            self._clear_cli_session(agent_key, work_dir)
+            closed += await self.close_live_sessions_for(agent_key, work_dir)
+        return {"agent": target, "working_directory": work_dir, "live_processes_closed": closed}
+
     async def dispatch(
         self,
         agent: str,
@@ -343,35 +651,14 @@ class AgentRunner:
         and working directory, so the CLI starts a brand new conversation.
         """
         target = agent.lower().strip()
-
-        # Auto-fallback to provider-native workspace if cwd not specified or generic
-        work_dir = cwd
-        if not work_dir or work_dir == os.getcwd():
-            home_dir = os.path.expanduser("~")
-            if target in ("claude", "claude_code"):
-                candidates = [os.path.join(home_dir, ".claude"), os.path.join(home_dir, "Claude")]
-                for cand in candidates:
-                    if os.path.isdir(cand):
-                        work_dir = cand
-                        break
-            elif target in ("codex", "chatgpt"):
-                candidates = [os.path.join(home_dir, ".codex"), os.path.join(home_dir, "Codex")]
-                for cand in candidates:
-                    if os.path.isdir(cand):
-                        work_dir = cand
-                        break
-            elif target in ("antigravity", "agy"):
-                candidates = [os.path.join(home_dir, ".gemini", "antigravity"), os.path.join(home_dir, ".gemini")]
-                for cand in candidates:
-                    if os.path.isdir(cand):
-                        work_dir = cand
-                        break
-        if not work_dir:
-            work_dir = os.getcwd()
+        work_dir = self.resolve_work_dir(target, cwd)
 
         if reset_session:
+            # A new chat also ends the process still holding the old
+            # conversation, so nothing carries over into the fresh one.
             for agent_key in self._session_agent_keys(target):
                 self._clear_cli_session(agent_key, work_dir)
+                await self.close_live_sessions_for(agent_key, work_dir)
 
         # Augment prompt if skill or files are provided
         effective_prompt = prompt
@@ -474,6 +761,118 @@ class AgentRunner:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # Live (persistent, interactive) CLI path
+    # ------------------------------------------------------------------
+
+    def _bubble_for(self, agent: str, turn) -> StreamingBubble:
+        if turn.bubble is None:
+            turn.bubble = StreamingBubble(self, agent, turn.ui_session_id)
+        return turn.bubble
+
+    async def _live_on_delta(self, session: LiveSession, turn) -> None:
+        await self._bubble_for(session.agent, turn).update(turn.text)
+
+    async def _live_on_complete(self, session: LiveSession, turn) -> None:
+        await self._bubble_for(session.agent, turn).finish(turn.text)
+        if turn.is_error:
+            await self._emit_finished(session.agent, 1, "Error", turn.ui_session_id)
+            return
+        self._set_cli_session(session.agent, session.cwd, turn.session_id)
+        await self._emit_finished(session.agent, 0, "Finished", turn.ui_session_id)
+
+    async def _live_on_process_lost(self, session: LiveSession, reason: str) -> None:
+        """Drop a dead process so the next dispatch spawns a fresh one."""
+        async with self._live_lock:
+            key = live_session_key(session.agent, session.cwd)
+            if self.live_sessions.get(key) is session:
+                self.live_sessions.pop(key, None)
+        session.closed = True
+
+    async def _get_live_session(
+        self,
+        agent: str,
+        dialect: str,
+        cwd: str,
+        env: Dict[str, str],
+        build_args: Callable[[Optional[str]], List[str]],
+        run_cwd: Optional[str] = None,
+    ) -> Optional[LiveSession]:
+        """Return the live process for this target, spawning it when needed."""
+        key = live_session_key(agent, cwd)
+        async with self._live_lock:
+            session = self.live_sessions.get(key)
+            if session is not None and not session.alive:
+                self.live_sessions.pop(key, None)
+                session = None
+            if session is not None:
+                return session
+
+            # A fresh process replays the last session id AgnView stored for
+            # this target, which is the same resume mechanism the one-shot path
+            # uses. A crash therefore costs a process, never the conversation.
+            resume_id = self._get_cli_session(agent, cwd)
+            proc_args = build_args(resume_id)
+            try:
+                process = await asyncio.create_subprocess_exec(
+                    *proc_args,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=run_cwd or cwd,
+                    env=env,
+                )
+            except Exception:
+                return None
+
+            session = LiveSession(
+                agent=agent,
+                cwd=cwd,
+                dialect=dialect,
+                process=process,
+                on_delta=self._live_on_delta,
+                on_complete=self._live_on_complete,
+                on_process_lost=self._live_on_process_lost,
+            )
+            session.start_reader()
+            self.live_sessions[key] = session
+            self._ensure_sweeper()
+            return session
+
+    async def _run_live_turn(
+        self,
+        agent: str,
+        dialect: str,
+        cwd: str,
+        env: Dict[str, str],
+        session_id: Optional[str],
+        prompt: str,
+        build_args: Callable[[Optional[str]], List[str]],
+        run_cwd: Optional[str] = None,
+    ) -> bool:
+        """Send one turn into the live process for this target.
+
+        Returns False when no live process could be started, so the caller can
+        fall back to the existing one-shot run.
+        """
+        session = await self._get_live_session(agent, dialect, cwd, env, build_args, run_cwd=run_cwd)
+        if session is None:
+            return False
+
+        turn = await session.submit(prompt, ui_session_id=session_id)
+        try:
+            await asyncio.wait_for(turn.done.wait(), timeout=DISPATCH_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            await self.close_live_sessions_for(agent, cwd)
+            await self._emit_chunk(agent, "agent_stderr", "Execution timed out.", session_id)
+            await self._emit_finished(agent, 1, "Timeout", session_id)
+            return True
+
+        if turn.failure:
+            await self._emit_chunk(agent, "agent_stderr", turn.failure, session_id)
+            await self._emit_finished(agent, 1, "Error", session_id)
+        return True
+
     async def _run_cli_with_session(
         self,
         agent: str,
@@ -485,12 +884,17 @@ class AgentRunner:
         resume_id: Optional[str] = None,
         fallback_prompt: str = "",
         run_cwd: Optional[str] = None,
+        stream_parser: Optional[Callable[[str], object]] = None,
     ):
         """Run a CLI, show its reply, and record the session id it reports back.
 
         ``parser`` turns the CLI's structured output into (display text, session
         id). Pass None for a CLI that has no structured mode, and the raw output
         is shown unchanged with no session captured.
+
+        ``stream_parser`` reads one output line at a time, so the reply appears
+        in the console while the CLI is still working rather than all at once at
+        the end. It takes precedence over ``parser``.
 
         ``run_cwd`` is where the process runs when an adapter pins its own
         directory. Sessions stay keyed on ``cwd``, the directory the dispatch
@@ -510,12 +914,32 @@ class AgentRunner:
                 await process.stdin.wait_closed()
 
             collected: List[str] = []
+            bubble = StreamingBubble(self, agent, session_id) if stream_parser else None
+            streamed_text = ""
+            streamed_session: Optional[str] = None
+            saw_delta = False
 
             async def read_stream():
+                nonlocal streamed_text, streamed_session, saw_delta
                 async for line in process.stdout:
                     text = line.decode("utf-8", errors="replace").rstrip()
-                    if text:
-                        collected.append(text)
+                    if not text:
+                        continue
+                    collected.append(text)
+                    if stream_parser is None:
+                        continue
+                    update = stream_parser(text)
+                    if update.session_id:
+                        streamed_session = update.session_id
+                    if update.kind == "delta":
+                        saw_delta = True
+                        streamed_text += update.text
+                        await bubble.update(streamed_text)
+                    elif update.kind == "snapshot" and not saw_delta:
+                        streamed_text += update.text
+                        await bubble.update(streamed_text)
+                    elif update.kind == "complete" and update.text:
+                        streamed_text = update.text
 
             try:
                 await asyncio.wait_for(read_stream(), timeout=DISPATCH_TIMEOUT_SECONDS)
@@ -523,12 +947,16 @@ class AgentRunner:
                 exit_code = process.returncode or 0
 
                 raw_output = "\n".join(collected)
-                if parser:
+                if stream_parser and (streamed_text.strip() or streamed_session):
+                    display_text, captured_session = streamed_text, streamed_session
+                elif parser:
                     display_text, captured_session = parser(raw_output)
                 else:
                     display_text, captured_session = raw_output, None
 
-                if display_text.strip():
+                if bubble is not None:
+                    await bubble.finish(display_text)
+                elif display_text.strip():
                     await self._emit_chunk(agent, "agent_stdout", display_text, session_id)
 
                 if exit_code != 0:
@@ -577,6 +1005,21 @@ class AgentRunner:
         env["CI"] = "1"
         env["TERM"] = "dumb"
 
+        if LIVE_SESSIONS_ENABLED:
+            handled = await self._run_live_turn(
+                agent="claude_code",
+                dialect="claude",
+                cwd=cwd,
+                env=env,
+                session_id=session_id,
+                prompt=prompt,
+                build_args=lambda rid: build_claude_live_args(
+                    claude_bin, model=model, effort=effort, resume_session_id=rid
+                ),
+            )
+            if handled:
+                return
+
         await self._run_cli_with_session(
             agent="claude_code",
             proc_args=proc_args,
@@ -609,6 +1052,10 @@ class AgentRunner:
             parser=parse_codex_output,
             resume_id=resume_id,
             fallback_prompt=prompt,
+            # Codex has no stream input mode, so it keeps one process per
+            # dispatch. Its --json events do arrive as they happen, so the reply
+            # still appears progressively rather than in one lump at the end.
+            stream_parser=parse_codex_stream_line,
         )
 
     async def _run_antigravity(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
@@ -628,6 +1075,21 @@ class AgentRunner:
         )
 
         env = self._get_env_for_provider("gemini")
+
+        if agy_bin and LIVE_SESSIONS_ENABLED:
+            handled = await self._run_live_turn(
+                agent="antigravity",
+                dialect="antigravity",
+                cwd=cwd,
+                env=env,
+                session_id=session_id,
+                prompt=prompt,
+                build_args=lambda rid: build_antigravity_live_args(
+                    agy_bin, model=model, effort=effort, resume_session_id=rid
+                ),
+            )
+            if handled:
+                return
 
         await self._run_cli_with_session(
             agent="antigravity",
@@ -717,9 +1179,37 @@ class AgentRunner:
         # resume flag themselves, so only the structured output is added and the
         # captured id still gets stored for the next turn.
         template_owns_resume = any("{session_id}" in part for part in adapter.command)
+
+        # Claude Code and AntiGravity can be held open across turns, so try that
+        # first. A template that places its own resume flag keeps the one-shot
+        # path, because the operator is driving the session themselves there.
+        if LIVE_SESSIONS_ENABLED and not template_owns_resume:
+            live = build_live_args_from_adapter(resolved_cmd, prompt)
+            if live is not None:
+                _, dialect = live
+
+                def _build(rid: Optional[str], _cmd=list(resolved_cmd)) -> List[str]:
+                    return build_live_args_from_adapter(_cmd, prompt, rid)[0]
+
+                handled = await self._run_live_turn(
+                    agent=adapter.id,
+                    dialect=dialect,
+                    cwd=cwd,
+                    env=env,
+                    session_id=session_id,
+                    prompt=prompt,
+                    build_args=_build,
+                    run_cwd=target_cwd,
+                )
+                if handled:
+                    return
+
         resolved_cmd, parser = apply_cli_session_profile(
             resolved_cmd, resume_id, add_resume=not template_owns_resume
         )
+        stream_parser = {
+            parse_codex_output: parse_codex_stream_line,
+        }.get(parser)
 
         await self._run_cli_with_session(
             agent=adapter.id,
@@ -731,6 +1221,7 @@ class AgentRunner:
             resume_id=resume_id,
             fallback_prompt=prompt,
             run_cwd=target_cwd,
+            stream_parser=stream_parser,
         )
 
     async def _run_custom(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
