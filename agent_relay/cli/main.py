@@ -791,6 +791,28 @@ def cmd_usage(args):
     console.print(table)
 
 
+def cmd_autostart(args):
+    """Enable, disable, or show the status of starting AgnView at login."""
+    from ..core import autostart
+
+    try:
+        if args.autostart_action == "enable":
+            result = autostart.enable()
+            console.print(Panel(result, title="Autostart", style="bold green"))
+        elif args.autostart_action == "disable":
+            result = autostart.disable()
+            console.print(Panel(result, title="Autostart", style="bold yellow"))
+        elif args.autostart_action == "status":
+            enabled = autostart.status()
+            if enabled:
+                console.print("[bold green]Autostart is ENABLED[/bold green]: AgnView is set to start at login.")
+            else:
+                console.print("[bold red]Autostart is DISABLED[/bold red]: AgnView will not start at login.")
+    except RuntimeError as e:
+        console.print(f"[bold red]Autostart error: {e}[/bold red]")
+        sys.exit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="agnview",
@@ -879,6 +901,14 @@ def main():
     p_usage.add_argument("--provider", choices=["claude", "chatgpt", "gemini"], help="Filter by provider")
     p_usage.add_argument("--refresh", action="store_true", help="Force live fetch from provider sites")
     p_usage.set_defaults(func=cmd_usage)
+
+    # autostart
+    p_autostart = subparsers.add_parser("autostart", help="Manage starting AgnView automatically at login")
+    autostart_subparsers = p_autostart.add_subparsers(dest="autostart_action", required=True)
+    autostart_subparsers.add_parser("enable", help="Register AgnView to start at login")
+    autostart_subparsers.add_parser("disable", help="Remove the autostart-at-login registration")
+    autostart_subparsers.add_parser("status", help="Show whether autostart at login is enabled")
+    p_autostart.set_defaults(func=cmd_autostart)
 
     args = parser.parse_args()
     args.func(args)
