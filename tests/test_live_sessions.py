@@ -11,6 +11,7 @@ across turns and killing it on shutdown are live checks, not unit tests.
 
 import asyncio
 import json
+import os
 import time
 
 from agent_relay.core.live_sessions import (
@@ -204,10 +205,25 @@ def test_non_json_lines_are_ignored_by_every_parser():
 # Registry keys and the idle sweep
 # --------------------------------------------------------------------------
 
-def test_live_session_key_ignores_path_case_and_separators(tmp_path):
-    a = live_session_key("claude_code", str(tmp_path))
-    b = live_session_key("claude_code", str(tmp_path).upper())
+def test_live_session_key_is_stable_for_the_same_directory(tmp_path):
+    # Relative and absolute spellings of one directory share a live process.
+    nested = tmp_path / "work"
+    nested.mkdir()
+    a = live_session_key("claude_code", str(nested))
+    b = live_session_key("claude_code", str(tmp_path / "." / "work"))
     assert a == b
+
+
+def test_live_session_key_separates_agents_and_directories(tmp_path):
+    assert live_session_key("claude_code", str(tmp_path)) != live_session_key("antigravity", str(tmp_path))
+    assert live_session_key("claude_code", str(tmp_path)) != live_session_key("claude_code", str(tmp_path / "sub"))
+
+
+def test_live_session_key_follows_the_platform_on_case(tmp_path):
+    # normcase lowercases on Windows, where paths are case insensitive, and
+    # leaves the path alone elsewhere.
+    same = live_session_key("claude_code", str(tmp_path)) == live_session_key("claude_code", str(tmp_path).upper())
+    assert same is (os.name == "nt")
 
 
 class _FakeSession:
