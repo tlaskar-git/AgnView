@@ -3218,7 +3218,9 @@
         if (!res.ok) return;
         const data = await res.json();
         const toggle = document.getElementById('autostart-toggle');
-        if (toggle) toggle.checked = !!data.autostart;
+        // The API answers with "enabled". Reading "autostart" gave undefined,
+        // so this toggle rendered off every time, whatever the real setting.
+        if (toggle) toggle.checked = !!data.enabled;
       } catch (e) {}
     }
 

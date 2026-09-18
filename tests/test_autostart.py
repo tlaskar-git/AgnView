@@ -7,6 +7,7 @@ so the Windows code path is exercised without a real Windows registry.
 
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -124,24 +125,50 @@ def fake_opt_out_marker(monkeypatch, tmp_path):
 
 def test_ensure_enabled_by_default_turns_on_a_fresh_install(fake_windows, fake_opt_out_marker):
     assert autostart.status() is False
-    changed = autostart.ensure_enabled_by_default()
-    assert changed is True
+    assert autostart.ensure_enabled_by_default() == "enabled"
     assert autostart.status() is True
 
 
 def test_ensure_enabled_by_default_is_a_noop_once_already_on(fake_windows, fake_opt_out_marker):
     autostart.enable()
-    changed = autostart.ensure_enabled_by_default()
-    assert changed is False
+    assert autostart.ensure_enabled_by_default() is None
     assert autostart.status() is True
+
+
+def test_the_registered_command_carries_the_serve_options(fake_windows, fake_opt_out_marker):
+    """A hub served with --listen-lan must come back with --listen-lan."""
+    assert autostart.ensure_enabled_by_default(["--listen-lan"]) == "enabled"
+    assert "--listen-lan" in autostart.registered_command()
+
+
+def test_changing_the_serve_options_rewrites_the_registration(fake_windows, fake_opt_out_marker):
+    """The flag-less command registered on the first serve used to stick.
+
+    A person who paired a phone, then started serving with --listen-lan, came
+    back after a reboot bound to loopback with no error anywhere.
+    """
+    autostart.ensure_enabled_by_default()
+    assert "--listen-lan" not in autostart.registered_command()
+
+    assert autostart.ensure_enabled_by_default(["--listen-lan", "--port", "9100"]) == "updated"
+    registered = autostart.registered_command()
+    assert "--listen-lan" in registered
+    assert "--port 9100" in registered
+
+    # And once it matches, it is left alone.
+    assert autostart.ensure_enabled_by_default(["--listen-lan", "--port", "9100"]) is None
+
+
+def test_the_registration_never_carries_the_pairing_token(fake_windows, fake_opt_out_marker):
+    autostart.ensure_enabled_by_default(["--listen-lan"])
+    assert "--token" not in autostart.registered_command()
 
 
 def test_ensure_enabled_by_default_respects_explicit_opt_out(fake_windows, fake_opt_out_marker):
     autostart.disable_and_remember_opt_out()
     assert fake_opt_out_marker.exists()
 
-    changed = autostart.ensure_enabled_by_default()
-    assert changed is False
+    assert autostart.ensure_enabled_by_default() is None
     assert autostart.status() is False
 
 
@@ -155,5 +182,59 @@ def test_enable_and_clear_opt_out_removes_the_marker(fake_windows, fake_opt_out_
 
     # A later `agnview serve` should now leave it alone, not fight the
     # person's decision to turn it back on by hand.
-    changed = autostart.ensure_enabled_by_default()
-    assert changed is False
+    assert autostart.ensure_enabled_by_default() is None
+
+
+# --- The dashboard and the API must report the registration the CLI writes ---
+
+def test_the_api_reports_the_same_registration_the_cli_writes(tmp_path, monkeypatch):
+    """The API used to look for a .cmd file only it ever wrote.
+
+    On a normal install, where `agnview serve` has registered autostart, it
+    answered "off" while autostart was on, and switching it off deleted a file
+    that was not the registration.
+    """
+    from fastapi.testclient import TestClient
+
+    from agent_relay.api import routes
+    from agent_relay.api.app import create_app
+
+    state = {"enabled": True}
+    monkeypatch.setattr(routes.autostart, "status", lambda: state["enabled"])
+    monkeypatch.setattr(routes.autostart, "registered_command", lambda: "agnview serve --listen-lan")
+
+    def fake_disable():
+        state["enabled"] = False
+        return "Autostart disabled."
+
+    def fake_enable(serve_args=()):
+        state["enabled"] = True
+        return "Autostart enabled."
+
+    monkeypatch.setattr(routes.autostart, "disable_and_remember_opt_out", fake_disable)
+    monkeypatch.setattr(routes.autostart, "enable_and_clear_opt_out", fake_enable)
+
+    client = TestClient(create_app(db_path=str(tmp_path / "autostart.db")))
+
+    assert client.get("/api/system/autostart").json()["enabled"] is True
+    assert client.get("/api/system/capabilities").json()["autostart_enabled"] is True
+
+    # Switching it off works on every platform, not only Windows.
+    off = client.post("/api/system/autostart", json={"enable": False}).json()
+    assert off["success"] is True
+    assert off["enabled"] is False
+    assert client.get("/api/system/autostart").json()["enabled"] is False
+
+    on = client.post("/api/system/autostart", json={"enable": True}).json()
+    assert on["enabled"] is True
+
+
+def test_the_dashboard_reads_the_field_the_api_returns():
+    """The toggle read data.autostart, which the API never sent, so it always
+    rendered off however the setting really stood."""
+    dashboard = (
+        Path(autostart.__file__).parent.parent / "web" / "templates" / "index.html"
+    ).read_text(encoding="utf-8", errors="replace")
+
+    assert "toggle.checked = !!data.enabled" in dashboard
+    assert "data.autostart" not in dashboard

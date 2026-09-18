@@ -117,13 +117,29 @@ def cmd_serve(args):
     os.environ["AGENT_RELAY_TOKEN"] = token
     console.print(f"  • Pairing Token: [bold yellow]{token}[/bold yellow]")
 
-    # Every install should come back up after a reboot with no manual step.
-    # Only touches anything the first time autostart is not yet registered
-    # and nobody has explicitly turned it off with `agnview autostart disable`.
+    # Every install should come back up after a reboot with no manual step,
+    # and come back the way it is being served now. Registering a bare
+    # `agnview serve` brought the hub back on loopback and the default port,
+    # so a phone paired to the LAN address lost it after every reboot.
     from ..core import autostart
 
-    if autostart.ensure_enabled_by_default():
+    autostart_args = []
+    if getattr(args, "listen_overlay", False):
+        autostart_args.append("--listen-overlay")
+    elif args.listen_lan:
+        autostart_args.append("--listen-lan")
+    if args.host:
+        autostart_args += ["--host", args.host]
+    if args.port != 8765:
+        autostart_args += ["--port", str(args.port)]
+    # The token is deliberately absent: it is a secret, and the hub reads the
+    # persisted one at every start anyway.
+
+    registration = autostart.ensure_enabled_by_default(autostart_args)
+    if registration == "enabled":
         console.print("  • Autostart: [bold green]enabled[/bold green] (AgnView will start automatically at login; disable with `agnview autostart disable`)")
+    elif registration == "updated":
+        console.print("  • Autostart: [bold green]updated[/bold green] (login will now start AgnView with these options)")
 
     # A bad setting stops the iroh transport and nothing else. Say so here
     # rather than letting the hub look like it came up clean.
