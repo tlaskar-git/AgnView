@@ -744,6 +744,13 @@
               <option value="custom">Local LLM (Ollama / vLLM)</option>
               <option value="all">Broadcast to All Connected Agents</option>
             </select>
+            <!-- Dispatches to the same target continue one conversation. This
+                 starts an unrelated one with that target. -->
+            <button id="btn-new-chat" onclick="startNewChatForTarget()" class="flex items-center gap-1 px-2 py-1 rounded-lg border border-[var(--border-color)] bg-[var(--bg-raised)] text-[var(--text-secondary)] hover:text-[var(--text-main)] hover:border-[var(--color-action)] transition text-xs font-medium" title="Start a new, unrelated conversation with this target" aria-label="Start a new conversation with this target">
+              <i data-lucide="message-square-plus" class="w-3.5 h-3.5"></i>
+              <span>New chat</span>
+            </button>
+            <span id="dispatch-session-hint" class="text-[10px] text-[var(--text-secondary)]"></span>
           </div>
 
           <!-- Model Selector Dropdown -->
@@ -2095,6 +2102,14 @@
     // both hydration and SSE is counted once.
     let consoleLogKeys = new Set();
     let consoleFilter = 'all';
+    // Conversation id per dispatch target, so a follow-up message to the same
+    // target continues that conversation instead of starting a stateless one.
+    // Keyed by target, so switching the Target dropdown never carries an id
+    // belonging to a different agent.
+    let consoleSessionByTarget = {};
+    // Targets the operator asked to start fresh. The flag rides along on the
+    // next dispatch, which is what clears the stored CLI session server side.
+    let pendingSessionReset = {};
     let systemCapabilities = null;
     window.systemCapabilities = null;
     let userOverrodeCwd = false;
@@ -2799,6 +2814,9 @@
       if (promptInput) {
         promptInput.placeholder = providerInfo.placeholder;
       }
+
+      // Each target keeps its own conversation, so show the state of this one.
+      if (typeof updateSessionHint === 'function') updateSessionHint();
 
       closeSlashAutocomplete();
     }
@@ -3644,8 +3662,30 @@
       return 'filter-pill-active';
     }
 
+    // Point the dispatch Target at the agent whose filter pill was clicked.
+    //
+    // The pills used to control only which history was shown. Filtering to one
+    // agent while Target still pointed elsewhere sent the reply into a view the
+    // filter was hiding, which read as dispatch being blocked. This sync is
+    // deliberate UX, not incidental.
+    //
+    // It runs in one direction only. Changing Target by hand must not move the
+    // filter, or the operator loses the ability to read one agent's history
+    // while sending to another.
+    function syncDispatchTargetToFilter(filter) {
+      if (!filter || filter === 'all') return;
+      const select = document.getElementById('dispatch-target-agent');
+      if (!select) return;
+      const match = Array.from(select.options).find(opt => opt.value === filter);
+      if (!match || select.value === filter) return;
+      select.value = filter;
+      // Repopulate the model and effort lists for the newly selected provider.
+      if (typeof onTargetAgentChange === 'function') onTargetAgentChange();
+    }
+
     function setConsoleFilter(filter) {
       consoleFilter = filter;
+      syncDispatchTargetToFilter(filter);
       const targetId = filter === 'claude_code' ? 'pill-claude' : `pill-${filter}`;
       const pillButtons = document.querySelectorAll('#console-stream-pills button');
       pillButtons.forEach(btn => {
@@ -4071,12 +4111,41 @@
     }
 
     // Tag 07 & 09: Console Dispatch with Model, Effort, Skill & Files
+    // Forget the conversation held for the current target. The next dispatch
+    // carries reset_session, which is what drops the CLI session server side.
+    function startNewChatForTarget() {
+      const agent = document.getElementById('dispatch-target-agent')?.value || 'claude_code';
+      delete consoleSessionByTarget[agent];
+      pendingSessionReset[agent] = true;
+      updateSessionHint();
+      const promptInput = document.getElementById('dispatch-prompt');
+      if (promptInput) promptInput.focus();
+    }
+
+    // Shows whether the next message continues a conversation or starts one.
+    function updateSessionHint() {
+      const hint = document.getElementById('dispatch-session-hint');
+      if (!hint) return;
+      const agent = document.getElementById('dispatch-target-agent')?.value || 'claude_code';
+      if (pendingSessionReset[agent]) {
+        hint.innerText = 'New conversation';
+      } else if (consoleSessionByTarget[agent]) {
+        hint.innerText = 'Continuing conversation';
+      } else {
+        hint.innerText = '';
+      }
+    }
+
     async function dispatchConsoleCommand() {
       const promptInput = document.getElementById('dispatch-prompt');
       const promptText = promptInput.value.trim();
       if (!promptText) return;
 
       const agent = document.getElementById('dispatch-target-agent').value;
+      const resetSession = !!pendingSessionReset[agent];
+      // Send back the id already held for this target so the reply lands in the
+      // same thread. Omitted on a reset, which makes the server mint a new one.
+      const trackedSession = resetSession ? undefined : (consoleSessionByTarget[agent] || undefined);
       const cwd = document.getElementById('dispatch-cwd').value.trim() || undefined;
       const model = document.getElementById('dispatch-model')?.value.trim() || undefined;
       const effort = document.getElementById('dispatch-effort')?.value.trim() || undefined;
@@ -4098,6 +4167,8 @@
             agent,
             prompt: promptText,
             working_directory: cwd,
+            session_id: trackedSession,
+            reset_session: resetSession,
             model,
             effort,
             skill,
@@ -4109,6 +4180,12 @@
           const err = await res.json();
           alert("Dispatch error: " + (err.detail || res.statusText));
         } else {
+          const body = await res.json().catch(() => ({}));
+          if (body && body.session_id) {
+            consoleSessionByTarget[agent] = body.session_id;
+          }
+          delete pendingSessionReset[agent];
+          updateSessionHint();
           promptInput.value = '';
           autoResizeComposer(promptInput);
           selectedAttachedFiles = [];

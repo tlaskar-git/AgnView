@@ -287,11 +287,12 @@ class ConsoleDispatchPayload(BaseModel):
     prompt: str
     working_directory: Optional[str] = None
     mode: str = "direct"                     # "direct" (execute immediately) or "pipeline_task"
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None         # cosmetic UI grouping label for console_logs
     model: Optional[str] = None
     effort: Optional[str] = None             # "low", "medium", "high"
     files: Optional[List[str]] = None
     skill: Optional[str] = None              # e.g. "/goal", "brandkit", etc.
+    reset_session: bool = False              # forget the stored CLI conversation and start fresh
 
 
 class SavedPrompt(BaseModel):
