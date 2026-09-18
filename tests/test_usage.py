@@ -14,52 +14,30 @@ def client(tmp_path):
     return TestClient(app)
 
 
-def test_fetch_account_usage_unit():
-    """Unit test for usage probe calculations."""
-    # Test Claude account calculation
-    acc_claude = UsageAccount(
-        provider="claude",
-        name="Personal Claude Pro",
-        plan_name="Claude Pro",
-        auth_type="api_key",
-        auth_credential="sk-test-placeholder-anthropic-key",
-        tokens_limit=1_000_000
-    )
-    res_claude = fetch_account_usage(acc_claude)
-    assert res_claude.tokens_limit == 1_000_000
-    assert res_claude.tokens_used is not None
-    assert 0.0 <= res_claude.percent_used <= 100.0
-    assert res_claude.masked_credential.startswith("sk-")
-    assert "abcdef" not in res_claude.masked_credential
+def test_an_account_with_no_readable_source_reports_unavailable():
+    """No source to read means no numbers, and a reason the operator can act on.
 
-    # Test ChatGPT account calculation with cost limit
-    acc_chatgpt = UsageAccount(
-        provider="chatgpt",
-        name="Team ChatGPT",
-        plan_name="ChatGPT Team",
-        auth_type="api_key",
-        auth_credential="sk-test-placeholder-chatgpt-token",
-        cost_limit_usd=150.0
-    )
-    res_chatgpt = fetch_account_usage(acc_chatgpt)
-    assert res_chatgpt.cost_limit_usd == 150.0
-    assert res_chatgpt.cost_used_usd is not None
-    assert 0.0 <= res_chatgpt.percent_used <= 100.0
-    assert res_chatgpt.masked_credential.startswith("sk-")
+    The suite runs against a throwaway home directory, so none of the three
+    providers has a sign-in or a transcript to read here. Every one of them
+    used to answer with an invented percentage anyway.
+    """
+    for provider in ("claude", "chatgpt", "gemini"):
+        account = UsageAccount(
+            provider=provider,
+            name=f"{provider} account",
+            auth_type="api_key",
+            auth_credential="placeholder-not-a-real-key",
+        )
+        result = fetch_account_usage(account)
 
-    # Test Gemini account calculation
-    acc_gemini = UsageAccount(
-        provider="gemini",
-        name="Gemini 1.5 Pro Account",
-        plan_name="Gemini Advanced",
-        auth_type="api_key",
-        auth_credential="AIza-mock-gemini-test-key",
-        tokens_limit=2_000_000
-    )
-    res_gemini = fetch_account_usage(acc_gemini)
-    assert res_gemini.tokens_limit == 2_000_000
-    assert res_gemini.tokens_used is not None
-    assert 0.0 <= res_gemini.percent_used <= 100.0
+        assert result.status == "unavailable", provider
+        assert result.error_message, provider
+        assert result.session_percent_used is None, provider
+        assert result.weekly_percent_used is None, provider
+        assert result.percent_used is None, provider
+        assert result.tokens_used is None, provider
+        assert result.tokens_limit is None, provider
+        assert result.masked_credential == "plac...-key", provider
 
 
 def test_multi_account_api_lifecycle(client):

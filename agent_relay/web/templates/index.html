@@ -5358,6 +5358,16 @@
       `;
     }
 
+    // Render a measured token count the way a person reads it.
+    function formatTokenCount(count) {
+      const n = Number(count);
+      if (!isFinite(n)) return '0';
+      if (n >= 1e9) return `${(n / 1e9).toFixed(1)}B`;
+      if (n >= 1e6) return `${(n / 1e6).toFixed(1)}M`;
+      if (n >= 1e3) return `${(n / 1e3).toFixed(1)}K`;
+      return String(Math.round(n));
+    }
+
     // Normalized Quota Telemetry: percentage USED across all providers
     function renderAccountCard(acc) {
       let badgeTheme = "border-[var(--border-color)] text-[var(--text-secondary)] bg-[var(--bg-raised)]";
@@ -5369,6 +5379,19 @@
       let statusTheme = "bg-emerald-500/10 text-emerald-500 dark:text-emerald-400 border border-emerald-500/30";
       if (acc.status === 'warning') statusTheme = "bg-amber-500/10 text-amber-500 dark:text-amber-400 border border-amber-500/30";
       if (acc.status === 'exceeded' || acc.status === 'error') statusTheme = "bg-red-500/10 text-red-500 dark:text-red-400 border border-red-500/30";
+      if (acc.status === 'unavailable' || acc.status === 'unknown') statusTheme = "bg-[var(--bg-raised)] text-[var(--text-secondary)] border border-[var(--border-color)]";
+
+      // The badge says what the account actually is. It used to print the word
+      // "Active" for every account, including ones whose usage could not be read.
+      const statusLabel = escapeHtml(acc.status || 'unknown');
+
+      // A provider that reports nothing says so, with the reason, instead of
+      // showing a figure nobody measured.
+      const noticeText = (acc.status === 'unavailable' || acc.status === 'error' || acc.status === 'warning') ? (acc.error_message || '') : '';
+      const noticeHtml = noticeText ? `
+              <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5 text-[11px] text-[var(--text-secondary)] leading-snug">
+                ${escapeHtml(noticeText)}
+              </div>` : '';
 
       const syncTime = acc.last_synced_at ? new Date(acc.last_synced_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now';
       const planDisplay = acc.plan_label ? `${escapeHtml(acc.plan_label)}` : `${escapeHtml(acc.plan_name || 'Standard Tier')}`;
@@ -5377,30 +5400,10 @@
       // DEDICATED GEMINI TELEMETRY: Matches Google Antigravity / Gemini Desktop IDE
       // =========================================================================
       if (acc.provider === 'gemini') {
-        const groups = (acc.weekly_breakdown && acc.weekly_breakdown.length > 0) ? acc.weekly_breakdown : [
-          {
-            group: "Gemini Models",
-            label: "Gemini Models",
-            weekly_title: "Weekly Limit Remaining",
-            weekly_percent_left: (acc.weekly_percent_left !== null && acc.weekly_percent_left !== undefined) ? acc.weekly_percent_left : 52,
-            weekly_sub: "You have used some of your weekly limit",
-            session_title: "Five Hour Limit Remaining",
-            session_percent_left: (acc.session_percent_left !== null && acc.session_percent_left !== undefined) ? acc.session_percent_left : 9,
-            session_sub: "You have used some of your 5-hour limit",
-            models: "Gemini 3.8 Flash, 3.7 Flash, 3.6 Flash, 3.1 Pro"
-          },
-          {
-            group: "Claude and GPT models",
-            label: "Claude and GPT models",
-            weekly_title: "Weekly Limit Remaining",
-            weekly_percent_left: 100,
-            weekly_sub: "Full weekly limit available",
-            session_title: "Five Hour Limit Remaining",
-            session_percent_left: 100,
-            session_sub: "Full 5-hour limit available",
-            models: "Claude Sonnet 4.6, Claude Opus 4.6, GPT-OSS 120B"
-          }
-        ];
+        // Only groups the hub actually received. There is no stand-in set:
+        // this card used to draw two model groups with invented percentages
+        // whenever the API sent none.
+        const groups = (acc.weekly_breakdown && acc.weekly_breakdown.length > 0) ? acc.weekly_breakdown : [];
 
         return `
           <div class="bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-xl p-4 flex flex-col justify-between shadow-sm relative transition hover:border-slate-500/40 min-h-[350px]">
@@ -5411,7 +5414,7 @@
                   <span class="text-[10px] border px-1.5 py-0.5 rounded font-mono font-medium shrink-0 ${badgeTheme}">GEMINI</span>
                   <span class="text-xs font-bold text-[var(--text-main)] truncate" title="${escapeHtml(acc.name)}">${escapeHtml(acc.name)}</span>
                 </div>
-                <span class="text-[10px] uppercase px-2 py-0.5 rounded font-semibold font-mono shrink-0 ${statusTheme}">Active</span>
+                <span class="text-[10px] uppercase px-2 py-0.5 rounded font-semibold font-mono shrink-0 ${statusTheme}">${statusLabel}</span>
               </div>
 
               <!-- Plan / Limits Tier Banner -->
@@ -5423,8 +5426,9 @@
                 <span class="text-[10px] bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 px-1.5 py-0.2 rounded border border-cyan-500/20 font-sans font-medium shrink-0">Antigravity Mesh</span>
               </div>
 
-              <!-- Dual Model Groups Quota Telemetry (matching desktop app exactly) -->
+              <!-- Model group quota telemetry, when the provider reports any -->
               <div class="space-y-3">
+                ${groups.length === 0 ? noticeHtml : ''}
                 ${groups.map((grp, idx) => {
                   const hasWeeklyLimit = (grp.weekly_percent_used !== null && grp.weekly_percent_used !== undefined) || (grp.weekly_percent_left !== null && grp.weekly_percent_left !== undefined);
                   const hasSessionLimit = (grp.session_percent_used !== null && grp.session_percent_used !== undefined) || (grp.session_percent_left !== null && grp.session_percent_left !== undefined);
@@ -5516,7 +5520,11 @@
 
       let sessionBarColor = "bg-slate-400 dark:bg-slate-600";
       let sessionTextColor = "text-[var(--text-secondary)]";
-      let sessionLabel = "No limit reported";
+      // A provider that publishes no limit still has a real token count worth
+      // showing. What it never gets is a percentage nobody measured.
+      let sessionLabel = (acc.session_tokens_used !== null && acc.session_tokens_used !== undefined)
+        ? `${formatTokenCount(acc.session_tokens_used)} tokens`
+        : "No limit published";
       let sessionBarWidth = 0;
 
       if (hasSessionLimit && sessionUsed !== null) {
@@ -5535,7 +5543,7 @@
       }
 
       const sessionTitle = acc.session_title || (acc.provider === 'chatgpt' ? '5-hour limit' : 'Current session');
-      const sessionReset = acc.session_reset_time || acc.reset_time || 'Rolling window';
+      const sessionReset = acc.session_reset_time || acc.reset_time || '';
 
       // 2. Weekly Limit Calculation (Honest % USED without clamping)
       const hasWeeklyLimit = (acc.weekly_percent_used !== null && acc.weekly_percent_used !== undefined) ||
@@ -5550,7 +5558,9 @@
 
       let weeklyBarColor = "bg-slate-400 dark:bg-slate-600";
       let weeklyTextColor = "text-[var(--text-secondary)]";
-      let weeklyLabel = "No limit reported";
+      let weeklyLabel = (acc.weekly_tokens_used !== null && acc.weekly_tokens_used !== undefined)
+        ? `${formatTokenCount(acc.weekly_tokens_used)} tokens`
+        : "No limit published";
       let weeklyBarWidth = 0;
 
       if (hasWeeklyLimit && weeklyUsed !== null) {
@@ -5569,7 +5579,7 @@
       }
 
       const weeklyTitle = acc.weekly_title || 'Weekly limit';
-      const weeklyReset = acc.weekly_reset_time || 'Weekly cycle';
+      const weeklyReset = acc.weekly_reset_time || '';
 
       // Weekly breakdown or single bar:
       let weeklySectionHtml = '';
@@ -5592,7 +5602,7 @@
                   <div class="flex items-center justify-between text-[11px] mb-1">
                     <div class="flex items-center gap-1.5 min-w-0">
                       <span class="text-[var(--text-main)] font-semibold text-xs truncate">${escapeHtml(item.label)}</span>
-                      <span class="text-[10px] text-[var(--text-secondary)] font-mono shrink-0">${escapeHtml(item.reset_time || 'Sat 7:00 PM')}</span>
+                      <span class="text-[10px] text-[var(--text-secondary)] font-mono shrink-0">${escapeHtml(item.reset_time || '')}</span>
                     </div>
                     <span class="font-bold font-mono text-[var(--text-secondary)] text-xs shrink-0">${itemLabel}</span>
                   </div>
@@ -5630,7 +5640,7 @@
                 <span class="text-[10px] border px-1.5 py-0.5 rounded font-mono font-medium shrink-0 ${badgeTheme}">${acc.provider.toUpperCase()}</span>
                 <span class="text-xs font-bold text-[var(--text-main)] truncate" title="${escapeHtml(acc.name)}">${escapeHtml(acc.name)}</span>
               </div>
-              <span class="text-[10px] uppercase px-2 py-0.5 rounded font-semibold font-mono shrink-0 ${statusTheme}">Active</span>
+              <span class="text-[10px] uppercase px-2 py-0.5 rounded font-semibold font-mono shrink-0 ${statusTheme}">${statusLabel}</span>
             </div>
 
             <!-- Plan / Limits Tier Banner -->
@@ -5641,6 +5651,7 @@
 
             <!-- Dual Rate Limit Meters (Normalized to % USED) -->
             <div class="space-y-2.5">
+              ${noticeHtml}
               <!-- Limit 1: Session / Short-Term -->
               <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5">
                 <div class="flex items-center justify-between text-[11px] mb-1.5">
@@ -6051,21 +6062,26 @@
   const weeklyMatch = bodyText.match(/Weekly limits[\\s\\S]*?All models[\\s\\S]*?Resets ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
   const planMatch = bodyText.match(/Plan usage limits\\s+([^\\n]+)/i);
 
-  const payload = {
-    provider: 'claude',
-    plan_name: 'Claude Max',
-    plan_label: planMatch ? planMatch[1].trim() : 'Max (20x)',
-    session_title: 'Current session',
-    session_reset_time: sessionMatch ? ('Resets in ' + sessionMatch[1].trim()) : 'Resets in 1 hr 34 min',
-    session_percent_used: sessionMatch ? parseFloat(sessionMatch[2]) : 4.0,
-    weekly_title: 'Weekly limits',
-    weekly_reset_time: weeklyMatch ? ('Resets ' + weeklyMatch[1].trim()) : 'Resets Sat 7:00 PM',
-    weekly_percent_used: weeklyMatch ? parseFloat(weeklyMatch[2]) : 0.0,
-    weekly_breakdown: [
-      { label: 'All models', reset_time: weeklyMatch ? ('Resets ' + weeklyMatch[1].trim()) : 'Resets Sat 7:00 PM', percent_used: weeklyMatch ? parseFloat(weeklyMatch[2]) : 0.0 },
-      { label: 'Fable', reset_time: weeklyMatch ? ('Resets ' + weeklyMatch[1].trim()) : 'Resets Sat 7:00 PM', percent_used: 0.0 }
-    ]
-  };
+  // Only what this page actually said. A field the page did not show is left
+  // out, so a failed scrape reports nothing rather than a made-up figure.
+  if (!sessionMatch && !weeklyMatch) {
+    alert('[AgnView] Nothing was read from this page. Open claude.ai settings, usage, and run this again.');
+    return;
+  }
+
+  const payload = { provider: 'claude', session_title: 'Current session', weekly_title: 'Weekly limits' };
+  if (planMatch) { payload.plan_label = planMatch[1].trim(); }
+  if (sessionMatch) {
+    payload.session_reset_time = 'Resets in ' + sessionMatch[1].trim();
+    payload.session_percent_used = parseFloat(sessionMatch[2]);
+  }
+  if (weeklyMatch) {
+    payload.weekly_reset_time = 'Resets ' + weeklyMatch[1].trim();
+    payload.weekly_percent_used = parseFloat(weeklyMatch[2]);
+    payload.weekly_breakdown = [
+      { label: 'All models', reset_time: 'Resets ' + weeklyMatch[1].trim(), percent_used: parseFloat(weeklyMatch[2]) }
+    ];
+  }
 
   const jsonStr = JSON.stringify(payload, null, 2);
   if (typeof copy === 'function') { copy(jsonStr); }
@@ -6132,19 +6148,25 @@
   const weeklyMatch = bodyText.match(/Weekly limit[\\s\\S]*?Resets on ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
   const planMatch = bodyText.match(/Usage limits\\s+([^\\n]+)/i);
 
-  const payload = {
-    provider: 'gemini',
-    plan_name: 'Gemini Advanced',
-    plan_label: planMatch ? planMatch[1].trim() : 'PRO',
-    session_title: 'Current usage',
-    session_reset_time: currentMatch ? ('Resets at ' + currentMatch[1].trim()) : 'Resets at 23:16',
-    session_percent_used: currentMatch ? parseFloat(currentMatch[2]) : 0.0,
-    session_percent_left: 100 - (currentMatch ? parseFloat(currentMatch[2]) : 0.0),
-    weekly_title: 'Weekly limit',
-    weekly_reset_time: weeklyMatch ? ('Resets on ' + weeklyMatch[1].trim()) : 'Resets on 16 Sept at 13:16',
-    weekly_percent_used: weeklyMatch ? parseFloat(weeklyMatch[2]) : 3.0,
-    weekly_percent_left: 100 - (weeklyMatch ? parseFloat(weeklyMatch[2]) : 3.0)
-  };
+  // Only what this page actually said, so a failed scrape reports nothing
+  // rather than a made-up figure.
+  if (!currentMatch && !weeklyMatch) {
+    alert('[AgnView] Nothing was read from this page. Open the Gemini usage page and run this again.');
+    return;
+  }
+
+  const payload = { provider: 'gemini', session_title: 'Current usage', weekly_title: 'Weekly limit' };
+  if (planMatch) { payload.plan_label = planMatch[1].trim(); }
+  if (currentMatch) {
+    payload.session_reset_time = 'Resets at ' + currentMatch[1].trim();
+    payload.session_percent_used = parseFloat(currentMatch[2]);
+    payload.session_percent_left = 100 - parseFloat(currentMatch[2]);
+  }
+  if (weeklyMatch) {
+    payload.weekly_reset_time = 'Resets on ' + weeklyMatch[1].trim();
+    payload.weekly_percent_used = parseFloat(weeklyMatch[2]);
+    payload.weekly_percent_left = 100 - parseFloat(weeklyMatch[2]);
+  }
 
   const jsonStr = JSON.stringify(payload, null, 2);
   if (typeof copy === 'function') copy(jsonStr);

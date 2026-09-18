@@ -403,7 +403,7 @@ def add_usage_account(req: CreateUsageAccountRequest, request: Request):
         weekly_percent_used=req.weekly_percent_used,
         weekly_percent_left=req.weekly_percent_left,
         weekly_breakdown=req.weekly_breakdown,
-        tokens_limit=req.tokens_limit if req.tokens_limit is not None else 1000000,
+        tokens_limit=req.tokens_limit,
         cost_limit_usd=req.cost_limit_usd,
         base_url=req.base_url
     )
@@ -531,7 +531,9 @@ def sync_account_telemetry(account_id: str, payload: UsageTelemetryPayload, requ
         acc.tokens_limit = payload.tokens_limit
     if payload.tokens_used is not None:
         acc.tokens_used = payload.tokens_used
-        acc.tokens_remaining = max(0, (acc.tokens_limit or 1000000) - acc.tokens_used)
+        acc.tokens_remaining = (
+            max(0, acc.tokens_limit - acc.tokens_used) if acc.tokens_limit is not None else None
+        )
 
     acc.last_checked = datetime.now(timezone.utc).isoformat()
     acc.status = "active"

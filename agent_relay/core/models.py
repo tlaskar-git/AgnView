@@ -154,17 +154,20 @@ class UsageAccount(BaseModel):
     credential: str = ""                     # Stored securely, masked on client output
     org_id: Optional[str] = None
     plan_name: str = "Pro"                   # "Claude Pro", "ChatGPT Plus", "Gemini Advanced", etc.
-    requests_used: int = 0
-    requests_limit: int = 1000
-    requests_remaining: int = 1000
-    tokens_used: int = 0
-    tokens_limit: int = 1000000
-    tokens_remaining: int = 1000000
+    # Every measurement below is None until something real is read. A default
+    # number here reads on the dashboard as a measurement that was taken, which
+    # is how invented quota figures reached the Usage tab in the first place.
+    requests_used: Optional[int] = None
+    requests_limit: Optional[int] = None
+    requests_remaining: Optional[int] = None
+    tokens_used: Optional[int] = None
+    tokens_limit: Optional[int] = None
+    tokens_remaining: Optional[int] = None
     cost_used_usd: Optional[float] = None
     cost_limit_usd: Optional[float] = None
     reset_time: Optional[str] = None         # Reset timestamp or countdown
-    percent_used: float = 0.0
-    status: str = "active"                   # "active", "warning", "exhausted", "error"
+    percent_used: Optional[float] = None
+    status: str = "unknown"                  # "active", "unavailable", "warning", "exhausted", "error"
     last_checked: str = Field(default_factory=_get_utc_now_iso)
     error_message: Optional[str] = None
     base_url: Optional[str] = None           # Optional custom endpoint (e.g. DeepSeek or Ollama)
@@ -175,6 +178,11 @@ class UsageAccount(BaseModel):
     session_reset_time: Optional[str] = None # e.g. "Resets in 1 hr 34 min", "Resets in 5h 0m", "Resets at 23:16"
     session_percent_used: Optional[float] = None # e.g. 4.0, 0.0
     session_percent_left: Optional[float] = None # e.g. 100.0, 96.0
+    # Tokens actually counted in each window. A provider that reports a share
+    # of a limit but not a token count leaves these None, and the other way
+    # round for a provider that can be counted but publishes no limit.
+    session_tokens_used: Optional[int] = None
+    weekly_tokens_used: Optional[int] = None
     weekly_title: Optional[str] = None       # e.g. "Weekly limits", "Weekly limit"
     weekly_reset_time: Optional[str] = None  # e.g. "Resets Sat 7:00 PM", "Resets in 7d 0h", "Resets on 16 Sept at 13:16"
     weekly_percent_used: Optional[float] = None # e.g. 0.0, 3.0
