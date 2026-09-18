@@ -381,8 +381,12 @@ class AgentRunner:
             files_context = ", ".join(files)
             effective_prompt = f"{effective_prompt}\n[Context Files: {files_context}]"
 
-        # Log user prompt
-        await self._emit_chunk("user", "user_input", effective_prompt, session_id)
+        # Log the user's turn tagged with the actual target, not a generic
+        # "user" label, so a single-agent filter shows both sides of the
+        # conversation instead of only that agent's replies. The console
+        # still renders it as a "You" bubble regardless of this tag, since
+        # that check keys off source == "user_input", not the agent field.
+        await self._emit_chunk(target, "user_input", effective_prompt, session_id)
 
         adapter = self.adapter_manager.get_adapter(target)
         if adapter and adapter.enabled:
