@@ -125,8 +125,13 @@ def build_antigravity_args(
 
 
 def cli_binary_name(binary_path: str) -> str:
-    """Return the bare CLI name for a resolved executable path."""
-    base = os.path.basename(binary_path or "").lower()
+    """Return the bare CLI name for a resolved executable path.
+
+    Both separators are handled explicitly rather than relying on
+    os.path.basename, which does not treat a backslash as a separator on
+    POSIX and so would return a whole Windows path unchanged.
+    """
+    base = (binary_path or "").replace("\\", "/").rsplit("/", 1)[-1].lower()
     for ext in (".cmd", ".exe", ".bat", ".ps1"):
         if base.endswith(ext):
             return base[: -len(ext)]
