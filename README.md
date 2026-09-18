@@ -47,17 +47,12 @@ sign up for.
 | Python | 3.10 or newer |
 | Browser | any current Chrome, Edge, Firefox or Safari |
 
-The companion mobile client is iOS and iPadOS.
-
 ## Clients
 
 The AgnView hub in this repo covers Windows, macOS and Linux.
 
-- **iOS and iPadOS**: [github.com/tlaskar-git/AgnView-iOS](https://github.com/tlaskar-git/AgnView-iOS)
-  holds the design prototype and mobile spec for the iOS and iPadOS client.
-- **Android**: an Android client will live at
-  [github.com/tlaskar-git/AgnView-Android](https://github.com/tlaskar-git/AgnView-Android)
-  (reference only, not yet created).
+Mobile companion apps are in development. Links to their App Store and Google
+Play listings will be added here once they are published.
 
 AgnView does not install any coding agent for you. It watches and dispatches to
 the CLIs already on your machine: Claude Code, Codex, AntiGravity or any other
