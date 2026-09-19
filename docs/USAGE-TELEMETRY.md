@@ -96,6 +96,28 @@ Nothing here reads a browser cookie store, a browser profile or any stored
 credential. It is the app's own loopback debug interface, describing the app's
 own window, reading text already on screen.
 
+## Why Antigravity has no Claude-style permanent option
+
+Investigated directly: Antigravity's window makes its real quota call to its
+own local backend, not to a Google web page, at
+`https://127.0.0.1:<port>/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary`
+(`<port>` is a second local port the app opens for this, unrelated to the CDP
+debug port). Calling it directly returns
+`{"code":"unauthenticated","message":"missing CSRF token"}`. That token is
+generated fresh by the app's main process each run and handed to its own
+renderer through Electron's preload bridge; it is not exposed on `window`,
+in a cookie, or in a meta tag anywhere this session could find without
+reverse-engineering Antigravity's own minified bundle for it, which was not
+attempted. There is no `~/.gemini/oauth_creds.json`-style long-lived token
+that authenticates this endpoint either: the access token in that file
+authenticates Google's own APIs, not this local one.
+
+This is why the DOM read above, not a direct API call, is the real answer for
+Antigravity, and why it does not get the same permanent live option Claude's
+pasted cookie gets. It could change if Antigravity ever publishes its own API
+key for this, or if the CSRF token turns out to be reachable a way this
+session did not find.
+
 ## Opening DevTools in Antigravity
 
 Antigravity is an Electron app, but the installed build does not give you an
