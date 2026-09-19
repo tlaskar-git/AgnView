@@ -266,6 +266,19 @@ def _fetch_claude_live(account: UsageAccount) -> UsageAccount:
     if cred.startswith("sk-ant-"):
         return _fetch_anthropic_api_key(account, cred)
 
+    # A pasted claude.ai session cookie calls the same internal API the
+    # settings page itself uses, for a real percentage on every refresh, not
+    # just a one-off sync. The cookie is something the person copied out of
+    # their own browser's DevTools and typed in here themselves, exactly like
+    # every other credential field in this app; nothing here reads it out of
+    # a browser's storage on their behalf. "claude-cli-" is this app's own
+    # placeholder for a locally detected CLI session, not a real cookie, so
+    # it is excluded from this path.
+    if cred and not cred.startswith("claude-cli-"):
+        live = _fetch_claude_web_session(account, cred, now_dt)
+        if live is not None:
+            return live
+
     kept = _capture_synced_windows(account, now_dt)
 
     plan_read = _read_claude_plan(account)
@@ -317,6 +330,130 @@ def _fetch_claude_live(account: UsageAccount) -> UsageAccount:
     account.error_message = None
     account.last_checked = now
     return _restore_synced_windows(account, kept)
+
+
+def _claude_cookie_header(cred: str) -> str:
+    """Turn what was pasted into a Cookie header.
+
+    A person can copy either the bare sessionKey value from DevTools'
+    Application > Cookies panel, or the full Cookie request header from the
+    Network tab (several "name=value" pairs). Both are accepted: a value with
+    no "=" is assumed to be the bare sessionKey.
+    """
+    return cred if "=" in cred else f"sessionKey={cred}"
+
+
+def _resolve_claude_organization_uuid(client: httpx.Client) -> Optional[str]:
+    """The account's own organisation id, read with its own cookie.
+
+    Not read from ~/.claude.json: a person who only ever uses claude.ai in a
+    browser, never the Claude Code CLI, has no such file, and this must work
+    for them too.
+    """
+    res = client.get("https://claude.ai/api/organizations")
+    res.raise_for_status()
+    orgs = res.json()
+    if not isinstance(orgs, list) or not orgs:
+        return None
+    first = orgs[0]
+    return first.get("uuid") if isinstance(first, dict) else None
+
+
+def _map_claude_usage_limits(account: UsageAccount, limits: list, now: datetime) -> bool:
+    """Write claude.ai's own `limits` rows onto the account.
+
+    Only the `kind` values this has been shown to mean something for are
+    mapped: "session" is the current session window, "weekly_all" is the
+    weekly share across every model, and "weekly_scoped" is one row per model
+    the plan tracks separately (for example Fable), keyed by its display
+    name. Anything else is left alone rather than guessed at. Returns whether
+    anything was actually mapped.
+    """
+    weekly_rows = []
+    mapped = False
+    for entry in limits or []:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        percent = entry.get("percent")
+        if percent is None:
+            continue
+        reset_time = _countdown(
+            (_parse_iso(entry.get("resets_at")) - now).total_seconds()
+            if entry.get("resets_at")
+            else None,
+            as_days=False,
+        )
+        if kind == "session":
+            account.session_title = "Current session"
+            account.session_reset_time = reset_time
+            account.session_percent_used = float(percent)
+            account.session_percent_left = round(100.0 - float(percent), 1)
+            mapped = True
+        elif kind == "weekly_all":
+            account.weekly_title = "Weekly limits"
+            account.weekly_reset_time = reset_time
+            account.weekly_percent_used = float(percent)
+            account.weekly_percent_left = round(100.0 - float(percent), 1)
+            mapped = True
+        elif kind == "weekly_scoped":
+            scope = entry.get("scope") or {}
+            model = scope.get("model") or {}
+            label = model.get("display_name")
+            if label:
+                weekly_rows.append(
+                    {"label": label, "reset_time": reset_time, "percent_used": float(percent)}
+                )
+                mapped = True
+    if weekly_rows:
+        account.weekly_breakdown = weekly_rows
+    return mapped
+
+
+def _fetch_claude_web_session(
+    account: UsageAccount, cred: str, now: datetime
+) -> Optional[UsageAccount]:
+    """Call claude.ai's own usage API with a cookie the person pasted in themselves.
+
+    This is the same request the settings page makes to draw its own usage
+    panel, so while the cookie is valid this is a real percentage on every
+    refresh, not a snapshot that ages out. Returns None to fall back to the
+    local transcript count when there is nothing usable here yet: no attempt
+    made, a network problem, or a response this parser found nothing to map
+    in. Returns the account, marked unavailable with a specific reason, only
+    when the cookie itself is confirmed rejected (401/403), since that is
+    something the person can actually act on.
+    """
+    headers = {"Cookie": _claude_cookie_header(cred), "Accept": "application/json"}
+    try:
+        with httpx.Client(timeout=10.0, headers=headers) as client:
+            org_uuid = _resolve_claude_organization_uuid(client)
+            if not org_uuid:
+                return None
+            res = client.get(f"https://claude.ai/api/organizations/{org_uuid}/usage")
+            if res.status_code in (401, 403):
+                return _mark_unavailable(
+                    account,
+                    "The pasted claude.ai session cookie was rejected. Sign in to "
+                    "claude.ai again and paste a fresh one.",
+                )
+            res.raise_for_status()
+            limits = res.json().get("limits")
+    except Exception:
+        return None
+
+    if not _map_claude_usage_limits(account, limits, now):
+        return None
+
+    account.tokens_used = None
+    account.tokens_limit = None
+    account.tokens_remaining = None
+    account.percent_used = account.session_percent_used
+    account.reset_time = account.session_reset_time
+    account.status = "active"
+    account.error_message = None
+    account.last_checked = now.isoformat()
+    return account
 
 
 def _fetch_anthropic_api_key(account: UsageAccount, cred: str) -> UsageAccount:

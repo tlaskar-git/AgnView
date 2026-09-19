@@ -1,26 +1,67 @@
-# Usage telemetry: the one-time browser sync
+# Usage telemetry: live where a credential allows it, a one-time sync otherwise
 
-Some providers publish no quota figure this machine can read. For those, the
-Usage tab shows a token count or says "unavailable" until a browser console
-script reads the provider's own usage panel and posts the real numbers to
-`POST /api/usage/accounts/{id}/telemetry`.
+Some providers publish no quota figure this machine can read on its own. For
+those, the Usage tab shows a token count or says "unavailable" until either a
+person's own pasted session credential is used to call the provider's own API
+directly (live, on every refresh), or a browser console script reads the
+provider's own usage panel once and posts the real numbers to
+`POST /api/usage/accounts/{id}/telemetry` (a snapshot that expires).
 
-| Provider | Real percentage without a sync | Where the sync script runs |
-|---|---|---|
-| ChatGPT / Codex | Yes, from `/backend-api/wham/usage` | Not needed |
-| Claude | No | Browser console on claude.ai, settings, usage |
-| Gemini (Antigravity) | Yes, while Antigravity is running | Antigravity's own DevTools console |
-| DeepSeek | Balance only, from its account API | Not needed |
+| Provider | Real percentage without any pasted credential | Live on every refresh | One-off sync |
+|---|---|---|---|
+| ChatGPT / Codex | Yes, from `/backend-api/wham/usage` | Always | Not needed |
+| Claude | No | Yes, if a claude.ai session cookie is pasted into the account's credential (Authentication Method: Session Token) | Browser console on claude.ai, settings, usage |
+| Gemini (Antigravity) | No | Yes, while Antigravity is running (its own local debug port, see below) | Antigravity's own DevTools console, advanced builds only |
+| DeepSeek | Balance only, from its account API | Always | Not needed |
+
+## Claude: a pasted session cookie calls claude.ai's own API directly
+
+`_fetch_claude_web_session` in `agent_relay/core/usage_fetcher.py` is tried
+whenever a Claude account's credential is not an `sk-ant-` API key and not this
+app's own `claude-cli-` placeholder for a locally detected CLI session. The
+credential is sent as a `Cookie` header (a bare value is wrapped as
+`sessionKey=<value>`, so either the sessionKey alone from DevTools' Application
+panel or the full Cookie header from its Network tab works) to:
+
+1. `GET https://claude.ai/api/organizations` to find the account's own
+   organisation id. Not read from `~/.claude.json`, because a person who only
+   ever uses claude.ai in a browser, never the Claude Code CLI, has no such
+   file.
+2. `GET https://claude.ai/api/organizations/{uuid}/usage`, whose `limits` array
+   is mapped directly: `kind: "session"` to the session window, `kind:
+   "weekly_all"` to the weekly window, and each `kind: "weekly_scoped"` entry to
+   one row in `weekly_breakdown`, labelled from `scope.model.display_name` (for
+   example "Fable").
+
+This is the same request claude.ai's own settings page makes to draw its own
+usage panel, captured live from a real, logged-in browser session. A cookie
+that is confirmed rejected (401/403) marks the account unavailable with a
+specific "sign in again and paste a fresh one" reason, since that is something
+the person can act on. Any other failure (network error, an unmapped response
+shape) falls back to the local transcript token count silently, so a passing
+network hiccup never blanks a figure that already works.
+
+Nothing here reads a cookie out of a browser's own storage. The person copies
+their own session cookie out of their own browser's DevTools and pastes it into
+this app's own credential field, the same as pasting an API key for any other
+provider. AgnView is heading to public, freeware distribution, and a general
+purpose Chromium cookie decryptor was deliberately not built for exactly that
+reason: it would silently read a stranger's session the moment they opened this
+app, with no specific action or consent on their part. A pasted credential
+requires that person's own deliberate action every time, for their own account
+only.
 
 A card whose provider can hold a synced percentage and holds none shows a
-call to action with a button that copies that provider's script, already
-pointed at that account's id. The hub computes this as `needs_telemetry_sync`
-on the account, so the rule lives in one place and is tested.
+call to action with a button that copies that provider's one-off sync script,
+already pointed at that account's id. The hub computes this as
+`needs_telemetry_sync` on the account, so the rule lives in one place and is
+tested. Once a live credential path (Claude's pasted cookie, or Antigravity
+running) is working, that condition is false and the card stops asking.
 
-A synced window is preserved across later automatic refreshes for as long as
-the window it describes stays open: five hours for the session window, seven
-days for the weekly one. After that the figure expires and the card asks for a
-new sync.
+A one-off synced window (no live credential in play) is preserved across later
+automatic refreshes for as long as the window it describes stays open: five
+hours for the session window, seven days for the weekly one. After that the
+figure expires and the card asks for a new sync.
 
 ## Antigravity reads itself, while it is running
 
