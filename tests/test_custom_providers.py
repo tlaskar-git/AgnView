@@ -1,5 +1,7 @@
 ﻿"""Tests for DeepSeek, Custom LLM harnesses, Account Editing, and Token Detection."""
 
+from pathlib import Path
+
 import pytest
 from unittest.mock import patch, MagicMock
 from fastapi.testclient import TestClient
@@ -152,6 +154,46 @@ def test_detect_local_token_api(client, monkeypatch):
     data_claude = res_claude.json()
     assert data_claude["found"] is True
     assert data_claude["token"] == "sk-ant-mocked-claude-env-token-888"
+    # A raw API key from an environment variable is exactly that, not a CLI
+    # session, so the Add Account form's authentication method must stay on
+    # API Key rather than being switched to Session Token underneath it.
+    assert data_claude["auth_type"] == "api_key"
+
+
+def test_detect_local_token_names_a_cli_session_correctly(client, monkeypatch, tmp_path):
+    """A credential read from Claude Code's own OAuth session is a session
+    token, not the provider's API key.
+
+    Saving it under the wrong authentication method is exactly how an account
+    ended up correctly connected (the credential still worked) but visibly
+    wrong: the Add Account form left Authentication Method on its default of
+    API Key because nothing told it otherwise.
+    """
+    import json as _json
+
+    claude_json = tmp_path / ".claude.json"
+    claude_json.write_text(
+        _json.dumps({
+            "oauthAccount": {
+                "accountUuid": "e118f31c-3bea-4ac3-bfc8-ce62d35dad18",
+                "emailAddress": "taher.laskar@gmail.com",
+                "displayName": "Taher",
+                "organizationType": "claude_max",
+                "organizationRateLimitTier": "default_claude_max_20x",
+            }
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+
+    res = client.post("/api/usage/detect-local-token", json={"provider": "claude"})
+    assert res.status_code == 200
+    data = res.json()
+    assert data["found"] is True
+    assert "CLI" in data["source"]
+    assert data["auth_type"] == "session_token"
 
 
 @pytest.mark.anyio

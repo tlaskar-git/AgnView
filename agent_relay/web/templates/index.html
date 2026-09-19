@@ -1484,18 +1484,6 @@
         </button>
       </div>
 
-      <!-- Quick Template Presets -->
-      <div class="mb-4 p-3 bg-[var(--bg-raised)] rounded-lg border border-[var(--border-color)]">
-        <span class="text-[11px] text-[var(--text-secondary)] block mb-1.5 font-medium">Quick Presets / Test Demo:</span>
-        <div class="flex items-center gap-2 flex-wrap">
-          <button type="button" onclick="fillAccountSample('claude')" class="text-[11px] bg-amber-500/10 text-amber-600 dark:text-amber-400 hover:bg-amber-500/20 border border-amber-500/30 px-2.5 py-1 rounded transition font-mono">Claude Pro</button>
-          <button type="button" onclick="fillAccountSample('chatgpt')" class="text-[11px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 border border-emerald-500/30 px-2.5 py-1 rounded transition font-mono">ChatGPT Plus</button>
-          <button type="button" onclick="fillAccountSample('gemini')" class="text-[11px] bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 hover:bg-cyan-500/20 border border-cyan-500/30 px-2.5 py-1 rounded transition font-mono">Gemini Adv</button>
-          <button type="button" onclick="fillAccountSample('deepseek')" class="text-[11px] bg-blue-500/10 text-blue-600 dark:text-blue-400 hover:bg-blue-500/20 border border-blue-500/30 px-2.5 py-1 rounded transition font-mono">DeepSeek API</button>
-          <button type="button" onclick="fillAccountSample('custom')" class="text-[11px] bg-purple-500/10 text-purple-600 dark:text-purple-400 hover:bg-purple-500/20 border border-purple-500/30 px-2.5 py-1 rounded transition font-mono">Ollama (Local)</button>
-        </div>
-      </div>
-
       <div class="space-y-3 text-xs">
         <div>
           <label for="acc-provider" class="block text-[var(--text-main)] font-semibold mb-1">Provider *</label>
@@ -6309,39 +6297,6 @@
       }
     }
 
-    function fillAccountSample(provider) {
-      document.getElementById('acc-provider').value = provider;
-      onProviderChange();
-      if (provider === 'claude') {
-        document.getElementById('acc-name').value = 'Work Claude Pro';
-        document.getElementById('acc-plan').value = 'Claude 3.5 Sonnet / Pro';
-        document.getElementById('acc-auth-type').value = 'api_key';
-        document.getElementById('acc-credential').value = 'YOUR_ANTHROPIC_API_KEY';
-      } else if (provider === 'chatgpt') {
-        document.getElementById('acc-name').value = 'Team ChatGPT Plus';
-        document.getElementById('acc-plan').value = 'ChatGPT Plus / GPT-4o';
-        document.getElementById('acc-auth-type').value = 'api_key';
-        document.getElementById('acc-credential').value = 'YOUR_OPENAI_API_KEY';
-      } else if (provider === 'gemini') {
-        document.getElementById('acc-name').value = 'Gemini Advanced Lab';
-        document.getElementById('acc-plan').value = 'Gemini Advanced / 1.5 Pro';
-        document.getElementById('acc-auth-type').value = 'api_key';
-        document.getElementById('acc-credential').value = 'YOUR_GOOGLE_API_KEY';
-      } else if (provider === 'deepseek') {
-        document.getElementById('acc-name').value = 'DeepSeek Cloud V3';
-        document.getElementById('acc-plan').value = 'DeepSeek-V3 / R1';
-        document.getElementById('acc-auth-type').value = 'api_key';
-        document.getElementById('acc-credential').value = 'YOUR_DEEPSEEK_API_KEY';
-      } else if (provider === 'custom') {
-        document.getElementById('acc-name').value = 'Local Ollama Harness';
-        document.getElementById('acc-plan').value = 'Qwen 2.5 Coder 32B';
-        document.getElementById('acc-auth-type').value = 'api_key';
-        document.getElementById('acc-credential').value = 'ollama-local-token';
-        const baseInput = document.getElementById('acc-base-url');
-        if (baseInput) baseInput.value = 'http://localhost:11434';
-      }
-    }
-
     async function submitNewAccount() {
       const provider = document.getElementById('acc-provider').value;
       const name = document.getElementById('acc-name').value.trim();
@@ -6671,18 +6626,21 @@
         });
         const data = await res.json();
         if (data.found && data.token) {
+          // Auto-Detect is an explicit request for the real, detected values,
+          // so it overwrites whatever is already in these fields rather than
+          // only filling blanks. Leaving an old or preset value in place here
+          // was exactly how a detected credential ended up saved under the
+          // wrong name, plan and authentication method.
           if (target === 'edit') {
             document.getElementById('edit-acc-credential').value = data.token;
             if (data.name) document.getElementById('edit-acc-name').value = data.name;
             if (data.plan) document.getElementById('edit-acc-plan').value = data.plan;
+            if (data.auth_type) document.getElementById('edit-acc-auth-type').value = data.auth_type;
           } else {
             document.getElementById('acc-credential').value = data.token;
-            if (data.name && !document.getElementById('acc-name').value) {
-              document.getElementById('acc-name').value = data.name;
-            }
-            if (data.plan && !document.getElementById('acc-plan').value) {
-              document.getElementById('acc-plan').value = data.plan;
-            }
+            if (data.name) document.getElementById('acc-name').value = data.name;
+            if (data.plan) document.getElementById('acc-plan').value = data.plan;
+            if (data.auth_type) document.getElementById('acc-auth-type').value = data.auth_type;
           }
           alert(`Auto-detected from ${data.source}!\n\nIdentifier: ${data.name || 'Found'}\nPlan: ${data.plan || 'Detected'}\nToken/Profile: Connected`);
         } else {
