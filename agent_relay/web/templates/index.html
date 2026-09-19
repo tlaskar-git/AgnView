@@ -6019,15 +6019,14 @@
                 itemBarWidth = Math.min(100, Math.max(0, itemUsed));
                 itemBarColor = itemUsed >= 85 ? 'bg-red-500' : (itemUsed >= 65 ? 'bg-amber-500' : 'bg-emerald-500');
               }
+              const itemReset = item.reset_time || '';
               return `
                 <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5">
                   <div class="flex items-center justify-between text-[11px] mb-1">
-                    <div class="flex items-center gap-1.5 min-w-0">
-                      <span class="text-[var(--text-main)] font-semibold text-xs truncate">${escapeHtml(item.label)}</span>
-                      <span class="text-[10px] text-[var(--text-secondary)] font-mono shrink-0">${escapeHtml(item.reset_time || '')}</span>
-                    </div>
+                    <span class="text-[var(--text-main)] font-semibold text-xs truncate mr-2">${escapeHtml(item.label)}</span>
                     <span class="font-bold font-mono text-[var(--text-secondary)] text-xs shrink-0">${itemLabel}</span>
                   </div>
+                  ${itemReset ? `<div class="text-[10px] text-[var(--text-secondary)] font-mono truncate mb-1">${escapeHtml(itemReset)}</div>` : ''}
                   <div class="w-full bg-[var(--bg-page)] rounded-full h-1 overflow-hidden border border-[var(--border-color)]">
                     <div class="${itemBarColor} h-1 rounded-full transition-all duration-500" style="width: ${itemBarWidth}%"></div>
                   </div>
@@ -6037,15 +6036,21 @@
           </div>
         `;
       } else {
+        // The title/value row and the reset-or-scope sub-line are two
+        // separate rows, not one flex row. A local Claude Code recompute
+        // puts a long descriptive sub-line here (e.g. "433 turns across 30
+        // projects, subagents included"), and that text used to sit in a
+        // shrink-0 span squeezed beside the value label with no truncation
+        // or wrap allowance, so it overflowed its box and rendered on top of
+        // the token count next to it. Giving the sub-line its own full-width
+        // truncating row fixes that for any provider, long or short text.
         weeklySectionHtml = `
           <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5 mt-1">
-            <div class="flex items-center justify-between text-[11px] mb-1.5">
-              <div class="flex items-center gap-1.5 min-w-0">
-                <span class="text-[var(--text-main)] font-medium text-xs truncate">${escapeHtml(weeklyTitle)}</span>
-                <span class="text-[10px] text-[var(--text-secondary)] font-mono shrink-0">${escapeHtml(weeklyReset)}</span>
-              </div>
+            <div class="flex items-center justify-between text-[11px] mb-1">
+              <span class="text-[var(--text-main)] font-medium text-xs truncate mr-2">${escapeHtml(weeklyTitle)}</span>
               <span class="font-bold font-mono ${weeklyTextColor} text-xs shrink-0">${weeklyLabel}</span>
             </div>
+            ${weeklyReset ? `<div class="text-[10px] text-[var(--text-secondary)] font-mono truncate mb-1.5">${escapeHtml(weeklyReset)}</div>` : ''}
             <div class="w-full bg-[var(--bg-page)] rounded-full h-1.5 overflow-hidden border border-[var(--border-color)]">
               <div class="${weeklyBarColor} h-1.5 rounded-full transition-all duration-500" style="width: ${weeklyBarWidth}%"></div>
             </div>
@@ -6075,14 +6080,17 @@
             <div class="space-y-2.5">
               ${noticeHtml}
               <!-- Limit 1: Session / Short-Term -->
+              <!-- Title/value on one row, the reset-or-scope sub-line on its
+                   own full-width truncating row underneath. A shrink-0 span
+                   squeezed next to the value used to overflow and overlap
+                   the token count whenever the sub-line was long (see the
+                   weekly block above for the full explanation). -->
               <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5">
-                <div class="flex items-center justify-between text-[11px] mb-1.5">
-                  <div class="flex items-center gap-1.5 min-w-0">
-                    <span class="text-[var(--text-main)] font-medium text-xs truncate">${escapeHtml(sessionTitle)}</span>
-                    <span class="text-[10px] text-[var(--text-secondary)] font-mono shrink-0">${escapeHtml(sessionReset)}</span>
-                  </div>
+                <div class="flex items-center justify-between text-[11px] mb-1">
+                  <span class="text-[var(--text-main)] font-medium text-xs truncate mr-2">${escapeHtml(sessionTitle)}</span>
                   <span class="font-bold font-mono ${sessionTextColor} text-xs shrink-0">${sessionLabel}</span>
                 </div>
+                ${sessionReset ? `<div class="text-[10px] text-[var(--text-secondary)] font-mono truncate mb-1.5">${escapeHtml(sessionReset)}</div>` : ''}
                 <div class="w-full bg-[var(--bg-page)] rounded-full h-1.5 overflow-hidden border border-[var(--border-color)]">
                   <div class="${sessionBarColor} h-1.5 rounded-full transition-all duration-500" style="width: ${sessionBarWidth}%"></div>
                 </div>
