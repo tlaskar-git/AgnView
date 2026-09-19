@@ -345,6 +345,130 @@ def test_gemini_signed_in_account_is_named_in_the_reason(tmp_path, monkeypatch):
     assert "someone@example.com" in acc.error_message
 
 
+def _patch_claude_web_session(monkeypatch, *, orgs=None, usage_status=200, usage_body=None, raise_on=None):
+    """Answer the two GETs `_fetch_claude_web_session` makes: the organisation
+    list, then that organisation's usage. `raise_on` simulates the request
+    itself failing (a network problem), distinct from a real HTTP response."""
+
+    class _Response:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
+
+        def json(self):
+            return self._body
+
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise RuntimeError(f"HTTP {self.status_code}")
+
+    captured_headers = {}
+
+    class _Client:
+        def __init__(self, *args, **kwargs):
+            captured_headers.update(kwargs.get("headers") or {})
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def get(self, url, *args, **kwargs):
+            if raise_on and raise_on in url:
+                raise ConnectionError("simulated network failure")
+            if url.endswith("/api/organizations"):
+                return _Response(200, orgs if orgs is not None else [{"uuid": "org-1"}])
+            return _Response(usage_status, usage_body if usage_body is not None else {})
+
+    monkeypatch.setattr("agent_relay.core.usage_fetcher.httpx.Client", _Client)
+    return captured_headers
+
+
+# The real shape captured live from claude.ai/api/organizations/{uuid}/usage.
+_REAL_CLAUDE_LIMITS = [
+    {"kind": "session", "group": "session", "percent": 18, "severity": "normal",
+     "resets_at": "2026-09-19T18:49:59.829898+00:00", "scope": None, "is_active": False},
+    {"kind": "weekly_all", "group": "weekly", "percent": 91, "severity": "critical",
+     "resets_at": "2026-09-19T17:59:59.829918+00:00", "scope": None, "is_active": True},
+    {"kind": "weekly_scoped", "group": "weekly", "percent": 54, "severity": "normal",
+     "resets_at": "2026-09-19T17:59:59.829918+00:00",
+     "scope": {"model": {"id": None, "display_name": "Fable"}, "surface": None}, "is_active": False},
+]
+
+
+def test_a_pasted_claude_cookie_gets_a_live_percentage(monkeypatch):
+    """A person's own pasted session cookie is used directly, every refresh.
+
+    Unlike a one-off telemetry sync, this is not a snapshot: as long as the
+    cookie is valid, every call goes back to claude.ai's own usage endpoint.
+    """
+    headers = _patch_claude_web_session(
+        monkeypatch, usage_body={"limits": _REAL_CLAUDE_LIMITS}
+    )
+
+    acc = _fetch_claude_live(_account("claude", credential="sessionKey=abc123", auth_type="session_token"))
+
+    assert acc.status == "active"
+    assert acc.session_percent_used == 18
+    assert acc.weekly_percent_used == 91
+    assert acc.weekly_breakdown == [
+        {"label": "Fable", "reset_time": acc.weekly_breakdown[0]["reset_time"], "percent_used": 54}
+    ]
+    # This is a live figure, not a derived one, so no token count is invented.
+    assert acc.tokens_used is None
+    assert headers.get("Cookie") == "sessionKey=abc123"
+
+
+def test_a_bare_sessionkey_value_is_wrapped_into_a_cookie(monkeypatch):
+    """Copying just the value from DevTools' Cookies panel is enough."""
+    headers = _patch_claude_web_session(
+        monkeypatch, usage_body={"limits": _REAL_CLAUDE_LIMITS}
+    )
+
+    _fetch_claude_live(_account("claude", credential="abc123", auth_type="session_token"))
+
+    assert headers.get("Cookie") == "sessionKey=abc123"
+
+
+def test_a_rejected_claude_cookie_says_so_specifically(monkeypatch):
+    _patch_claude_web_session(monkeypatch, usage_status=401)
+
+    acc = _fetch_claude_live(_account("claude", credential="sessionKey=stale", auth_type="session_token"))
+
+    assert acc.status == "unavailable"
+    assert "rejected" in acc.error_message
+    assert acc.session_percent_used is None
+
+
+def test_an_unreachable_claude_session_falls_back_to_the_token_count(tmp_path, monkeypatch):
+    """A network hiccup must not blank the honest local figure that already works."""
+    _claude_with_transcripts(tmp_path, monkeypatch)
+    _patch_claude_web_session(monkeypatch, raise_on="claude.ai")
+
+    acc = _fetch_claude_live(_account("claude", credential="sessionKey=abc123", auth_type="session_token"))
+
+    assert acc.status == "active"
+    assert acc.session_percent_used is None
+    assert acc.session_tokens_used is not None
+
+
+def test_the_internal_cli_placeholder_never_tries_the_web_session_path(tmp_path, monkeypatch):
+    """claude-cli-... is this app's own marker for a locally detected CLI
+    session, not a real cookie, so it must not be sent to claude.ai as one."""
+    _claude_with_transcripts(tmp_path, monkeypatch)
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("must not call the web session path for a claude-cli- placeholder")
+
+    monkeypatch.setattr("agent_relay.core.usage_fetcher._fetch_claude_web_session", _boom)
+
+    acc = _fetch_claude_live(_account("claude", credential="claude-cli-e118f31c", auth_type="session_token"))
+
+    assert acc.status == "active"
+    assert acc.session_tokens_used is not None
+
+
 def _patch_httpx_get(monkeypatch, status_code: int, json_body: dict):
     """Answer every outbound GET from the fetcher without touching the network."""
 
