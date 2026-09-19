@@ -6760,8 +6760,8 @@
     function telemetrySyncHint(provider) {
       if (provider === 'gemini') {
         return {
-          detail: 'AgnView cannot read a Gemini percentage from this machine. Paste this script into Antigravity’s own DevTools console, with the model picker open, to sync the real Five Hour and Weekly figures.',
-          button: 'Copy Antigravity extractor script'
+          detail: 'Open AntiGravity’s model picker so the Five Hour and Weekly figures are on screen, then click Refresh on this card straight away. AgnView reads them from AntiGravity’s own local debug port automatically, no console needed. AntiGravity’s packaged build has no DevTools console to paste into, so only use the script below if you are running an unpackaged build with DevTools enabled.',
+          button: 'Copy Antigravity extractor script (advanced)'
         };
       }
       return {
