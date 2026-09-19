@@ -697,6 +697,12 @@ def detect_local_token(
         except Exception:
             pass
 
+    # A credential read from a CLI's own OAuth session (Claude Code, the Codex
+    # CLI, the Gemini CLI) is a session token, not the provider's API key, and
+    # the Add Account form must say so, or the account is saved with the wrong
+    # authentication method even though the credential itself is correct.
+    auth_type_hint = "session_token" if source and "CLI" in source else "api_key"
+
     return {
         "found": detected,
         "detected": detected,
@@ -706,7 +712,8 @@ def detect_local_token(
         "details": source,
         "base_url": base_url,
         "name": name_hint,
-        "plan": plan_hint
+        "plan": plan_hint,
+        "auth_type": auth_type_hint if detected else None
     }
 
 
