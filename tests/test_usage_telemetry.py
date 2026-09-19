@@ -345,15 +345,21 @@ def test_gemini_signed_in_account_is_named_in_the_reason(tmp_path, monkeypatch):
     assert "someone@example.com" in acc.error_message
 
 
-def _patch_claude_web_session(monkeypatch, *, orgs=None, usage_status=200, usage_body=None, raise_on=None):
+def _patch_claude_web_session(
+    monkeypatch, *, orgs=None, usage_status=200, usage_body=None, usage_content_type="application/json", raise_on=None
+):
     """Answer the two GETs `_fetch_claude_web_session` makes: the organisation
     list, then that organisation's usage. `raise_on` simulates the request
-    itself failing (a network problem), distinct from a real HTTP response."""
+    itself failing (a network problem), distinct from a real HTTP response.
+    `usage_content_type` lets a test answer a 401/403 the way an edge or
+    bot-challenge response would: as HTML, not the JSON claude.ai's own API
+    always uses for a genuine rejection."""
 
     class _Response:
-        def __init__(self, status_code, body):
+        def __init__(self, status_code, body, content_type="application/json"):
             self.status_code = status_code
             self._body = body
+            self.headers = {"content-type": content_type}
 
         def json(self):
             return self._body
@@ -379,7 +385,7 @@ def _patch_claude_web_session(monkeypatch, *, orgs=None, usage_status=200, usage
                 raise ConnectionError("simulated network failure")
             if url.endswith("/api/organizations"):
                 return _Response(200, orgs if orgs is not None else [{"uuid": "org-1"}])
-            return _Response(usage_status, usage_body if usage_body is not None else {})
+            return _Response(usage_status, usage_body if usage_body is not None else {}, usage_content_type)
 
     monkeypatch.setattr("agent_relay.core.usage_fetcher.httpx.Client", _Client)
     return captured_headers
@@ -467,6 +473,61 @@ def test_the_internal_cli_placeholder_never_tries_the_web_session_path(tmp_path,
 
     assert acc.status == "active"
     assert acc.session_tokens_used is not None
+
+
+def test_a_malformed_limit_row_does_not_blank_the_good_rows(monkeypatch):
+    """One field this parser cannot make sense of must cost only that row.
+
+    A comparable tracker (Claude-Usage-Tracker) states this as a hard rule for
+    exactly this reason: a provider adding or reshaping one field must never
+    fail the whole response. Before this fix, an unparseable resets_at raised
+    out of the whole loop and discarded every other, perfectly good row too.
+    """
+    limits = [
+        {"kind": "session", "percent": 18, "resets_at": "not-a-real-timestamp"},
+        {"kind": "weekly_all", "percent": 91, "resets_at": "2026-09-19T17:59:59+00:00"},
+        {"kind": "weekly_scoped", "percent": "not-a-number",
+         "scope": {"model": {"display_name": "Fable"}}},
+        {"kind": "weekly_scoped", "percent": 54,
+         "scope": {"model": {"display_name": "Fable"}}},
+    ]
+    _patch_claude_web_session(monkeypatch, usage_body={"limits": limits})
+
+    acc = _fetch_claude_live(_account("claude", credential="sessionKey=abc123", auth_type="session_token"))
+
+    assert acc.status == "active"
+    # The session row's own percent is intact even though its reset date
+    # could not be parsed; only the reset string it depended on is empty.
+    assert acc.session_percent_used == 18
+    assert acc.session_reset_time is None
+    assert acc.weekly_percent_used == 91
+    # The malformed Fable row before the well-formed one is dropped, and the
+    # good one still comes through.
+    assert acc.weekly_breakdown == [
+        {"label": "Fable", "reset_time": None, "percent_used": 54}
+    ]
+
+
+def test_a_401_with_no_json_is_not_blamed_on_the_cookie(tmp_path, monkeypatch):
+    """A comparable tracker's own changelog names this exact failure mode:
+    a Cloudflare challenge answered as if the credential were expired, which
+    sends a person to re-paste a cookie that was never the problem. claude.ai's
+    own API always answers a genuine rejection with JSON, never HTML, so only
+    a JSON 401/403 is reported as the cookie being rejected."""
+    # No local transcripts either, on this throwaway home, so falling back to
+    # the token count lands on the honest "nothing to measure yet" rather
+    # than this machine's own real Claude Code history.
+    monkeypatch.setattr(
+        "agent_relay.core.usage_fetcher.Path.home", staticmethod(lambda: tmp_path)
+    )
+    _patch_claude_web_session(
+        monkeypatch, usage_status=403, usage_content_type="text/html; charset=utf-8"
+    )
+
+    acc = _fetch_claude_live(_account("claude", credential="sessionKey=abc123", auth_type="session_token"))
+
+    assert acc.status == "unavailable"
+    assert "rejected" not in (acc.error_message or "")
 
 
 def _patch_httpx_get(monkeypatch, status_code: int, json_body: dict):
