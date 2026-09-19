@@ -1144,6 +1144,9 @@
           <button onclick="openAddAccountModal()" class="flex items-center gap-2 bg-[var(--color-action)] hover:bg-[var(--color-action-hover)] text-white text-xs font-semibold px-4 py-2 rounded-xl shadow-sm transition" aria-label="Add Subscription Account">
             <i data-lucide="plus" class="w-3.5 h-3.5"></i> Add Account
           </button>
+          <button onclick="openUsageHelpModal()" class="flex items-center gap-2 bg-[var(--bg-raised)] hover:bg-[var(--border-color)] text-[var(--text-main)] border border-[var(--border-color)] text-xs font-semibold px-3.5 py-2 rounded-xl transition shadow-sm" aria-label="How live usage works">
+            <i data-lucide="circle-help" class="w-3.5 h-3.5 text-[var(--color-action)]"></i> How this works
+          </button>
         </div>
       </div>
 
@@ -1553,6 +1556,65 @@
         <button onclick="closeAddAccountModal()" class="text-[var(--text-secondary)] hover:text-[var(--text-main)] px-4 py-2">Cancel</button>
         <button onclick="submitNewAccount()" id="btn-save-account" class="font-semibold bg-[var(--color-action)] hover:bg-[var(--color-action-hover)] text-white px-5 py-2 rounded-lg shadow-sm transition">
           Connect & Probe Quota
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- MODAL: HOW LIVE USAGE WORKS                                               -->
+  <!-- ========================================================================= -->
+  <div id="usage-help-modal" role="dialog" aria-modal="true" aria-labelledby="usage-help-modal-title" class="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+    <div class="bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-xl max-w-2xl w-full p-6 shadow-2xl transition-colors max-h-[92vh] overflow-y-auto custom-scrollbar">
+      <div class="flex items-center justify-between mb-4">
+        <h3 id="usage-help-modal-title" class="text-base font-bold text-[var(--text-main)] flex items-center gap-2">
+          <i data-lucide="circle-help" class="w-4 h-4 text-[var(--color-action)]"></i> How live usage works
+        </h3>
+        <button onclick="closeUsageHelpModal()" class="text-[var(--text-secondary)] hover:text-[var(--text-main)] p-1 rounded-lg" aria-label="Close dialog">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <div class="space-y-5 text-xs text-[var(--text-main)] leading-relaxed">
+        <p class="text-[var(--text-secondary)]">
+          No provider publishes a public API for personal subscription usage, so each one needs its own answer. This is what each card actually does, and what you can do about it.
+        </p>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-emerald-500 dark:text-emerald-400 mb-1">ChatGPT / Codex — live already, nothing to do</p>
+          <p>Reads a real API (<code class="font-mono text-[10px]">/backend-api/wham/usage</code>) with the token already detected from your Codex CLI sign-in. Updates on every refresh automatically.</p>
+        </div>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-amber-500 dark:text-amber-400 mb-2">Claude — live, once you paste your own session cookie</p>
+          <p class="mb-2">Anthropic gives Claude Code a token count, but only claude.ai's own website shows the real percentage. Give this card the same access your browser already has, once:</p>
+          <ol class="list-decimal list-inside space-y-1 ml-1">
+            <li>On the Claude card, click <b>Edit</b>.</li>
+            <li>Set <b>Authentication Method</b> to <b>Session Token</b>.</li>
+            <li>Open <a href="https://claude.ai" target="_blank" rel="noopener" class="text-[var(--color-action)] underline">claude.ai</a>, sign in, press <b>F12</b> to open DevTools.</li>
+            <li>Go to the <b>Application</b> tab (Chrome) or <b>Storage</b> tab (Firefox) → <b>Cookies</b> → <code class="font-mono text-[10px]">https://claude.ai</code>.</li>
+            <li>Find the cookie named <code class="font-mono text-[10px]">sessionKey</code> and copy its value.</li>
+            <li>Paste that value into the credential field on the Edit form and save.</li>
+          </ol>
+          <p class="mt-2">From then on, every refresh calls claude.ai's own usage API directly with that cookie, live, for as long as it stays valid (typically weeks). If it ever expires, the card says so specifically and asks for a fresh one. Nothing here reads your browser's storage for you; you copy your own cookie and paste it in, the same as pasting an API key.</p>
+        </div>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-cyan-500 dark:text-cyan-400 mb-2">Gemini / AntiGravity — automatic only while AntiGravity is open, no permanent option</p>
+          <p class="mb-2">This one is genuinely different from Claude, not the same story with a different name. AntiGravity does not expose its quota through any cookie-based web page. It reads its own numbers from a local service on your machine, protected by a security token generated fresh each time AntiGravity starts, that this app has no legitimate way to obtain. So there is no paste-once, live-forever option here, and there will not be one without AntiGravity itself offering an API key for this.</p>
+          <p class="mb-2">What does work: while AntiGravity is running, this card reads its usage panel automatically over AntiGravity's own local debug connection, no console, no pasting. The catch is timing: that panel is a hover menu that closes itself the instant you click anywhere else, including switching to this browser tab to hit Refresh. So an automatic refresh only catches a new number on the rare chance the panel happens to be open at that exact moment.</p>
+          <p>To get a fresh reading on demand: open AntiGravity's model picker so the Five Hour and Weekly figures are on screen, and without clicking away, ask in this chat for the number to be synced, or hit Refresh on this card within a second or two while the panel is still showing.</p>
+        </div>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-blue-500 dark:text-blue-400 mb-1">DeepSeek — live already, nothing to do</p>
+          <p>Reads your account balance directly from DeepSeek's own API with the key you added.</p>
+        </div>
+      </div>
+
+      <div class="mt-6 flex items-center justify-end text-xs">
+        <button onclick="closeUsageHelpModal()" class="font-semibold bg-[var(--color-action)] hover:bg-[var(--color-action-hover)] text-white px-5 py-2 rounded-lg shadow-sm transition">
+          Got it
         </button>
       </div>
     </div>
@@ -6309,6 +6371,17 @@
     function closeAddAccountModal() {
       untrapModalFocus();
       document.getElementById('add-account-modal').classList.add('hidden');
+    }
+
+    function openUsageHelpModal() {
+      document.getElementById('usage-help-modal').classList.remove('hidden');
+      trapModalFocus('usage-help-modal');
+      safeCreateIcons();
+    }
+
+    function closeUsageHelpModal() {
+      untrapModalFocus();
+      document.getElementById('usage-help-modal').classList.add('hidden');
     }
 
     function onProviderChange() {
