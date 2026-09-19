@@ -20,7 +20,8 @@ from ..core.models import (
     Job, Task, CreateJobRequest, ClaimTaskRequest,
     CompleteTaskRequest, RequestRevisionRequest, RevisionFeedback, FailTaskRequest,
     TaskWaitResponse, AgentInstance, AgentHeartbeatRequest,
-    UsageAccount, CreateUsageAccountRequest, UpdateUsageAccountRequest, DetectTokenRequest, UsageTelemetryPayload, ConsoleDispatchPayload
+    UsageAccount, CreateUsageAccountRequest, UpdateUsageAccountRequest, DetectTokenRequest, UsageTelemetryPayload, ConsoleDispatchPayload,
+    rows_carry_a_percentage
 )
 from ..core.prompts import format_web_prompt_for_agent
 from ..core.usage_fetcher import fetch_account_usage, usage_is_stale
@@ -411,6 +412,7 @@ def add_usage_account(req: CreateUsageAccountRequest, request: Request):
         weekly_percent_used=req.weekly_percent_used,
         weekly_percent_left=req.weekly_percent_left,
         weekly_breakdown=req.weekly_breakdown,
+        session_breakdown=req.session_breakdown,
         tokens_limit=req.tokens_limit,
         cost_limit_usd=req.cost_limit_usd,
         base_url=req.base_url
@@ -481,6 +483,8 @@ def update_usage_account(account_id: str, req: UpdateUsageAccountRequest, reques
         account.weekly_percent_left = req.weekly_percent_left
     if req.weekly_breakdown is not None:
         account.weekly_breakdown = req.weekly_breakdown
+    if req.session_breakdown is not None:
+        account.session_breakdown = req.session_breakdown
 
     new_cred = req.get_credential()
     if new_cred:
@@ -515,9 +519,21 @@ def sync_account_telemetry(account_id: str, payload: UsageTelemetryPayload, requ
     # back to a token count. Only a window that actually carried a percentage
     # gets stamped.
     synced_at = datetime.now(timezone.utc).isoformat()
-    if payload.session_percent_used is not None or payload.session_percent_left is not None:
+    # A per-group breakdown counts as a measurement of its window just as a
+    # single top-level percentage does. Antigravity reports only per-group
+    # figures, so without this its sync would go unstamped and the next
+    # recompute would blank it.
+    if (
+        payload.session_percent_used is not None
+        or payload.session_percent_left is not None
+        or rows_carry_a_percentage(payload.session_breakdown)
+    ):
         acc.session_telemetry_synced_at = synced_at
-    if payload.weekly_percent_used is not None or payload.weekly_percent_left is not None:
+    if (
+        payload.weekly_percent_used is not None
+        or payload.weekly_percent_left is not None
+        or rows_carry_a_percentage(payload.weekly_breakdown)
+    ):
         acc.weekly_telemetry_synced_at = synced_at
     if payload.plan_name:
         acc.plan_name = payload.plan_name
@@ -545,6 +561,8 @@ def sync_account_telemetry(account_id: str, payload: UsageTelemetryPayload, requ
         acc.weekly_percent_left = payload.weekly_percent_left
     if payload.weekly_breakdown is not None:
         acc.weekly_breakdown = payload.weekly_breakdown
+    if payload.session_breakdown is not None:
+        acc.session_breakdown = payload.session_breakdown
     if payload.tokens_limit is not None:
         acc.tokens_limit = payload.tokens_limit
     if payload.tokens_used is not None:
