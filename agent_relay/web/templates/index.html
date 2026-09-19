@@ -1586,17 +1586,20 @@
         </div>
 
         <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
-          <p class="font-bold text-amber-500 dark:text-amber-400 mb-2">Claude — live, once you paste your own session cookie</p>
-          <p class="mb-2">Anthropic gives Claude Code a token count, but only claude.ai's own website shows the real percentage. Give this card the same access your browser already has, once:</p>
+          <p class="font-bold text-amber-500 dark:text-amber-400 mb-2">Claude — one small step, once, then live forever</p>
+          <p class="mb-2">Your Claude card has the wrong kind of "key" plugged in until you do this: the one AgnView found automatically (for Claude Code) is not the same as the one your browser uses for claude.ai's real percentage. Only your own browser can hand over that second key, so this one step cannot be automatic. It takes about 30 seconds:</p>
           <ol class="list-decimal list-inside space-y-1 ml-1">
-            <li>On the Claude card, click <b>Edit</b>.</li>
-            <li>Set <b>Authentication Method</b> to <b>Session Token</b>.</li>
-            <li>Open <a href="https://claude.ai" target="_blank" rel="noopener" class="text-[var(--color-action)] underline">claude.ai</a>, sign in, press <b>F12</b> to open DevTools.</li>
-            <li>Go to the <b>Application</b> tab (Chrome) or <b>Storage</b> tab (Firefox) → <b>Cookies</b> → <code class="font-mono text-[10px]">https://claude.ai</code>.</li>
-            <li>Find the cookie named <code class="font-mono text-[10px]">sessionKey</code> and copy its value.</li>
-            <li>Paste that value into the credential field on the Edit form and save.</li>
+            <li>Open <a href="https://claude.ai" target="_blank" rel="noopener" class="text-[var(--color-action)] underline">claude.ai</a> in Chrome or Edge, make sure you're logged in.</li>
+            <li>Press <b>F12</b>.</li>
+            <li>Click the <b>Application</b> tab at the top (Firefox: <b>Storage</b>).</li>
+            <li>On the left, click <b>Cookies</b>, then click <code class="font-mono text-[10px]">https://claude.ai</code>.</li>
+            <li>Find the row named <code class="font-mono text-[10px]">sessionKey</code>. Click it. Copy the long value shown.</li>
+            <li>Come back here, click <b>Edit</b> on the Claude card.</li>
+            <li>Change <b>Authentication Method</b> to <b>Session Token</b>.</li>
+            <li>Paste the value in, click <b>Save</b>.</li>
           </ol>
-          <p class="mt-2">From then on, every refresh calls claude.ai's own usage API directly with that cookie, live, for as long as it stays valid (typically weeks). If it ever expires, the card says so specifically and asks for a fresh one. Nothing here reads your browser's storage for you; you copy your own cookie and paste it in, the same as pasting an API key.</p>
+          <p class="mt-2"><b>That's it.</b> After that one time, it never asks again: every refresh (every 5 minutes) calls claude.ai's own usage page directly with that key, live, for as long as it stays valid, which is usually weeks. If it ever expires, the card says so specifically and asks for a fresh one, instead of quietly going stale.</p>
+          <p class="mt-2">Why this one step cannot go away: the only way to make it fully automatic, with zero steps, for every person who ever installs this app, is for AgnView to secretly read login information out of a stranger's browser without asking them. That is not something this app will ever do. One small step, once, per person, is the real, permanent shape of this feature.</p>
         </div>
 
         <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
@@ -6838,7 +6841,7 @@
         };
       }
       return {
-        detail: 'Anthropic publishes no local quota figure, so this card shows token counts only. For a live percentage that updates on its own, click Edit, set Authentication Method to Session Token, and paste the sessionKey cookie from claude.ai (F12, Application, Cookies, claude.ai). For a one-off figure instead, paste this script into the browser console on claude.ai settings, usage.',
+        detail: 'This card shows token counts only until you plug in the same key your browser uses for claude.ai. One small step, once: click "How this works" above for the exact 30-second walkthrough. Or paste this script into the browser console on claude.ai settings, usage, for a one-off figure instead.',
         button: 'Copy claude.ai extractor script'
       };
     }
