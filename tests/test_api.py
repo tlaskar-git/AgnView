@@ -251,3 +251,17 @@ def test_live_sessions_endpoint_describes_and_orders_what_is_running(client):
     assert {"uptime_seconds", "turns_completed", "queued_turns"} <= set(rows[0])
 
     runner.live_sessions.clear()
+
+
+def test_the_dashboard_page_is_never_cached(client):
+    """A code or markup fix in index.html must reach the next page load.
+
+    FileResponse sets no Cache-Control of its own, so a browser was free to
+    keep serving this page from its own heuristic cache well after the hub
+    had restarted with a fixed build, on a plain reload and even sometimes on
+    a fresh navigation. The page every fix in this dashboard depends on being
+    current must never be cached.
+    """
+    res = client.get("/")
+    assert res.status_code == 200
+    assert res.headers["cache-control"] == "no-cache, no-store, must-revalidate"

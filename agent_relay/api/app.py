@@ -162,6 +162,17 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
     if index_file.exists():
         @app.get("/", include_in_schema=False)
         async def serve_index():
-            return FileResponse(str(index_file))
+            # FileResponse sets no Cache-Control of its own, so a browser is
+            # free to serve this page from its heuristic cache on a plain
+            # navigation, load, or F5, and did: an operator reinstalling a
+            # fixed build restarted the hub, and their already-open tab kept
+            # running JavaScript from hours earlier because nothing told the
+            # browser this page had changed. This is the one HTML document
+            # every fix in this dashboard depends on being current, so it is
+            # never cached.
+            return FileResponse(
+                str(index_file),
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
 
     return app
