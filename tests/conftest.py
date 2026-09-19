@@ -46,6 +46,15 @@ os.environ["HOME"] = str(_FAKE_HOME)
 
 FAKE_HOME = Path.home()
 
+# The same reasoning for the application-data directory. AntiGravity's debug
+# port file lives under APPDATA on Windows and XDG_CONFIG_HOME on Linux, and the
+# usage fetcher reads it on every Gemini refresh. Left pointing at the real
+# machine, a test run would read whatever the developer's own AntiGravity was
+# doing at that moment, so the same test would pass or fail depending on whether
+# an app happened to be open. Point both at the throwaway home instead.
+os.environ["APPDATA"] = str(_FAKE_HOME / "AppData" / "Roaming")
+os.environ["XDG_CONFIG_HOME"] = str(_FAKE_HOME / ".config")
+
 
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_FAKE_HOME, ignore_errors=True)
