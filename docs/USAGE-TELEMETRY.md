@@ -9,7 +9,7 @@ script reads the provider's own usage panel and posts the real numbers to
 |---|---|---|
 | ChatGPT / Codex | Yes, from `/backend-api/wham/usage` | Not needed |
 | Claude | No | Browser console on claude.ai, settings, usage |
-| Gemini (Antigravity) | No | Antigravity's own DevTools console |
+| Gemini (Antigravity) | Yes, while Antigravity is running | Antigravity's own DevTools console |
 | DeepSeek | Balance only, from its account API | Not needed |
 
 A card whose provider can hold a synced percentage and holds none shows a
@@ -21,6 +21,39 @@ A synced window is preserved across later automatic refreshes for as long as
 the window it describes stays open: five hours for the session window, seven
 days for the weekly one. After that the figure expires and the card asks for a
 new sync.
+
+## Antigravity reads itself, while it is running
+
+Antigravity needs no paste. Every refresh of a Gemini or Antigravity account
+asks the app's own debug port for the text on its screen, parses the model
+picker exactly as the pasted script does, and fills the same fields:
+
+1. `agent_relay/core/antigravity.py` reads the first line of
+   `%APPDATA%\Antigravity\DevToolsActivePort` (on macOS
+   `~/Library/Application Support/Antigravity/`, on Linux
+   `$XDG_CONFIG_HOME/Antigravity/`).
+2. It opens a TCP connection to that port on 127.0.0.1. A port file left behind
+   by a closed app names a port nothing answers on, so this connection, not the
+   file, is what says the app is running.
+3. `GET /json/list` names the window, then one `Runtime.evaluate` over the
+   DevTools Protocol websocket reads `document.body.innerText`.
+4. The panel text is parsed and written to the account as a measured window,
+   stamped the same way a pasted sync is.
+
+It never starts Antigravity. A routine usage refresh that launched an
+application would be intrusive, so when the app is closed the card says
+"AntiGravity needs to be running for an automatic usage read" and the pasted
+script stays available for a figure without it. A read that fails for any other
+reason says which step failed, and the card falls back to unavailable rather
+than raising.
+
+The parsing rules are written once, in `parse_usage_panel`. The pasted script
+carries them in JavaScript as well, so `tests/test_antigravity_cdp.py` runs both
+over the same panel fixtures and fails if the two ever disagree.
+
+Nothing here reads a browser cookie store, a browser profile or any stored
+credential. It is the app's own loopback debug interface, describing the app's
+own window, reading text already on screen.
 
 ## Opening DevTools in Antigravity
 

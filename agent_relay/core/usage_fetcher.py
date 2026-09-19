@@ -13,6 +13,7 @@ import httpx
 from datetime import datetime, timezone
 from typing import Optional
 
+from . import antigravity
 from .claude_code_usage import (
     SESSION_WINDOW_HOURS,
     WEEK_WINDOW_DAYS,
@@ -580,22 +581,73 @@ def _fetch_chatgpt_live(account: UsageAccount) -> UsageAccount:
     )
 
 
+def _apply_antigravity_payload(account: UsageAccount, payload: dict) -> UsageAccount:
+    """Write an automatic AntiGravity read onto the account.
+
+    The same fields the manual telemetry sync fills, filled the same way, so a
+    card cannot tell the two apart and neither can the staleness rules. The
+    synced-at stamps are set because this is a real measurement of a real
+    window, exactly as a pasted sync is: it keeps the last true figure on the
+    card for the life of the window after AntiGravity is closed, rather than
+    blanking it the moment the app quits.
+    """
+    now = _get_utc_now_iso()
+    session_rows = payload.get("session_breakdown")
+    weekly_rows = payload.get("weekly_breakdown")
+
+    if session_rows:
+        account.session_breakdown = session_rows
+        account.session_title = payload.get("session_title")
+        account.session_percent_used = payload.get("session_percent_used")
+        account.session_percent_left = payload.get("session_percent_left")
+        account.percent_used = account.session_percent_used
+        account.session_telemetry_synced_at = now
+    if weekly_rows:
+        account.weekly_breakdown = weekly_rows
+        account.weekly_title = payload.get("weekly_title")
+        account.weekly_percent_used = payload.get("weekly_percent_used")
+        account.weekly_percent_left = payload.get("weekly_percent_left")
+        account.weekly_telemetry_synced_at = now
+
+    # AntiGravity reports a share of each window and no token count, so the
+    # token fields stay empty rather than being back-derived from a percent.
+    account.tokens_used = None
+    account.tokens_limit = None
+    account.tokens_remaining = None
+    account.status = "active"
+    account.error_message = None
+    account.last_checked = now
+    return account
+
+
 def _fetch_gemini_live(account: UsageAccount) -> UsageAccount:
     """Report Gemini and AntiGravity usage, when there is any to report.
 
-    Neither Gemini nor AntiGravity writes a quota file on this machine, and
-    neither publishes an endpoint that says how much of a window is spent. An
-    AI Studio API key can be checked for validity and nothing more. So the only
-    honest answer for a signed-in Gemini or AntiGravity account is that usage is
-    unavailable, with the reason attached.
+    AntiGravity prints its own quota in its model picker. When the app is
+    running, its own Chromium debug port is asked for the text on screen and
+    that panel is read automatically, so the figure appears with nothing to
+    paste. That is tried first, because it is the only source here that can
+    produce a real percentage on its own.
 
-    The one percentage that can be real is the one the browser telemetry sync
-    reads off AntiGravity's own model picker. While that sync still describes an
-    open window it is kept exactly as it was synced, rather than being wiped by
-    this function, which has nothing to put in its place.
+    When AntiGravity is not running there is nothing else to read. Neither
+    Gemini nor AntiGravity writes a quota file on this machine, and neither
+    publishes an endpoint that says how much of a window is spent. An AI Studio
+    API key can be checked for validity and nothing more. So the account is
+    marked unavailable and told exactly what is missing.
+
+    A percentage from an earlier read, automatic or pasted, still describes an
+    open window for as long as that window lasts, so it is kept rather than
+    being wiped by this function, which has nothing to put in its place.
     """
     cred = (account.credential or "").strip()
     kept = _capture_synced_windows(account, datetime.now(timezone.utc))
+
+    # AntiGravity's own debug port, first. This never starts the app: if it is
+    # not running, the read reports that and nothing is launched.
+    antigravity_read = antigravity.read_usage()
+    if antigravity_read.payload:
+        return _apply_antigravity_payload(account, antigravity_read.payload)
+    antigravity_reason = antigravity_read.error or antigravity.NOT_RUNNING_MESSAGE
 
     if cred.startswith("AIza"):
         try:
@@ -644,22 +696,11 @@ def _fetch_gemini_live(account: UsageAccount) -> UsageAccount:
         if active:
             account.plan_name = "Gemini"
             return _restore_synced_windows(
-                _mark_unavailable(
-                    account,
-                    f"Signed in as {active}. Neither Gemini nor AntiGravity reports "
-                    "usage on this machine, so there is no figure to show.",
-                ),
+                _mark_unavailable(account, f"Signed in as {active}. {antigravity_reason}"),
                 kept,
             )
 
-    return _restore_synced_windows(
-        _mark_unavailable(
-            account,
-            "No Gemini or AntiGravity sign-in was found on this machine, and neither "
-            "tool reports usage locally.",
-        ),
-        kept,
-    )
+    return _restore_synced_windows(_mark_unavailable(account, antigravity_reason), kept)
 
 
 def _fetch_deepseek_live(account: UsageAccount) -> UsageAccount:
