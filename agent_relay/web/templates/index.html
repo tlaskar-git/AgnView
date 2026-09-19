@@ -6493,12 +6493,37 @@
   // Extract DOM data from claude.ai/new#settings/usage
   const bodyText = document.body.innerText;
   const sessionMatch = bodyText.match(/Current session[\\s\\S]*?Resets in ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
-  const weeklyMatch = bodyText.match(/Weekly limits[\\s\\S]*?All models[\\s\\S]*?Resets ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
   const planMatch = bodyText.match(/Plan usage limits\\s+([^\\n]+)/i);
+
+  // Weekly limits lists one row per model group: at least "All models", and
+  // any model the plan tracks separately (for example "Fable"). Read every
+  // row this page actually shows, in the order it shows them, rather than
+  // only the first one, so the breakdown here matches the page line for line.
+  const weeklySplit = bodyText.split(/Weekly limits/i);
+  const weeklyLines = weeklySplit.length > 1
+    ? weeklySplit[1].split('\\n').map(s => s.trim()).filter(Boolean)
+    : [];
+  const weeklyRows = [];
+  for (let i = 0; i < weeklyLines.length; i++) {
+    const resetMatch = weeklyLines[i].match(/^Resets\\s+(.+)$/i);
+    if (!resetMatch) continue;
+    let label = null;
+    for (let j = i - 1; j >= 0 && j >= i - 3; j--) {
+      if (!/^Resets/i.test(weeklyLines[j]) && !/%\\s*used/i.test(weeklyLines[j])) { label = weeklyLines[j]; break; }
+    }
+    let percent = null;
+    for (let k = i + 1; k < weeklyLines.length && k <= i + 3; k++) {
+      const pctMatch = weeklyLines[k].match(/(\\d+)%\\s*used/i);
+      if (pctMatch) { percent = parseFloat(pctMatch[1]); break; }
+    }
+    if (label && percent !== null) {
+      weeklyRows.push({ label: label, reset_time: 'Resets ' + resetMatch[1].trim(), percent_used: percent });
+    }
+  }
 
   // Only what this page actually said. A field the page did not show is left
   // out, so a failed scrape reports nothing rather than a made-up figure.
-  if (!sessionMatch && !weeklyMatch) {
+  if (!sessionMatch && weeklyRows.length === 0) {
     alert('[AgnView] Nothing was read from this page. Open claude.ai settings, usage, and run this again.');
     return;
   }
@@ -6509,12 +6534,11 @@
     payload.session_reset_time = 'Resets in ' + sessionMatch[1].trim();
     payload.session_percent_used = parseFloat(sessionMatch[2]);
   }
-  if (weeklyMatch) {
-    payload.weekly_reset_time = 'Resets ' + weeklyMatch[1].trim();
-    payload.weekly_percent_used = parseFloat(weeklyMatch[2]);
-    payload.weekly_breakdown = [
-      { label: 'All models', reset_time: 'Resets ' + weeklyMatch[1].trim(), percent_used: parseFloat(weeklyMatch[2]) }
-    ];
+  if (weeklyRows.length > 0) {
+    const primary = weeklyRows.find(r => /all models/i.test(r.label)) || weeklyRows[0];
+    payload.weekly_reset_time = primary.reset_time;
+    payload.weekly_percent_used = primary.percent_used;
+    payload.weekly_breakdown = weeklyRows;
   }
 
   const jsonStr = JSON.stringify(payload, null, 2);
