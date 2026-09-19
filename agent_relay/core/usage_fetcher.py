@@ -372,39 +372,48 @@ def _map_claude_usage_limits(account: UsageAccount, limits: list, now: datetime)
     weekly_rows = []
     mapped = False
     for entry in limits or []:
-        if not isinstance(entry, dict):
-            continue
-        kind = entry.get("kind")
-        percent = entry.get("percent")
-        if percent is None:
-            continue
-        reset_time = _countdown(
-            (_parse_iso(entry.get("resets_at")) - now).total_seconds()
-            if entry.get("resets_at")
-            else None,
-            as_days=False,
-        )
-        if kind == "session":
-            account.session_title = "Current session"
-            account.session_reset_time = reset_time
-            account.session_percent_used = float(percent)
-            account.session_percent_left = round(100.0 - float(percent), 1)
-            mapped = True
-        elif kind == "weekly_all":
-            account.weekly_title = "Weekly limits"
-            account.weekly_reset_time = reset_time
-            account.weekly_percent_used = float(percent)
-            account.weekly_percent_left = round(100.0 - float(percent), 1)
-            mapped = True
-        elif kind == "weekly_scoped":
-            scope = entry.get("scope") or {}
-            model = scope.get("model") or {}
-            label = model.get("display_name")
-            if label:
-                weekly_rows.append(
-                    {"label": label, "reset_time": reset_time, "percent_used": float(percent)}
-                )
+        # One malformed row (an unexpected type, a reset date this cannot
+        # parse, anything) must cost only that row. A provider adding or
+        # reshaping a field is routine, and losing the two rows that were
+        # fine because a third one was not is a worse failure than the one
+        # it would be guarding against.
+        try:
+            if not isinstance(entry, dict):
+                continue
+            kind = entry.get("kind")
+            percent = entry.get("percent")
+            if percent is None:
+                continue
+            resets_at = entry.get("resets_at")
+            parsed_reset = _parse_iso(resets_at) if resets_at else None
+            reset_time = (
+                _countdown((parsed_reset - now).total_seconds(), as_days=False)
+                if parsed_reset is not None
+                else None
+            )
+            if kind == "session":
+                account.session_title = "Current session"
+                account.session_reset_time = reset_time
+                account.session_percent_used = float(percent)
+                account.session_percent_left = round(100.0 - float(percent), 1)
                 mapped = True
+            elif kind == "weekly_all":
+                account.weekly_title = "Weekly limits"
+                account.weekly_reset_time = reset_time
+                account.weekly_percent_used = float(percent)
+                account.weekly_percent_left = round(100.0 - float(percent), 1)
+                mapped = True
+            elif kind == "weekly_scoped":
+                scope = entry.get("scope") or {}
+                model = scope.get("model") or {}
+                label = model.get("display_name")
+                if label:
+                    weekly_rows.append(
+                        {"label": label, "reset_time": reset_time, "percent_used": float(percent)}
+                    )
+                    mapped = True
+        except (TypeError, ValueError, AttributeError):
+            continue
     if weekly_rows:
         account.weekly_breakdown = weekly_rows
     return mapped
@@ -432,11 +441,22 @@ def _fetch_claude_web_session(
                 return None
             res = client.get(f"https://claude.ai/api/organizations/{org_uuid}/usage")
             if res.status_code in (401, 403):
-                return _mark_unavailable(
-                    account,
-                    "The pasted claude.ai session cookie was rejected. Sign in to "
-                    "claude.ai again and paste a fresh one.",
-                )
+                # claude.ai's own API answers a genuinely bad cookie with a
+                # JSON body, never an HTML page. A 401/403 with no JSON is far
+                # more likely a transient edge or bot-challenge response than
+                # a real rejection (a known failure mode in comparable
+                # trackers: telling someone their cookie is bad when the
+                # network was, sends them to paste a fresh cookie that was
+                # never the problem). Only a real, confirmed rejection is
+                # reported; anything else falls back to the token count and
+                # is simply tried again on the next refresh.
+                if "json" in res.headers.get("content-type", "").lower():
+                    return _mark_unavailable(
+                        account,
+                        "The pasted claude.ai session cookie was rejected. Sign in to "
+                        "claude.ai again and paste a fresh one.",
+                    )
+                return None
             res.raise_for_status()
             limits = res.json().get("limits")
     except Exception:
