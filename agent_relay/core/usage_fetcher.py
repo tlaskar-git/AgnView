@@ -97,6 +97,7 @@ _SESSION_SYNCED_FIELDS = (
     "session_percent_used",
     "session_percent_left",
     "session_tokens_used",
+    "session_breakdown",
     "percent_used",
     "reset_time",
     "tokens_used",
@@ -167,6 +168,7 @@ def _mark_unavailable(account: UsageAccount, reason: str) -> UsageAccount:
     # result, or the summary says unavailable while the detail table below it
     # still shows invented per-model percentages.
     account.weekly_breakdown = None
+    account.session_breakdown = None
     account.last_checked = _get_utc_now_iso()
     return account
 
@@ -308,6 +310,7 @@ def _fetch_claude_live(account: UsageAccount) -> UsageAccount:
     account.weekly_percent_left = None
     account.percent_used = None
     account.weekly_breakdown = None
+    account.session_breakdown = None
     account.reset_time = account.session_reset_time
     account.status = "active"
     account.error_message = None
@@ -585,8 +588,14 @@ def _fetch_gemini_live(account: UsageAccount) -> UsageAccount:
     AI Studio API key can be checked for validity and nothing more. So the only
     honest answer for a signed-in Gemini or AntiGravity account is that usage is
     unavailable, with the reason attached.
+
+    The one percentage that can be real is the one the browser telemetry sync
+    reads off AntiGravity's own model picker. While that sync still describes an
+    open window it is kept exactly as it was synced, rather than being wiped by
+    this function, which has nothing to put in its place.
     """
     cred = (account.credential or "").strip()
+    kept = _capture_synced_windows(account, datetime.now(timezone.utc))
 
     if cred.startswith("AIza"):
         try:
@@ -596,7 +605,9 @@ def _fetch_gemini_live(account: UsageAccount) -> UsageAccount:
                     params={"key": cred},
                 )
         except Exception as e:
-            return _mark_unavailable(account, f"Could not reach the Gemini API: {e}")
+            return _restore_synced_windows(
+                _mark_unavailable(account, f"Could not reach the Gemini API: {e}"), kept
+            )
 
         if res.status_code in (400, 403):
             account.status = "error"
@@ -604,18 +615,24 @@ def _fetch_gemini_live(account: UsageAccount) -> UsageAccount:
             account.last_checked = _get_utc_now_iso()
             return account
         if res.status_code != 200:
-            return _mark_unavailable(
-                account, f"The Gemini API returned status {res.status_code}."
+            return _restore_synced_windows(
+                _mark_unavailable(
+                    account, f"The Gemini API returned status {res.status_code}."
+                ),
+                kept,
             )
 
         account.plan_name = "Gemini AI Studio"
         account.plan_label = "API key"
         # The models endpoint confirms the key works. Google publishes no quota
         # figure with it, so there is no usage number to show.
-        return _mark_unavailable(
-            account,
-            "The Gemini API key is valid. Google publishes no quota figure for "
-            "it, so there is no usage to show.",
+        return _restore_synced_windows(
+            _mark_unavailable(
+                account,
+                "The Gemini API key is valid. Google publishes no quota figure for "
+                "it, so there is no usage to show.",
+            ),
+            kept,
         )
 
     account_file = Path.home() / ".gemini" / "google_accounts.json"
@@ -626,16 +643,22 @@ def _fetch_gemini_live(account: UsageAccount) -> UsageAccount:
             active = None
         if active:
             account.plan_name = "Gemini"
-            return _mark_unavailable(
-                account,
-                f"Signed in as {active}. Neither Gemini nor AntiGravity reports "
-                "usage on this machine, so there is no figure to show.",
+            return _restore_synced_windows(
+                _mark_unavailable(
+                    account,
+                    f"Signed in as {active}. Neither Gemini nor AntiGravity reports "
+                    "usage on this machine, so there is no figure to show.",
+                ),
+                kept,
             )
 
-    return _mark_unavailable(
-        account,
-        "No Gemini or AntiGravity sign-in was found on this machine, and neither "
-        "tool reports usage locally.",
+    return _restore_synced_windows(
+        _mark_unavailable(
+            account,
+            "No Gemini or AntiGravity sign-in was found on this machine, and neither "
+            "tool reports usage locally.",
+        ),
+        kept,
     )
 
 

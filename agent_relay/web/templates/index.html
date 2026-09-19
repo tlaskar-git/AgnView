@@ -5818,6 +5818,26 @@
       const syncTime = acc.last_synced_at ? new Date(acc.last_synced_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now';
       const planDisplay = acc.plan_label ? `${escapeHtml(acc.plan_label)}` : `${escapeHtml(acc.plan_name || 'Standard Tier')}`;
 
+      // A one-time browser sync is the only way Claude and Gemini ever show a
+      // real percentage, and the step is easy to miss when it lives inside the
+      // Add Account modal. The hub computes needs_telemetry_sync, which is true
+      // only for a provider that can hold a synced percentage and holds none.
+      // ChatGPT reads a real API, so it never carries this prompt.
+      const syncHint = acc.needs_telemetry_sync ? telemetrySyncHint(acc.provider) : null;
+      const syncCtaHtml = syncHint ? `
+              <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5 space-y-2">
+                <div class="flex items-start gap-1.5">
+                  <i data-lucide="alert-circle" class="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 shrink-0 mt-0.5"></i>
+                  <div class="text-[11px] text-[var(--text-main)] leading-snug">
+                    <span class="font-semibold">One-time browser sync needed for a real percentage.</span>
+                    <span class="text-[var(--text-secondary)]">${escapeHtml(syncHint.detail)}</span>
+                  </div>
+                </div>
+                <button id="sync-cta-${acc.id}" onclick="copyTelemetryExtractorForAccount('${acc.id}', '${acc.provider}')" class="w-full text-[11px] bg-[var(--bg-raised)] hover:bg-[var(--bg-surface-hover)] border border-amber-500/40 text-[var(--text-main)] px-2 py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition font-medium">
+                  <i data-lucide="copy" class="w-3 h-3 text-amber-500 dark:text-amber-400"></i> ${escapeHtml(syncHint.button)}
+                </button>
+              </div>` : '';
+
       // =========================================================================
       // DEDICATED GEMINI TELEMETRY: Matches Google Antigravity / Gemini Desktop IDE
       // =========================================================================
@@ -5825,7 +5845,26 @@
         // Only groups the hub actually received. There is no stand-in set:
         // this card used to draw two model groups with invented percentages
         // whenever the API sent none.
-        const groups = (acc.weekly_breakdown && acc.weekly_breakdown.length > 0) ? acc.weekly_breakdown : [];
+        //
+        // The two windows arrive in separate fields because they age out on
+        // separate clocks, five hours against seven days, so they are joined
+        // back together here on the group name the provider printed. A row that
+        // carries both windows at once still works unchanged.
+        const geminiRows = [
+          ...((acc.weekly_breakdown && acc.weekly_breakdown.length > 0) ? acc.weekly_breakdown : []),
+          ...((acc.session_breakdown && acc.session_breakdown.length > 0) ? acc.session_breakdown : [])
+        ];
+        const geminiByGroup = new Map();
+        geminiRows.forEach(row => {
+          const key = String(row.group || row.label || 'Models');
+          const merged = geminiByGroup.get(key) || { group: key };
+          Object.keys(row).forEach(field => {
+            if (row[field] !== null && row[field] !== undefined) merged[field] = row[field];
+          });
+          merged.group = key;
+          geminiByGroup.set(key, merged);
+        });
+        const groups = Array.from(geminiByGroup.values());
 
         return `
           <div class="bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-xl p-4 flex flex-col justify-between shadow-sm relative transition hover:border-slate-500/40 min-h-[350px]">
@@ -5850,6 +5889,7 @@
 
               <!-- Model group quota telemetry, when the provider reports any -->
               <div class="space-y-3">
+                ${syncCtaHtml}
                 ${groups.length === 0 ? noticeHtml : ''}
                 ${groups.map((grp, idx) => {
                   const hasWeeklyLimit = (grp.weekly_percent_used !== null && grp.weekly_percent_used !== undefined) || (grp.weekly_percent_left !== null && grp.weekly_percent_left !== undefined);
@@ -6073,6 +6113,7 @@
 
             <!-- Dual Rate Limit Meters (Normalized to % USED) -->
             <div class="space-y-2.5">
+              ${syncCtaHtml}
               ${noticeHtml}
               <!-- Limit 1: Session / Short-Term -->
               <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5">
@@ -6282,7 +6323,7 @@
       } else if (provider === 'gemini') {
         planInput.placeholder = 'Gemini Advanced / 1.5 Pro';
         credInput.placeholder = 'AIzaSy... or __Secure-1PSID';
-        if (helperText) helperText.innerHTML = '<b>Gemini:</b> Press <b>F12</b> → <b>Application</b> tab → <b>Cookies</b> → <b>https://gemini.google.com</b> → copy <code>__Secure-1PSID</code>, or use a Gemini API key.';
+        if (helperText) helperText.innerHTML = '<b>Gemini:</b> Use a Gemini API key, or the <code>__Secure-1PSID</code> cookie from <b>https://gemini.google.com</b>. Neither carries a quota figure. For a real percentage, use the Antigravity extractor script below, run in Antigravity\'s own DevTools console. Antigravity hides its DevTools menu item, so read the port from <code>%APPDATA%\\Antigravity\\DevToolsActivePort</code> and open <code>http://127.0.0.1:&lt;port&gt;</code> in Chrome. See docs/USAGE-TELEMETRY.md.';
         if (baseContainer) baseContainer.classList.add('hidden');
       } else if (provider === 'deepseek') {
         planInput.placeholder = 'DeepSeek-V3 / DeepSeek-R1';
@@ -6436,10 +6477,21 @@
       }
     }
 
-    function copySessionExtractorScript(target = 'add') {
-      const provider = target === 'edit'
-        ? (document.getElementById('edit-acc-provider')?.value || '').toLowerCase()
-        : document.getElementById('acc-provider').value;
+    // The extractor runs on the provider's own page, not on this one, so it
+    // needs the hub's absolute address rather than a relative path.
+    const TELEMETRY_HUB_ORIGIN = 'http://localhost:8765';
+
+    // Where the Add Account helper posts when no particular account is in hand.
+    // A Usage card always passes its own id, so these only apply in the modal.
+    const DEFAULT_TELEMETRY_ACCOUNT_IDS = {
+      claude: 'claude-d72ee8',
+      chatgpt: 'chatgpt-08898b',
+      gemini: 'gemini-27e447'
+    };
+
+    function buildTelemetryExtractorScript(provider, accountId) {
+      const target = accountId || DEFAULT_TELEMETRY_ACCOUNT_IDS[provider] || '';
+      const endpoint = TELEMETRY_HUB_ORIGIN + '/api/usage/accounts/' + target + '/telemetry';
 
       let script = '';
       if (provider === 'claude') {
@@ -6500,7 +6552,7 @@
   if (typeof copy === 'function') { copy(jsonStr); }
   console.log('[AgnView] Extracted Live Claude Telemetry:', payload);
   try {
-    const r = await fetch('http://localhost:8765/api/usage/accounts/claude-d72ee8/telemetry', {
+    const r = await fetch('${endpoint}', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: jsonStr
@@ -6539,7 +6591,7 @@
       const jsonStr = JSON.stringify(payload, null, 2);
       if (typeof copy === 'function') copy(jsonStr);
       try {
-        await fetch('http://localhost:8765/api/usage/accounts/chatgpt-08898b/telemetry', {
+        await fetch('${endpoint}', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: jsonStr
@@ -6554,45 +6606,119 @@
   alert('Please ensure you are logged in to chatgpt.com');
 })();`;
       } else if (provider === 'gemini') {
+        // Antigravity prints its own quota in its model picker: one "Weekly
+        // Limit Remaining" and one "Five Hour Limit Remaining" per model group.
+        // Nothing on this machine publishes those figures, so this script reads
+        // them out of Antigravity's own window and posts them here.
         script = `(async function() {
-  console.log('%c[AgnView] Google Gemini Telemetry Extractor', 'color: #06b6d4; font-weight: bold; font-size: 14px;');
-  const bodyText = document.body.innerText;
-  const currentMatch = bodyText.match(/Current usage[\\s\\S]*?Resets at ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
-  const weeklyMatch = bodyText.match(/Weekly limit[\\s\\S]*?Resets on ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
-  const planMatch = bodyText.match(/Usage limits\\s+([^\\n]+)/i);
+  console.log('%c[AgnView] Antigravity Telemetry Extractor', 'color: #06b6d4; font-weight: bold; font-size: 14px;');
+  // Open Antigravity's model picker first, so the usage panel is on screen and
+  // its text is in the DOM this script reads.
+  const bodyText = (document.body && document.body.innerText) || '';
+  const lines = bodyText.split('\\n').map(s => s.trim()).filter(Boolean);
 
-  // Only what this page actually said, so a failed scrape reports nothing
-  // rather than a made-up figure.
-  if (!currentMatch && !weeklyMatch) {
-    alert('[AgnView] Nothing was read from this page. Open the Gemini usage page and run this again.');
+  // A group heading names a family of models, for example "Gemini Models" or
+  // "Claude and GPT models". Every limit line under it belongs to that group
+  // until the next heading, so both groups are read, not just the first.
+  const isGroupHeading = (line) =>
+    /\\bmodels?\\s*$/i.test(line) && !/%/.test(line) && !/limit/i.test(line) && line.length <= 60;
+
+  // The wording says whether the number is what is left or what is spent. A
+  // line that says neither is skipped rather than read the wrong way round.
+  const limitPattern = /^(five[\\s-]?hour|5[\\s-]?hour|weekly)\\s+limit(?:\\s+(remaining|left|used))?\\b/i;
+  const percentOnLine = /(\\d+(?:\\.\\d+)?)\\s*%/;
+  const percentAlone = /^(\\d+(?:\\.\\d+)?)\\s*%$/;
+  const round1 = (n) => Math.round(n * 10) / 10;
+
+  const groups = [];
+  let current = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isGroupHeading(line)) {
+      current = { group: line, windows: {} };
+      groups.push(current);
+      continue;
+    }
+    const limitMatch = line.match(limitPattern);
+    if (!limitMatch || !current) continue;
+    const sense = (limitMatch[2] || '').toLowerCase();
+    if (!sense) continue;
+    // The figure sits on the label's own line, or on one of the next two lines
+    // when the panel puts it underneath.
+    let percentMatch = line.match(percentOnLine);
+    for (let k = i + 1; !percentMatch && k < lines.length && k <= i + 2; k++) {
+      percentMatch = lines[k].match(percentAlone);
+    }
+    if (!percentMatch) continue;
+    const value = parseFloat(percentMatch[1]);
+    const used = sense === 'used' ? value : round1(100 - value);
+    const left = sense === 'used' ? round1(100 - value) : value;
+    const key = /weekly/i.test(limitMatch[1]) ? 'weekly' : 'session';
+    current.windows[key] = { title: line.replace(percentOnLine, '').trim(), used: used, left: left };
+  }
+
+  const weeklyRows = [];
+  const sessionRows = [];
+  groups.forEach(g => {
+    if (g.windows.weekly) {
+      weeklyRows.push({
+        group: g.group,
+        weekly_title: g.windows.weekly.title,
+        weekly_percent_used: g.windows.weekly.used,
+        weekly_percent_left: g.windows.weekly.left
+      });
+    }
+    if (g.windows.session) {
+      sessionRows.push({
+        group: g.group,
+        session_title: g.windows.session.title,
+        session_percent_used: g.windows.session.used,
+        session_percent_left: g.windows.session.left
+      });
+    }
+  });
+
+  // Only what the window actually said. A group or a window that could not be
+  // read is left out, so a failed scrape reports nothing rather than a guess.
+  if (weeklyRows.length === 0 && sessionRows.length === 0) {
+    alert('[AgnView] Nothing was read from this window. Open the model picker so the usage panel is on screen, then run this again.');
     return;
   }
 
-  const payload = { provider: 'gemini', session_title: 'Current usage', weekly_title: 'Weekly limit' };
-  if (planMatch) { payload.plan_label = planMatch[1].trim(); }
-  if (currentMatch) {
-    payload.session_reset_time = 'Resets at ' + currentMatch[1].trim();
-    payload.session_percent_used = parseFloat(currentMatch[2]);
-    payload.session_percent_left = 100 - parseFloat(currentMatch[2]);
+  const payload = { provider: 'gemini' };
+  if (weeklyRows.length > 0) {
+    payload.weekly_breakdown = weeklyRows;
+    // The headline figure is the group closest to its limit, so the single
+    // number on the card is the one that actually constrains the account. It
+    // is picked from the rows above, never computed out of nothing.
+    const tightest = weeklyRows.reduce((a, b) => (b.weekly_percent_used > a.weekly_percent_used ? b : a));
+    payload.weekly_title = tightest.weekly_title;
+    payload.weekly_percent_used = tightest.weekly_percent_used;
+    payload.weekly_percent_left = tightest.weekly_percent_left;
   }
-  if (weeklyMatch) {
-    payload.weekly_reset_time = 'Resets on ' + weeklyMatch[1].trim();
-    payload.weekly_percent_used = parseFloat(weeklyMatch[2]);
-    payload.weekly_percent_left = 100 - parseFloat(weeklyMatch[2]);
+  if (sessionRows.length > 0) {
+    payload.session_breakdown = sessionRows;
+    const tightest = sessionRows.reduce((a, b) => (b.session_percent_used > a.session_percent_used ? b : a));
+    payload.session_title = tightest.session_title;
+    payload.session_percent_used = tightest.session_percent_used;
+    payload.session_percent_left = tightest.session_percent_left;
   }
 
   const jsonStr = JSON.stringify(payload, null, 2);
   if (typeof copy === 'function') copy(jsonStr);
+  console.log('[AgnView] Extracted Live Antigravity Telemetry:', payload);
   try {
-    await fetch('http://localhost:8765/api/usage/accounts/gemini-27e447/telemetry', {
+    const r = await fetch('${endpoint}', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: jsonStr
     });
-    alert('✓ Live Gemini Telemetry synced directly to AgnView!');
-    return;
+    if (r.ok) {
+      alert('✓ Live Antigravity telemetry synced directly to AgnView!');
+      return;
+    }
   } catch(e) {}
-  alert('✓ Gemini Telemetry copied to clipboard!\\n\\n' + jsonStr);
+  alert('✓ Antigravity telemetry copied to clipboard!\\n\\n' + jsonStr);
 })();`;
       } else if (provider === 'deepseek') {
         script = `(function() {
@@ -6604,13 +6730,54 @@
         script = `// For Custom/Ollama harnesses, specify your endpoint base URL (e.g. http://localhost:11434).`;
       }
 
-      navigator.clipboard.writeText(script);
+      return script;
+    }
+
+    function copySessionExtractorScript(target = 'add') {
+      const provider = target === 'edit'
+        ? (document.getElementById('edit-acc-provider')?.value || '').toLowerCase()
+        : document.getElementById('acc-provider').value;
+
+      navigator.clipboard.writeText(buildTelemetryExtractorScript(provider, null));
       const toast = document.getElementById(target === 'edit' ? 'edit-session-helper-toast' : 'session-helper-toast');
       if (toast) {
         toast.innerText = '✓ Extractor script copied!';
         toast.classList.remove('hidden');
         setTimeout(() => toast.classList.add('hidden'), 3500);
       }
+    }
+
+    // What the card says about a provider that can only get a real percentage
+    // from a browser sync, and what its button offers.
+    function telemetrySyncHint(provider) {
+      if (provider === 'gemini') {
+        return {
+          detail: 'AgnView cannot read a Gemini percentage from this machine. Paste this script into Antigravity’s own DevTools console, with the model picker open, to sync the real Five Hour and Weekly figures.',
+          button: 'Copy Antigravity extractor script'
+        };
+      }
+      return {
+        detail: 'Anthropic publishes no local quota figure, so this card shows token counts only. Paste this script into the browser console on claude.ai settings, usage, to sync the real percentage.',
+        button: 'Copy claude.ai extractor script'
+      };
+    }
+
+    async function copyTelemetryExtractorForAccount(accountId, provider) {
+      const script = buildTelemetryExtractorScript((provider || '').toLowerCase(), accountId);
+      try {
+        await navigator.clipboard.writeText(script);
+      } catch (err) {
+        console.error('Could not copy the extractor script', err);
+        return;
+      }
+      const btn = document.getElementById('sync-cta-' + accountId);
+      if (!btn) return;
+      const previous = btn.innerHTML;
+      btn.innerHTML = '✓ Copied. Now paste it into that console.';
+      setTimeout(() => {
+        btn.innerHTML = previous;
+        safeCreateIcons();
+      }, 4000);
     }
 
     async function autoDetectLocalToken(target = 'add') {

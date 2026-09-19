@@ -146,6 +146,28 @@ class TaskWaitResponse(BaseModel):
 
 # ----------------- Subscription Usage & Quota Models -----------------
 
+# Providers whose only real quota percentage comes from the browser telemetry
+# sync. Matched as substrings, so "anthropic" and "google" land here too.
+_TELEMETRY_SYNC_PROVIDERS = ("claude", "anthropic", "gemini", "google", "antigravity")
+
+_PERCENT_KEYS = (
+    "percent_used",
+    "percent_left",
+    "session_percent_used",
+    "session_percent_left",
+    "weekly_percent_used",
+    "weekly_percent_left",
+)
+
+
+def rows_carry_a_percentage(rows: Optional[List[Dict[str, Any]]]) -> bool:
+    """True when any breakdown row holds a percentage something really measured."""
+    for row in rows or []:
+        if any(row.get(key) is not None for key in _PERCENT_KEYS):
+            return True
+    return False
+
+
 class UsageAccount(BaseModel):
     id: str = Field(default_factory=lambda: f"acc-{uuid.uuid4().hex[:8]}")  # e.g., "claude-pro-personal", "chatgpt-team-work"
     provider: str                            # "claude", "chatgpt", "gemini"
@@ -188,6 +210,12 @@ class UsageAccount(BaseModel):
     weekly_percent_used: Optional[float] = None # e.g. 0.0, 3.0
     weekly_percent_left: Optional[float] = None # e.g. 100.0, 97.0
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None # e.g. [{"label": "All models", "percent_used": 0, "reset_time": "Resets Sat 7:00 PM"}, {"label": "Fable", ...}]
+    # The same shape as weekly_breakdown, for the short window. Antigravity
+    # publishes a five-hour figure per model group as well as a weekly one, and
+    # the two windows expire on different clocks. Keeping the five-hour rows in
+    # their own field is what lets the staleness rules age them out after five
+    # hours while the weekly rows stand for seven days.
+    session_breakdown: Optional[List[Dict[str, Any]]] = None # e.g. [{"group": "Gemini Models", "session_percent_used": 9, "session_title": "Five Hour Limit Remaining"}]
     # When a genuine telemetry sync last wrote each window's percentage. They
     # mark a figure as measured on the provider's own usage page rather than
     # derived here, so a later local recompute knows not to throw it away. Only
@@ -208,6 +236,37 @@ class UsageAccount(BaseModel):
             return f"{c[:4]}...{c[-4:]}"
         return "****"
 
+    @property
+    def needs_telemetry_sync(self) -> bool:
+        """True when this account can hold a real percentage but holds none.
+
+        Claude and Gemini publish no local endpoint that says what share of a
+        subscription window is spent. The only real figure for either comes from
+        the one-time browser telemetry sync, so an account of theirs with no
+        percentage in any window is an account waiting on that sync, and the
+        Usage tab says so on the card itself.
+
+        ChatGPT is deliberately not in the list. It reads a real API and gets a
+        real percentage with no sync at all, so its card must never ask for one.
+        """
+        provider = (self.provider or "").lower()
+        if not any(name in provider for name in _TELEMETRY_SYNC_PROVIDERS):
+            return False
+        if any(
+            value is not None
+            for value in (
+                self.session_percent_used,
+                self.session_percent_left,
+                self.weekly_percent_used,
+                self.weekly_percent_left,
+            )
+        ):
+            return False
+        return not (
+            rows_carry_a_percentage(self.weekly_breakdown)
+            or rows_carry_a_percentage(self.session_breakdown)
+        )
+
     def masked(self) -> Dict[str, Any]:
         """Return dict with sensitive credentials masked."""
         d = self.model_dump()
@@ -215,6 +274,7 @@ class UsageAccount(BaseModel):
         d["credential"] = masked_c
         d["masked_credential"] = masked_c
         d["last_synced_at"] = self.last_checked
+        d["needs_telemetry_sync"] = self.needs_telemetry_sync
         return d
 
 
@@ -230,6 +290,7 @@ class UsageTelemetryPayload(BaseModel):
     weekly_percent_used: Optional[float] = None
     weekly_percent_left: Optional[float] = None
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None
+    session_breakdown: Optional[List[Dict[str, Any]]] = None
     tokens_used: Optional[int] = None
     tokens_limit: Optional[int] = None
     percent_used: Optional[float] = None
@@ -254,6 +315,7 @@ class CreateUsageAccountRequest(BaseModel):
     weekly_percent_used: Optional[float] = None
     weekly_percent_left: Optional[float] = None
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None
+    session_breakdown: Optional[List[Dict[str, Any]]] = None
     tokens_limit: Optional[int] = None
     cost_limit_usd: Optional[float] = None
     base_url: Optional[str] = None           # Custom API base URL or local harness
@@ -280,6 +342,7 @@ class UpdateUsageAccountRequest(BaseModel):
     weekly_percent_used: Optional[float] = None
     weekly_percent_left: Optional[float] = None
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None
+    session_breakdown: Optional[List[Dict[str, Any]]] = None
 
     def get_credential(self) -> Optional[str]:
         val = self.credential or self.auth_credential

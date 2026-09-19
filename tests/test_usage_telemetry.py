@@ -430,3 +430,263 @@ def test_telemetry_api_sync(tmp_path):
     assert synced["session_percent_used"] == 0.0
     assert synced["weekly_title"] == "Weekly limit"
     assert synced["weekly_percent_used"] == 3.0
+
+
+# ----------------- Antigravity per-group session breakdown -----------------
+
+ANTIGRAVITY_PAYLOAD = {
+    "provider": "gemini",
+    "weekly_breakdown": [
+        {
+            "group": "Gemini Models",
+            "weekly_title": "Weekly Limit Remaining",
+            "weekly_percent_used": 0.0,
+            "weekly_percent_left": 100.0,
+        },
+        {
+            "group": "Claude and GPT models",
+            "weekly_title": "Weekly Limit Remaining",
+            "weekly_percent_used": 0.0,
+            "weekly_percent_left": 100.0,
+        },
+    ],
+    "session_breakdown": [
+        {
+            "group": "Gemini Models",
+            "session_title": "Five Hour Limit Remaining",
+            "session_percent_used": 9.0,
+            "session_percent_left": 91.0,
+        },
+        {
+            "group": "Claude and GPT models",
+            "session_title": "Five Hour Limit Remaining",
+            "session_percent_used": 15.0,
+            "session_percent_left": 85.0,
+        },
+    ],
+    "session_percent_used": 15.0,
+    "weekly_percent_used": 0.0,
+}
+
+
+def test_session_breakdown_is_stored_and_served(tmp_path):
+    """Antigravity's per-group five-hour rows survive the round trip."""
+    app = create_app(db_path=str(tmp_path / "breakdown.db"))
+    client = TestClient(app)
+
+    client.post("/api/usage/accounts", json={
+        "id": "acc-antigravity",
+        "provider": "gemini",
+        "name": "Antigravity",
+        "auth_type": "api_key",
+        "credential": "placeholder-token",
+    })
+    synced = client.post(
+        "/api/usage/accounts/acc-antigravity/telemetry", json=ANTIGRAVITY_PAYLOAD
+    ).json()
+
+    assert [row["group"] for row in synced["session_breakdown"]] == [
+        "Gemini Models",
+        "Claude and GPT models",
+    ]
+    assert synced["session_breakdown"][0]["session_percent_used"] == 9.0
+    assert synced["session_breakdown"][1]["session_percent_used"] == 15.0
+    # And it is still there on a plain read, not only in the sync response.
+    fetched = client.get("/api/usage/accounts/acc-antigravity").json()
+    assert fetched["session_breakdown"] == ANTIGRAVITY_PAYLOAD["session_breakdown"]
+    assert fetched["weekly_breakdown"] == ANTIGRAVITY_PAYLOAD["weekly_breakdown"]
+
+
+def test_a_breakdown_alone_stamps_the_window_it_measured(tmp_path):
+    """Per-group rows count as a measurement, so the sync is stamped."""
+    app = create_app(db_path=str(tmp_path / "stamp.db"))
+    client = TestClient(app)
+
+    client.post("/api/usage/accounts", json={
+        "id": "acc-rows-only",
+        "provider": "gemini",
+        "name": "Antigravity",
+        "auth_type": "api_key",
+        "credential": "placeholder-token",
+    })
+    rows_only = {
+        "provider": "gemini",
+        "weekly_breakdown": ANTIGRAVITY_PAYLOAD["weekly_breakdown"],
+        "session_breakdown": ANTIGRAVITY_PAYLOAD["session_breakdown"],
+    }
+    synced = client.post(
+        "/api/usage/accounts/acc-rows-only/telemetry", json=rows_only
+    ).json()
+
+    assert synced["session_telemetry_synced_at"] is not None
+    assert synced["weekly_telemetry_synced_at"] is not None
+
+
+def test_session_breakdown_is_preserved_while_its_window_is_open(tmp_path, monkeypatch):
+    """A five-hour breakdown holds for five hours, the same as a percentage."""
+    _claude_with_transcripts(tmp_path, monkeypatch)
+    rows = [{"group": "Gemini Models", "session_percent_used": 9.0}]
+
+    acc = _fetch_claude_live(
+        _account(
+            "claude",
+            session_percent_used=9.0,
+            session_breakdown=rows,
+            session_telemetry_synced_at=_ago(hours=1),
+        )
+    )
+
+    assert acc.session_breakdown == rows
+
+
+def test_session_breakdown_ages_out_on_the_session_clock(tmp_path, monkeypatch):
+    """Past five hours nothing backs those rows, so they go.
+
+    They are kept apart from weekly_breakdown for exactly this reason: a
+    five-hour figure must not ride the seven-day clock.
+    """
+    _claude_with_transcripts(tmp_path, monkeypatch)
+
+    acc = _fetch_claude_live(
+        _account(
+            "claude",
+            session_percent_used=9.0,
+            session_breakdown=[{"group": "Gemini Models", "session_percent_used": 9.0}],
+            session_telemetry_synced_at=_ago(hours=6),
+            weekly_telemetry_synced_at=_ago(hours=1),
+            weekly_percent_used=4.0,
+        )
+    )
+
+    assert acc.session_breakdown is None
+
+
+def test_unavailable_clears_a_stale_session_breakdown(tmp_path, monkeypatch):
+    """An account that can measure nothing shows no per-group rows either."""
+    monkeypatch.setattr(
+        "agent_relay.core.usage_fetcher.Path.home", staticmethod(lambda: tmp_path)
+    )
+
+    acc = _fetch_gemini_live(
+        _account(
+            "gemini",
+            credential="ya29.some-oauth-token",
+            session_breakdown=[{"group": "Gemini Models", "session_percent_used": 9.0}],
+        )
+    )
+
+    assert acc.status == "unavailable"
+    assert acc.session_breakdown is None
+    assert acc.weekly_breakdown is None
+
+
+# ----------------- The one-time sync call to action -----------------
+
+
+def test_the_sync_prompt_is_on_for_a_provider_with_nothing_measured():
+    """Claude and Gemini can only get a real percentage from a browser sync."""
+    assert _account("gemini").needs_telemetry_sync is True
+    assert _account("claude").needs_telemetry_sync is True
+
+
+def test_the_sync_prompt_is_never_shown_to_chatgpt():
+    """Codex reads a real API, so its card must not ask for a sync it does not need."""
+    assert _account("chatgpt").needs_telemetry_sync is False
+    assert _account("chatgpt", session_percent_used=None).needs_telemetry_sync is False
+    assert _account("deepseek").needs_telemetry_sync is False
+
+
+def test_the_sync_prompt_goes_away_once_a_percentage_exists():
+    """Any real figure, top level or per group, in either window, clears it."""
+    assert _account("gemini", session_percent_used=9.0).needs_telemetry_sync is False
+    assert _account("claude", weekly_percent_left=88.0).needs_telemetry_sync is False
+    assert (
+        _account(
+            "gemini", session_breakdown=[{"group": "Gemini Models", "session_percent_used": 9.0}]
+        ).needs_telemetry_sync
+        is False
+    )
+    assert (
+        _account(
+            "gemini", weekly_breakdown=[{"group": "Gemini Models", "weekly_percent_used": 0.0}]
+        ).needs_telemetry_sync
+        is False
+    )
+    # A token count is not a percentage, so the prompt stays.
+    assert _account("claude", session_tokens_used=15).needs_telemetry_sync is True
+    # Nor is a row that carries only a label.
+    assert (
+        _account("gemini", weekly_breakdown=[{"group": "Gemini Models"}]).needs_telemetry_sync
+        is True
+    )
+
+
+def test_the_api_serves_the_sync_prompt_flag(tmp_path):
+    """The Usage tab reads this field, so the API must send it."""
+    app = create_app(db_path=str(tmp_path / "cta.db"))
+    client = TestClient(app)
+
+    client.post("/api/usage/accounts", json={
+        "id": "acc-cta",
+        "provider": "gemini",
+        "name": "Antigravity",
+        "auth_type": "api_key",
+        "credential": "placeholder-token",
+    })
+    assert client.get("/api/usage/accounts/acc-cta").json()["needs_telemetry_sync"] is True
+
+    client.post("/api/usage/accounts/acc-cta/telemetry", json=ANTIGRAVITY_PAYLOAD)
+    assert client.get("/api/usage/accounts/acc-cta").json()["needs_telemetry_sync"] is False
+
+
+def test_an_antigravity_sync_survives_the_next_automatic_refresh(tmp_path, monkeypatch):
+    """The refresh has nothing to put in its place, so it leaves the sync alone.
+
+    Without this the Gemini fetcher blanked every window on the next refresh,
+    and the one-time sync the operator had just done was gone within minutes.
+    """
+    monkeypatch.setattr(
+        "agent_relay.core.usage_fetcher.Path.home", staticmethod(lambda: tmp_path)
+    )
+
+    acc = _fetch_gemini_live(
+        _account(
+            "gemini",
+            session_percent_used=15.0,
+            session_breakdown=ANTIGRAVITY_PAYLOAD["session_breakdown"],
+            session_telemetry_synced_at=_ago(hours=1),
+            weekly_percent_used=0.0,
+            weekly_breakdown=ANTIGRAVITY_PAYLOAD["weekly_breakdown"],
+            weekly_telemetry_synced_at=_ago(days=2),
+        )
+    )
+
+    assert acc.status == "active"
+    assert acc.session_percent_used == 15.0
+    assert acc.session_breakdown == ANTIGRAVITY_PAYLOAD["session_breakdown"]
+    assert acc.weekly_breakdown == ANTIGRAVITY_PAYLOAD["weekly_breakdown"]
+    assert acc.needs_telemetry_sync is False
+
+
+def test_an_expired_antigravity_sync_goes_back_to_unavailable(tmp_path, monkeypatch):
+    """Past its window the sync is history, and the card asks for a new one."""
+    monkeypatch.setattr(
+        "agent_relay.core.usage_fetcher.Path.home", staticmethod(lambda: tmp_path)
+    )
+
+    acc = _fetch_gemini_live(
+        _account(
+            "gemini",
+            session_percent_used=15.0,
+            session_breakdown=ANTIGRAVITY_PAYLOAD["session_breakdown"],
+            session_telemetry_synced_at=_ago(hours=6),
+            weekly_percent_used=0.0,
+            weekly_breakdown=ANTIGRAVITY_PAYLOAD["weekly_breakdown"],
+            weekly_telemetry_synced_at=_ago(days=8),
+        )
+    )
+
+    assert acc.status == "unavailable"
+    assert acc.session_breakdown is None
+    assert acc.weekly_breakdown is None
+    assert acc.needs_telemetry_sync is True
