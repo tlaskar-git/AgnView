@@ -223,6 +223,21 @@ _ANTIGRAVITY_BODY = """
   const percentAlone = /^(\\d+(?:\\.\\d+)?)\\s*%$/;
   const round1 = function (n) { return Math.round(n * 10) / 10; };
 
+  // "Resets in 2d 14h". Sent as an offset in seconds, not as an instant, so
+  // this and the Python parser produce the same value whenever each one runs.
+  // A test compares the two payloads for equality.
+  const resetSeconds = function (line) {
+    if (!/\\bresets?\\s+in\\b/i.test(line || '')) return null;
+    const units = { d: 86400, h: 3600, m: 60 };
+    let total = 0, matched = false, m;
+    const re = /(\\d+)\\s*([dhm])/gi;
+    while ((m = re.exec(line)) !== null) {
+      total += parseInt(m[1], 10) * units[m[2].toLowerCase()];
+      matched = true;
+    }
+    return matched ? total : null;
+  };
+
   const groups = [];
   let current = null;
   for (let i = 0; i < lines.length; i++) {
@@ -247,8 +262,14 @@ _ANTIGRAVITY_BODY = """
     const used = sense === 'used' ? value : round1(100 - value);
     const left = sense === 'used' ? round1(100 - value) : value;
     const key = /weekly/i.test(limitMatch[1]) ? 'weekly' : 'session';
+    // The reset sits between the label and the figure when the panel shows one.
+    let resetsIn = resetSeconds(line);
+    for (let k = i + 1; resetsIn === null && k < lines.length && k <= i + 2; k++) {
+      resetsIn = resetSeconds(lines[k]);
+    }
     current.windows[key] = {
-      title: line.replace(percentOnLine, '').trim(), used: used, left: left
+      title: line.replace(percentOnLine, '').trim(), used: used, left: left,
+      resets_in_seconds: resetsIn
     };
   }
 
@@ -260,7 +281,8 @@ _ANTIGRAVITY_BODY = """
         group: g.group,
         weekly_title: g.windows.weekly.title,
         weekly_percent_used: g.windows.weekly.used,
-        weekly_percent_left: g.windows.weekly.left
+        weekly_percent_left: g.windows.weekly.left,
+        weekly_resets_in_seconds: g.windows.weekly.resets_in_seconds
       });
     }
     if (g.windows.session) {
@@ -268,7 +290,8 @@ _ANTIGRAVITY_BODY = """
         group: g.group,
         session_title: g.windows.session.title,
         session_percent_used: g.windows.session.used,
-        session_percent_left: g.windows.session.left
+        session_percent_left: g.windows.session.left,
+        session_resets_in_seconds: g.windows.session.resets_in_seconds
       });
     }
   });
@@ -293,6 +316,7 @@ _ANTIGRAVITY_BODY = """
     payload.weekly_title = tightest.weekly_title;
     payload.weekly_percent_used = tightest.weekly_percent_used;
     payload.weekly_percent_left = tightest.weekly_percent_left;
+    payload.weekly_resets_in_seconds = tightest.weekly_resets_in_seconds;
   }
   if (sessionRows.length > 0) {
     payload.session_breakdown = sessionRows;
@@ -302,6 +326,7 @@ _ANTIGRAVITY_BODY = """
     payload.session_title = tightest.session_title;
     payload.session_percent_used = tightest.session_percent_used;
     payload.session_percent_left = tightest.session_percent_left;
+    payload.session_resets_in_seconds = tightest.session_resets_in_seconds;
   }
 
   await send(payload);
