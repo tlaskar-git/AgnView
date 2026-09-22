@@ -1,5 +1,7 @@
 import asyncio
+import logging
 import os
+import uuid
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, Request
@@ -12,6 +14,8 @@ from ..core.engine import RelayEngine
 from ..core.db import Database
 from ..core.config import load_config
 from ..core.iroh_transport import IrohTransport
+
+logger = logging.getLogger(__name__)
 
 
 # Set AGNVIEW_IROH=0 to keep the hub LAN only. The default is on, because the
@@ -132,6 +136,44 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
         # Job and task routes are sync, so they execute on worker threads.
         # Remember the serving loop so their broadcasts still reach SSE clients.
         engine.bind_loop(asyncio.get_running_loop())
+
+    @app.on_event("startup")
+    async def _seed_discovered_usage_accounts():
+        """Give a fresh install a working Usage tab without any setup.
+
+        Every adapter reads a tool's own local sign-in and needs no credential,
+        so an empty Usage tab on a machine that has Claude Code and Codex
+        signed in meant nothing but "nobody clicked Add Account yet". Each tool
+        found here gets an account once; an account the operator deleted is not
+        recreated, because only providers with no account at all are added and
+        a deleted one is only re-seeded if the whole set is empty.
+        """
+        try:
+            from ..core.usage.discover import missing_providers
+            from ..core.models import UsageAccount
+
+            existing = db.list_usage_accounts()
+            if existing:
+                # An established install is left alone. Discovery for a tool
+                # installed later runs from the dashboard, not behind the
+                # operator's back.
+                return
+            for found in missing_providers([]):
+                account = UsageAccount(
+                    id=f"{found['provider']}-{uuid.uuid4().hex[:6]}",
+                    provider=found["provider"],
+                    name=found["name"],
+                    auth_type="session_token",
+                    credential="",
+                    plan_name=found.get("plan_name") or "Unknown",
+                )
+                db.save_usage_account(account.model_dump())
+                logger.info(
+                    "Usage: added %s from %s", found["provider"], found["detected_from"]
+                )
+        except Exception as exc:
+            # A hub that cannot seed still serves the dashboard.
+            logger.warning("Usage: could not seed discovered accounts: %s", exc)
 
     @app.on_event("startup")
     async def _start_iroh_transport():

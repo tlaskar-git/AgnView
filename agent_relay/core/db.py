@@ -289,6 +289,16 @@ class Database:
             return cur.rowcount > 0
 
     # Subscription Usage Accounts
+    @staticmethod
+    def _json_safe(value: Any) -> str:
+        """Serialise a value that carries datetimes.
+
+        Usage observations hold absolute instants rather than formatted
+        countdowns, so an account dict now contains datetime objects. They are
+        written as ISO strings and pydantic parses them back on load.
+        """
+        return json.dumps(value, default=lambda o: o.isoformat() if isinstance(o, datetime) else str(o))
+
     def save_usage_account(self, account_dict: Dict[str, Any]):
         with self._get_connection() as conn:
             conn.execute("""
@@ -314,7 +324,7 @@ class Database:
                 account_dict.get("plan_name", "Pro"),
                 account_dict.get("status", "active"),
                 account_dict["last_checked"],
-                json.dumps(account_dict)
+                self._json_safe(account_dict)
             ))
             conn.commit()
 

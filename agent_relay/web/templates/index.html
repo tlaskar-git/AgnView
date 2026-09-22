@@ -1112,7 +1112,7 @@
             <h2 class="text-xl font-bold text-[var(--text-main)] tracking-tight">Usage & Accounts</h2>
           </div>
           <p class="text-xs text-[var(--text-secondary)] max-w-2xl leading-relaxed">
-            Live monitoring of tokens, rate windows, and session quotas across <span class="text-amber-500 dark:text-amber-400 font-medium">Claude</span>, <span class="text-emerald-500 dark:text-emerald-400 font-medium">ChatGPT / Codex</span>, <span class="text-cyan-500 dark:text-cyan-400 font-medium">Gemini</span>, <span class="text-blue-500 dark:text-blue-400 font-medium">DeepSeek</span>, and local harnesses.
+            Live monitoring of tokens, rate windows, and session quotas across <span class="text-amber-500 dark:text-amber-400 font-medium">Claude</span>, <span class="text-emerald-500 dark:text-emerald-400 font-medium">ChatGPT / Codex</span>, <span class="text-cyan-500 dark:text-cyan-400 font-medium">Gemini</span>, <span class="text-violet-500 dark:text-violet-400 font-medium">AntiGravity</span>, <span class="text-blue-500 dark:text-blue-400 font-medium">DeepSeek</span>, and local harnesses.
           </p>
         </div>
 
@@ -1165,6 +1165,9 @@
             </span>
             <span id="stat-box-gemini" class="hidden items-center gap-1 px-2.5 py-1 rounded-lg bg-cyan-500/15 text-cyan-800 dark:text-cyan-400 border border-cyan-500/30 font-mono font-medium">
               Gemini: <strong id="stat-gemini-accounts" class="font-bold">0</strong>
+            </span>
+            <span id="stat-box-antigravity" class="hidden items-center gap-1 px-2.5 py-1 rounded-lg bg-violet-500/15 text-violet-800 dark:text-violet-400 border border-violet-500/30 font-mono font-medium">
+              AntiGravity: <strong id="stat-antigravity-accounts" class="font-bold">0</strong>
             </span>
             <span id="stat-box-others" class="hidden items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500/15 text-blue-800 dark:text-blue-400 border border-blue-500/30 font-mono font-medium">
               Others: <strong id="stat-others-accounts" class="font-bold">0</strong>
@@ -1487,12 +1490,11 @@
       <div class="space-y-3 text-xs">
         <div>
           <label for="acc-provider" class="block text-[var(--text-main)] font-semibold mb-1">Provider *</label>
+          <!-- Populated from GET /api/usage/providers, which is generated from
+               the adapter registry. A hand-written list here is what left
+               AntiGravity out of the Usage tab while it was named everywhere
+               else in the product. See docs/adr/ADR-USAGE-OBSERVATIONS.md. -->
           <select id="acc-provider" onchange="onProviderChange()" class="w-full bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-[var(--text-main)] focus:outline-none focus:border-[var(--color-action)]">
-            <option value="claude">Claude (Anthropic) - Claude.ai / Claude Code CLI</option>
-            <option value="chatgpt">ChatGPT (OpenAI) - ChatGPT.com / Codex</option>
-            <option value="gemini">Google Gemini - gemini.google.com / API</option>
-            <option value="deepseek">DeepSeek - api.deepseek.com (V3 / R1)</option>
-            <option value="custom">Custom / Local LLM Harness (Ollama, vLLM, LM Studio, Groq)</option>
           </select>
         </div>
 
@@ -5322,14 +5324,15 @@
         if (!res.ok) return;
         const rawAccounts = await res.json();
 
-        // Sort accounts by max percent used descending
+        // Sort by the worst window on each account, read from the observation.
         const getAccountMaxUsed = (acc) => {
+          const windows = (acc.usage && acc.usage.windows) || [];
           let m = 0;
-          if (acc.session_percent_used !== null && acc.session_percent_used !== undefined) m = Math.max(m, acc.session_percent_used);
-          if (acc.weekly_percent_used !== null && acc.weekly_percent_used !== undefined) m = Math.max(m, acc.weekly_percent_used);
-          if (acc.percent_used !== null && acc.percent_used !== undefined) m = Math.max(m, acc.percent_used);
-          if (acc.session_percent_left !== null && acc.session_percent_left !== undefined) m = Math.max(m, 100 - acc.session_percent_left);
-          if (acc.weekly_percent_left !== null && acc.weekly_percent_left !== undefined) m = Math.max(m, 100 - acc.weekly_percent_left);
+          windows.forEach(function (w) {
+            if (w.percent_used !== null && w.percent_used !== undefined) {
+              m = Math.max(m, w.percent_used);
+            }
+          });
           return m;
         };
         usageAccounts = rawAccounts.sort((a, b) => getAccountMaxUsed(b) - getAccountMaxUsed(a));
@@ -5337,19 +5340,28 @@
         // Permanent KPI: Total Accounts (Tag 16)
         document.getElementById('stat-total-accounts').innerText = usageAccounts.length;
 
-        const claudeAccs = usageAccounts.filter(a => a.provider === 'claude');
-        const chatgptAccs = usageAccounts.filter(a => a.provider === 'chatgpt');
-        const geminiAccs = usageAccounts.filter(a => a.provider === 'gemini');
-        const othersAccs = usageAccounts.filter(a => a.provider === 'deepseek' || a.provider === 'custom' || a.provider === 'others');
+        // Grouped by provider, in the order the registry declares, with a
+        // catch-all so no account can be silently dropped. Grouping used to be
+        // four hardcoded filters naming claude, chatgpt, gemini, deepseek and
+        // custom, so an AntiGravity account existed in the database and
+        // appeared nowhere on the page.
+        const sections = USAGE_SECTION_ORDER.map(sec => Object.assign({}, sec, {
+          accounts: usageAccounts.filter(a => sec.providers.includes(a.provider))
+        }));
+        const grouped = new Set(USAGE_SECTION_ORDER.flatMap(sec => sec.providers));
+        const ungrouped = usageAccounts.filter(a => !grouped.has(a.provider));
+        if (ungrouped.length) {
+          sections.push({ key: 'other', name: 'Other providers', color: 'blue', icon: 'cpu', providers: [], accounts: ungrouped });
+        }
 
-        // Conditionally show/hide KPI provider boxes (Tag 16)
-        toggleStatBox('stat-box-claude', 'stat-claude-accounts', claudeAccs.length);
-        toggleStatBox('stat-box-chatgpt', 'stat-chatgpt-accounts', chatgptAccs.length);
-        toggleStatBox('stat-box-gemini', 'stat-gemini-accounts', geminiAccs.length);
-        toggleStatBox('stat-box-others', 'stat-others-accounts', othersAccs.length);
+        const bySection = k => (sections.find(s => s.key === k) || { accounts: [] }).accounts.length;
+        toggleStatBox('stat-box-claude', 'stat-claude-accounts', bySection('claude'));
+        toggleStatBox('stat-box-chatgpt', 'stat-chatgpt-accounts', bySection('chatgpt'));
+        toggleStatBox('stat-box-gemini', 'stat-gemini-accounts', bySection('gemini'));
+        toggleStatBox('stat-box-antigravity', 'stat-antigravity-accounts', bySection('antigravity'));
+        toggleStatBox('stat-box-others', 'stat-others-accounts', bySection('others') + bySection('other'));
 
-        // Dynamically render provider columns / sections (Tag 17)
-        renderUsageSections(claudeAccs, chatgptAccs, geminiAccs, othersAccs);
+        renderUsageSections(sections);
 
         safeCreateIcons();
       } catch (err) {
@@ -5372,15 +5384,11 @@
       }
     }
 
-    function renderUsageSections(claudeAccs, chatgptAccs, geminiAccs, othersAccs) {
+    function renderUsageSections(sections) {
       const container = document.getElementById('usage-providers-container');
       if (!container) return;
 
-      const activeProviders = [];
-      if (claudeAccs.length > 0) activeProviders.push({ key: 'claude', name: 'Claude (Anthropic)', color: 'amber', icon: 'sparkle', accounts: claudeAccs });
-      if (chatgptAccs.length > 0) activeProviders.push({ key: 'chatgpt', name: 'ChatGPT / Codex', color: 'emerald', icon: 'bot', accounts: chatgptAccs });
-      if (geminiAccs.length > 0) activeProviders.push({ key: 'gemini', name: 'Google Gemini', color: 'cyan', icon: 'sparkles', accounts: geminiAccs });
-      if (othersAccs.length > 0) activeProviders.push({ key: 'others', name: 'Others (DeepSeek & Local)', color: 'blue', icon: 'cpu', accounts: othersAccs });
+      const activeProviders = (sections || []).filter(s => s.accounts && s.accounts.length > 0);
 
       if (activeProviders.length === 0) {
         container.innerHTML = `
@@ -5404,7 +5412,13 @@
       let gridCols = activeProviders.length === 1 ? 'grid-cols-1' : (activeProviders.length === 2 ? 'grid-cols-1 lg:grid-cols-2' : 'grid-cols-1 md:grid-cols-2 xl:grid-cols-3');
       let html = `<div class="grid ${gridCols} gap-6">`;
       activeProviders.forEach(p => {
-        let textClass = p.color === 'amber' ? 'text-amber-500 dark:text-amber-400' : (p.color === 'emerald' ? 'text-emerald-500 dark:text-emerald-400' : (p.color === 'cyan' ? 'text-cyan-500 dark:text-cyan-400' : 'text-[#2563EB] dark:text-[#3B82F6]'));
+        const COLOUR_CLASSES = {
+          amber: 'text-amber-500 dark:text-amber-400',
+          emerald: 'text-emerald-500 dark:text-emerald-400',
+          cyan: 'text-cyan-500 dark:text-cyan-400',
+          violet: 'text-violet-500 dark:text-violet-400'
+        };
+        let textClass = COLOUR_CLASSES[p.color] || 'text-[#2563EB] dark:text-[#3B82F6]';
 
         html += `
           <div class="bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-2xl p-5 flex flex-col shadow-sm">
@@ -5791,6 +5805,145 @@
     }
 
     // Normalized Quota Telemetry: percentage USED across all providers
+    // Names the source a figure came from, how old it is, and whether it has
+    // gone stale. Reads acc.usage, which the hub computes at request time from
+    // the stored observation. See docs/adr/ADR-USAGE-OBSERVATIONS.md.
+    // How provider sections are laid out. AntiGravity gets its own section
+    // because it is its own product with its own sign-in, even though it shares
+    // a Google account with Gemini.
+    const USAGE_SECTION_ORDER = [
+      { key: 'claude',      name: 'Claude (Anthropic)',        color: 'amber',   icon: 'sparkle',  providers: ['claude'] },
+      { key: 'chatgpt',     name: 'ChatGPT / Codex',           color: 'emerald', icon: 'bot',      providers: ['chatgpt'] },
+      { key: 'gemini',      name: 'Google Gemini',             color: 'cyan',    icon: 'sparkles', providers: ['gemini'] },
+      { key: 'antigravity', name: 'AntiGravity (AGY)',         color: 'violet',  icon: 'orbit',    providers: ['antigravity'] },
+      { key: 'others',      name: 'Others (DeepSeek & Local)', color: 'blue',    icon: 'cpu',      providers: ['deepseek', 'custom'] }
+    ];
+
+    // The Add Account provider list comes from the hub, so it cannot drift out
+    // of step with the adapters that actually exist.
+    let usageProviderOptions = null;
+
+    async function loadUsageProviders() {
+      const select = document.getElementById('acc-provider');
+      if (!select) return;
+      if (!usageProviderOptions) {
+        try {
+          const res = await apiFetch('/api/usage/providers');
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          usageProviderOptions = await res.json();
+        } catch (e) {
+          console.error('[AgnView] Could not load the provider list:', e);
+          return;
+        }
+      }
+      const current = select.value;
+      select.innerHTML = usageProviderOptions.map(function (o) {
+        const text = o.hint ? (o.label + ' - ' + o.hint) : o.label;
+        return '<option value="' + escapeHtml(o.value) + '">' + escapeHtml(text) + '</option>';
+      }).join('');
+      if (current) select.value = current;
+    }
+
+    // Colour a window by how much of it is gone. A window with no percentage
+    // gets the neutral colour, because there is no share to grade.
+    function usageWindowColours(percent) {
+      if (percent === null || percent === undefined) {
+        return { bar: 'bg-slate-400 dark:bg-slate-600', text: 'text-[var(--text-secondary)]' };
+      }
+      if (percent >= 85) return { bar: 'bg-red-500', text: 'text-red-500 dark:text-red-400' };
+      if (percent >= 65) return { bar: 'bg-amber-500', text: 'text-amber-500 dark:text-amber-400' };
+      return { bar: 'bg-emerald-500', text: 'text-emerald-500 dark:text-emerald-400' };
+    }
+
+    // One window as a row. The bar is drawn only when the source gave a
+    // denominator, so a counted token total shows its figure and no bar rather
+    // than a bar implying a limit nobody published.
+    function renderUsageWindowRow(w, compact) {
+      const percent = (w.percent_used === null || w.percent_used === undefined) ? null : w.percent_used;
+      // The provider's own grading wins over the thresholds here, when it
+      // grades at all.
+      let colours = usageWindowColours(percent);
+      if (w.severity === 'warning') colours = usageWindowColours(70);
+      if (w.severity === 'exhausted' || w.severity === 'critical') colours = usageWindowColours(95);
+
+      const amount = w.amount_text || 'No limit published';
+      // The countdown when there is a window end, otherwise the source's own
+      // explanation of how the figure was reached. Either way it gets its own
+      // full-width truncating row below the title, never a shrink-0 span
+      // beside the value, which used to overflow and draw over the value.
+      const subLine = w.countdown_text || w.sub_label || '';
+      const barWidth = w.has_bar ? Math.min(100, Math.max(0, percent)) : 0;
+      const height = compact ? 'h-1' : 'h-1.5';
+      const active = w.is_active
+        ? '<span class="text-[9px] uppercase font-mono px-1 py-0.5 rounded bg-[var(--bg-page)] border border-[var(--border-color)] text-[var(--text-secondary)] shrink-0 ml-1">binding</span>'
+        : '';
+
+      // Title and value on one row, the countdown on its own truncating row
+      // underneath. A long sub-line in a shrink-0 span used to overflow and
+      // overlap the value beside it.
+      return '<div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5">'
+        + '<div class="flex items-center justify-between text-[11px] mb-1">'
+        + '<span class="text-[var(--text-main)] font-medium text-xs truncate mr-2">'
+        + escapeHtml(w.label || w.key) + '</span>'
+        + '<span class="flex items-center shrink-0">'
+        + '<span class="font-bold font-mono ' + colours.text + ' text-xs">' + escapeHtml(amount) + '</span>'
+        + active + '</span></div>'
+        + (subLine
+            ? '<div class="text-[10px] text-[var(--text-secondary)] font-mono truncate mb-1.5">'
+              + escapeHtml(subLine) + '</div>'
+            : '')
+        + (w.has_bar
+            ? '<div class="w-full bg-[var(--bg-page)] rounded-full ' + height
+              + ' overflow-hidden border border-[var(--border-color)]">'
+              + '<div class="' + colours.bar + ' ' + height
+              + ' rounded-full transition-all duration-500" style="width: ' + barWidth + '%"></div></div>'
+            : '')
+        + '</div>';
+    }
+
+    // The whole limits block for one account, driven by acc.usage.windows.
+    function renderUsageWindowsHtml(acc) {
+      const windows = (acc.usage && acc.usage.windows) || [];
+      if (windows.length === 0) {
+        // No windows is the correct result for an unavailable account and for a
+        // local harness that enforces no quota. The reason is shown above this
+        // block, so nothing more is needed here.
+        return '';
+      }
+      return windows.map(function (w) {
+        let html = renderUsageWindowRow(w, false);
+        if (w.breakdown && w.breakdown.length) {
+          html += '<div class="pl-2.5 mt-1.5 space-y-1.5 border-l border-[var(--border-color)]">'
+            + w.breakdown.map(function (child) { return renderUsageWindowRow(child, true); }).join('')
+            + '</div>';
+        }
+        return html;
+      }).join('');
+    }
+
+    function usageProvenanceHtml(acc) {
+      const u = acc.usage;
+      if (!u) {
+        return '<span class="text-[10px] text-[var(--text-secondary)] font-mono">No source</span>';
+      }
+      const stale = u.is_stale === true;
+      // "derived" means this machine worked the figure out rather than the
+      // provider reporting it. Saying so is the difference between a counted
+      // token total and a share of a plan limit.
+      const derived = u.confidence === 'derived';
+      const colour = stale
+        ? 'text-amber-600 dark:text-amber-400'
+        : (derived ? 'text-[var(--text-secondary)]' : 'text-[var(--text-secondary)]');
+      const marks = [];
+      if (stale) marks.push('stale');
+      if (derived) marks.push('derived, not a plan limit');
+      const suffix = marks.length ? ' &middot; ' + marks.join(', ') : '';
+      return '<span class="text-[10px] font-mono ' + colour + '" title="'
+        + escapeHtml(u.source_label + ' — ' + u.age_text) + '">'
+        + escapeHtml(u.source_label) + ' &middot; ' + escapeHtml(u.age_text) + suffix
+        + '</span>';
+    }
+
     function renderAccountCard(acc) {
       let badgeTheme = "border-[var(--border-color)] text-[var(--text-secondary)] bg-[var(--bg-raised)]";
       if (acc.provider === 'claude') badgeTheme = "border-amber-500/30 text-amber-500 dark:text-amber-400 bg-amber-500/10";
@@ -5816,6 +5969,9 @@
               </div>` : '';
 
       const syncTime = acc.last_synced_at ? new Date(acc.last_synced_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'Just now';
+      // Provenance. Every figure on a card says where it came from and how old
+      // it is, so a stale reading cannot pass for a live one.
+      const provenance = usageProvenanceHtml(acc);
       const planDisplay = acc.plan_label ? `${escapeHtml(acc.plan_label)}` : `${escapeHtml(acc.plan_name || 'Standard Tier')}`;
 
       // =========================================================================
@@ -5845,7 +6001,6 @@
                   <span>Plan limits:</span>
                   <span class="font-semibold text-[var(--text-main)]">${planDisplay}</span>
                 </div>
-                <span class="text-[10px] bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 px-1.5 py-0.2 rounded border border-cyan-500/20 font-sans font-medium shrink-0">Antigravity Mesh</span>
               </div>
 
               <!-- Model group quota telemetry, when the provider reports any -->
@@ -5909,7 +6064,7 @@
 
             <!-- Bottom Actions Row -->
             <div class="flex items-center justify-between pt-3 mt-3 border-t border-[var(--border-color)] text-xs">
-              <span class="text-[10px] text-[var(--text-secondary)] font-mono">Synced: ${syncTime}</span>
+              ${provenance}
               <div class="flex items-center gap-1.5">
                 <button onclick="openEditAccountModal('${acc.id}')" aria-label="Edit ${escapeHtml(acc.name)}" title="Edit account" class="p-1.5 bg-[var(--bg-raised)] hover:bg-[var(--bg-surface-hover)] text-[var(--text-main)] border border-[var(--border-color)] rounded-lg transition flex items-center gap-1 text-[11px]">
                   <i data-lucide="edit-3" class="w-3.5 h-3.5 text-[#2563EB] dark:text-[#3B82F6]"></i> Edit
@@ -5926,137 +6081,15 @@
         `;
       }
 
-      // 1. Session / Short-Term Limit Calculation (Honest % USED without clamping)
-      const hasSessionLimit = (acc.session_percent_used !== null && acc.session_percent_used !== undefined) ||
-                             (acc.session_percent_left !== null && acc.session_percent_left !== undefined) ||
-                             (acc.percent_used !== null && acc.percent_used !== undefined);
-
-      let sessionUsed = null;
-      if (acc.session_percent_used !== null && acc.session_percent_used !== undefined) {
-        sessionUsed = acc.session_percent_used;
-      } else if (acc.session_percent_left !== null && acc.session_percent_left !== undefined) {
-        sessionUsed = 100 - acc.session_percent_left;
-      } else if (acc.percent_used !== null && acc.percent_used !== undefined) {
-        sessionUsed = acc.percent_used;
-      }
-
-      let sessionBarColor = "bg-slate-400 dark:bg-slate-600";
-      let sessionTextColor = "text-[var(--text-secondary)]";
-      // A provider that publishes no limit still has a real token count worth
-      // showing. What it never gets is a percentage nobody measured.
-      let sessionLabel = (acc.session_tokens_used !== null && acc.session_tokens_used !== undefined)
-        ? `${formatTokenCount(acc.session_tokens_used)} tokens`
-        : "No limit published";
-      let sessionBarWidth = 0;
-
-      if (hasSessionLimit && sessionUsed !== null) {
-        sessionLabel = `${Math.round(sessionUsed)}% used`;
-        sessionBarWidth = Math.min(100, Math.max(0, sessionUsed));
-        if (sessionUsed >= 85) {
-          sessionBarColor = "bg-red-500";
-          sessionTextColor = "text-red-500 dark:text-red-400";
-        } else if (sessionUsed >= 65) {
-          sessionBarColor = "bg-amber-500";
-          sessionTextColor = "text-amber-500 dark:text-amber-400";
-        } else {
-          sessionBarColor = "bg-emerald-500";
-          sessionTextColor = "text-emerald-500 dark:text-emerald-400";
-        }
-      }
-
-      const sessionTitle = acc.session_title || (acc.provider === 'chatgpt' ? '5-hour limit' : 'Current session');
-      const sessionReset = acc.session_reset_time || acc.reset_time || '';
-
-      // 2. Weekly Limit Calculation (Honest % USED without clamping)
-      const hasWeeklyLimit = (acc.weekly_percent_used !== null && acc.weekly_percent_used !== undefined) ||
-                            (acc.weekly_percent_left !== null && acc.weekly_percent_left !== undefined);
-
-      let weeklyUsed = null;
-      if (acc.weekly_percent_used !== null && acc.weekly_percent_used !== undefined) {
-        weeklyUsed = acc.weekly_percent_used;
-      } else if (acc.weekly_percent_left !== null && acc.weekly_percent_left !== undefined) {
-        weeklyUsed = 100 - acc.weekly_percent_left;
-      }
-
-      let weeklyBarColor = "bg-slate-400 dark:bg-slate-600";
-      let weeklyTextColor = "text-[var(--text-secondary)]";
-      let weeklyLabel = (acc.weekly_tokens_used !== null && acc.weekly_tokens_used !== undefined)
-        ? `${formatTokenCount(acc.weekly_tokens_used)} tokens`
-        : "No limit published";
-      let weeklyBarWidth = 0;
-
-      if (hasWeeklyLimit && weeklyUsed !== null) {
-        weeklyLabel = `${Math.round(weeklyUsed)}% used`;
-        weeklyBarWidth = Math.min(100, Math.max(0, weeklyUsed));
-        if (weeklyUsed >= 85) {
-          weeklyBarColor = "bg-red-500";
-          weeklyTextColor = "text-red-500 dark:text-red-400";
-        } else if (weeklyUsed >= 65) {
-          weeklyBarColor = "bg-amber-500";
-          weeklyTextColor = "text-amber-500 dark:text-amber-400";
-        } else {
-          weeklyBarColor = "bg-emerald-500";
-          weeklyTextColor = "text-emerald-500 dark:text-emerald-400";
-        }
-      }
-
-      const weeklyTitle = acc.weekly_title || 'Weekly limit';
-      const weeklyReset = acc.weekly_reset_time || '';
-
-      // Weekly breakdown or single bar:
-      let weeklySectionHtml = '';
-      if (acc.weekly_breakdown && acc.weekly_breakdown.length > 0) {
-        weeklySectionHtml = `
-          <div class="space-y-2 mt-1.5">
-            ${acc.weekly_breakdown.map(item => {
-              const hasItemLimit = (item.percent_used !== null && item.percent_used !== undefined);
-              const itemUsed = hasItemLimit ? item.percent_used : null;
-              let itemBarColor = 'bg-slate-400 dark:bg-slate-600';
-              let itemLabel = 'No limit reported';
-              let itemBarWidth = 0;
-              if (hasItemLimit && itemUsed !== null) {
-                itemLabel = `${Math.round(itemUsed)}% used`;
-                itemBarWidth = Math.min(100, Math.max(0, itemUsed));
-                itemBarColor = itemUsed >= 85 ? 'bg-red-500' : (itemUsed >= 65 ? 'bg-amber-500' : 'bg-emerald-500');
-              }
-              const itemReset = item.reset_time || '';
-              return `
-                <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5">
-                  <div class="flex items-center justify-between text-[11px] mb-1">
-                    <span class="text-[var(--text-main)] font-semibold text-xs truncate mr-2">${escapeHtml(item.label)}</span>
-                    <span class="font-bold font-mono text-[var(--text-secondary)] text-xs shrink-0">${itemLabel}</span>
-                  </div>
-                  ${itemReset ? `<div class="text-[10px] text-[var(--text-secondary)] font-mono truncate mb-1">${escapeHtml(itemReset)}</div>` : ''}
-                  <div class="w-full bg-[var(--bg-page)] rounded-full h-1 overflow-hidden border border-[var(--border-color)]">
-                    <div class="${itemBarColor} h-1 rounded-full transition-all duration-500" style="width: ${itemBarWidth}%"></div>
-                  </div>
-                </div>
-              `;
-            }).join('')}
-          </div>
-        `;
-      } else {
-        // The title/value row and the reset-or-scope sub-line are two
-        // separate rows, not one flex row. A local Claude Code recompute
-        // puts a long descriptive sub-line here (e.g. "433 turns across 30
-        // projects, subagents included"), and that text used to sit in a
-        // shrink-0 span squeezed beside the value label with no truncation
-        // or wrap allowance, so it overflowed its box and rendered on top of
-        // the token count next to it. Giving the sub-line its own full-width
-        // truncating row fixes that for any provider, long or short text.
-        weeklySectionHtml = `
-          <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5 mt-1">
-            <div class="flex items-center justify-between text-[11px] mb-1">
-              <span class="text-[var(--text-main)] font-medium text-xs truncate mr-2">${escapeHtml(weeklyTitle)}</span>
-              <span class="font-bold font-mono ${weeklyTextColor} text-xs shrink-0">${weeklyLabel}</span>
-            </div>
-            ${weeklyReset ? `<div class="text-[10px] text-[var(--text-secondary)] font-mono truncate mb-1.5">${escapeHtml(weeklyReset)}</div>` : ''}
-            <div class="w-full bg-[var(--bg-page)] rounded-full h-1.5 overflow-hidden border border-[var(--border-color)]">
-              <div class="${weeklyBarColor} h-1.5 rounded-full transition-all duration-500" style="width: ${weeklyBarWidth}%"></div>
-            </div>
-          </div>
-        `;
-      }
+      // Every window the source reported, in the order it reported them.
+      //
+      // This used to compute exactly one session figure and one weekly figure
+      // from flat fields, so any further window was dropped. On a Claude Max
+      // account that silently discarded the scoped per-model weekly limit,
+      // which is often the binding one: the card showed 39% for all models
+      // while the Fable limit sat at 42%. It also had to guess a unit, which is
+      // how a percentage and a token count ended up describing the same row.
+      const limitsHtml = renderUsageWindowsHtml(acc);
 
       return `
         <div class="bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-xl p-4 flex flex-col justify-between shadow-sm relative transition hover:border-slate-500/40 min-h-[310px]">
@@ -6076,39 +6109,16 @@
               <span class="font-semibold text-[var(--text-main)]">${planDisplay}</span>
             </div>
 
-            <!-- Dual Rate Limit Meters (Normalized to % USED) -->
+            <!-- Every limit window the source reported -->
             <div class="space-y-2.5">
               ${noticeHtml}
-              <!-- Limit 1: Session / Short-Term -->
-              <!-- Title/value on one row, the reset-or-scope sub-line on its
-                   own full-width truncating row underneath. A shrink-0 span
-                   squeezed next to the value used to overflow and overlap
-                   the token count whenever the sub-line was long (see the
-                   weekly block above for the full explanation). -->
-              <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg p-2.5">
-                <div class="flex items-center justify-between text-[11px] mb-1">
-                  <span class="text-[var(--text-main)] font-medium text-xs truncate mr-2">${escapeHtml(sessionTitle)}</span>
-                  <span class="font-bold font-mono ${sessionTextColor} text-xs shrink-0">${sessionLabel}</span>
-                </div>
-                ${sessionReset ? `<div class="text-[10px] text-[var(--text-secondary)] font-mono truncate mb-1.5">${escapeHtml(sessionReset)}</div>` : ''}
-                <div class="w-full bg-[var(--bg-page)] rounded-full h-1.5 overflow-hidden border border-[var(--border-color)]">
-                  <div class="${sessionBarColor} h-1.5 rounded-full transition-all duration-500" style="width: ${sessionBarWidth}%"></div>
-                </div>
-              </div>
-
-              <!-- Limit 2: Weekly Limit / Breakdown -->
-              <div>
-                <div class="flex items-center justify-between text-[11px] px-0.5 mb-0.5">
-                  <span class="text-[var(--text-secondary)] text-[10px] uppercase font-mono tracking-wider font-semibold">${escapeHtml(acc.weekly_title || 'Weekly limits')}</span>
-                </div>
-                ${weeklySectionHtml}
-              </div>
+              ${limitsHtml}
             </div>
           </div>
 
           <!-- Bottom Actions Row -->
           <div class="flex items-center justify-between pt-3 mt-3 border-t border-[var(--border-color)] text-xs">
-            <span class="text-[10px] text-[var(--text-secondary)] font-mono">Synced: ${syncTime}</span>
+            ${provenance}
             <div class="flex items-center gap-1.5">
               <button onclick="openEditAccountModal('${acc.id}')" aria-label="Edit ${escapeHtml(acc.name)}" title="Edit account" class="p-1.5 bg-[var(--bg-raised)] hover:bg-[var(--bg-surface-hover)] text-[var(--text-main)] border border-[var(--border-color)] rounded-lg transition flex items-center gap-1 text-[11px]">
                 <i data-lucide="edit-3" class="w-3.5 h-3.5 text-[#2563EB] dark:text-[#3B82F6]"></i> Edit
@@ -6255,9 +6265,11 @@
       }
     }
 
-    function openAddAccountModal(preferredProvider) {
+    async function openAddAccountModal(preferredProvider) {
       document.getElementById('add-account-modal').classList.remove('hidden');
       trapModalFocus('add-account-modal');
+      // The list has to exist before anything can be selected in it.
+      await loadUsageProviders();
       if (preferredProvider) {
         document.getElementById('acc-provider').value = preferredProvider;
       }
@@ -6278,19 +6290,24 @@
       const helperText = document.getElementById('acc-helper-text');
 
       if (provider === 'claude') {
-        planInput.placeholder = 'Claude 3.5 Sonnet / Claude Pro';
-        credInput.placeholder = 'sk-ant-api03-... or sessionKey';
-        if (helperText) helperText.innerHTML = '<b>Claude.ai:</b> Press <b>F12</b> → <b>Application</b> tab → <b>Cookies</b> → <b>https://claude.ai</b> → copy <code>sessionKey</code>. Or use your <code>sk-ant-...</code> API key.';
+        planInput.placeholder = 'Claude Max / Claude Pro';
+        credInput.placeholder = 'Leave empty to use the Claude Code sign-in';
+        if (helperText) helperText.innerHTML = '<b>Claude:</b> leave the credential empty. AgnView reads the Claude Code sign-in on this machine and asks Anthropic for your real session and weekly limits. Add an <code>sk-ant-...</code> key only if you want API rate limits instead.';
         if (baseContainer) baseContainer.classList.add('hidden');
       } else if (provider === 'chatgpt') {
-        planInput.placeholder = 'ChatGPT Plus / OpenAI Team';
-        credInput.placeholder = 'sk-proj-... or accessToken';
-        if (helperText) helperText.innerHTML = '<b>ChatGPT.com:</b> Press <b>F12</b> → <b>Console</b> → paste the extractor script below to copy <code>accessToken</code> instantly.';
+        planInput.placeholder = 'ChatGPT Plus / Team';
+        credInput.placeholder = 'Leave empty to use the Codex sign-in';
+        if (helperText) helperText.innerHTML = '<b>ChatGPT:</b> leave the credential empty. AgnView reads the Codex sign-in at <code>~/.codex/auth.json</code> and asks ChatGPT for your 5-hour and weekly limits. Add an <code>sk-...</code> key only if you want API rate limits instead.';
         if (baseContainer) baseContainer.classList.add('hidden');
       } else if (provider === 'gemini') {
-        planInput.placeholder = 'Gemini Advanced / 1.5 Pro';
-        credInput.placeholder = 'AIzaSy... or __Secure-1PSID';
-        if (helperText) helperText.innerHTML = '<b>Gemini:</b> Press <b>F12</b> → <b>Application</b> tab → <b>Cookies</b> → <b>https://gemini.google.com</b> → copy <code>__Secure-1PSID</code>, or use a Gemini API key.';
+        planInput.placeholder = 'Gemini Pro / Advanced';
+        credInput.placeholder = 'Leave empty to use the Gemini CLI sign-in';
+        if (helperText) helperText.innerHTML = '<b>Gemini:</b> leave the credential empty. AgnView reads the Gemini sign-in at <code>~/.gemini/oauth_creds.json</code>. Google publishes no quota figure for an <code>AIzaSy...</code> key, so one is only checked for validity.';
+        if (baseContainer) baseContainer.classList.add('hidden');
+      } else if (provider === 'antigravity') {
+        planInput.placeholder = 'AntiGravity';
+        credInput.placeholder = 'Leave empty to use the AntiGravity sign-in';
+        if (helperText) helperText.innerHTML = '<b>AntiGravity:</b> leave the credential empty. AgnView reads the Google sign-in AntiGravity shares, and its own log for the last quota refresh. Run <code>agy</code> and sign in, or the card will say it is signed out.';
         if (baseContainer) baseContainer.classList.add('hidden');
       } else if (provider === 'deepseek') {
         planInput.placeholder = 'DeepSeek-V3 / DeepSeek-R1';
@@ -6317,8 +6334,12 @@
         alert("Please enter an account identifier.");
         return;
       }
-      if (!auth_credential && provider !== 'custom') {
-        alert("Please provide an API key or session token.");
+      // Only DeepSeek has no local sign-in to read, so only DeepSeek needs a
+      // credential pasted in. Demanding one for Claude, ChatGPT, Gemini or
+      // AntiGravity asked the operator for something the adapter does not use.
+      const needsCredential = ['deepseek'];
+      if (!auth_credential && needsCredential.includes(provider)) {
+        alert("Please provide an API key for " + provider + ".");
         return;
       }
 
@@ -6444,180 +6465,55 @@
       }
     }
 
-    function copySessionExtractorScript(target = 'add') {
-      const provider = target === 'edit'
-        ? (document.getElementById('edit-acc-provider')?.value || '').toLowerCase()
-        : document.getElementById('acc-provider').value;
+    // The sync snippet now comes from the hub, built for one specific account.
+    //
+    // The snippets used to be written into this page with a fixed account id, a
+    // fixed http://localhost:8765 origin, and no auth token. None of the three
+    // ids matched a real account, so every POST returned 404, and a corrected
+    // id would still have returned 401 with no token. Each failure sat inside a
+    // silent try/catch that fell through to the clipboard and reported success,
+    // which is why the manual sync looked like it worked and never did. See
+    // docs/adr/ADR-USAGE-OBSERVATIONS.md.
+    async function copySessionExtractorScript(target = 'add') {
+      const toast = document.getElementById(
+        target === 'edit' ? 'edit-session-helper-toast' : 'session-helper-toast');
 
-      let script = '';
-      if (provider === 'claude') {
-        script = `(async function() {
-  console.log('%c[AgnView] Claude.ai Telemetry Extractor', 'color: #f59e0b; font-weight: bold; font-size: 14px;');
-  // Extract DOM data from claude.ai/new#settings/usage
-  const bodyText = document.body.innerText;
-  const sessionMatch = bodyText.match(/Current session[\\s\\S]*?Resets in ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
-  const planMatch = bodyText.match(/Plan usage limits\\s+([^\\n]+)/i);
-
-  // Weekly limits lists one row per model group: at least "All models", and
-  // any model the plan tracks separately (for example "Fable"). Read every
-  // row this page actually shows, in the order it shows them, rather than
-  // only the first one, so the breakdown here matches the page line for line.
-  const weeklySplit = bodyText.split(/Weekly limits/i);
-  const weeklyLines = weeklySplit.length > 1
-    ? weeklySplit[1].split('\\n').map(s => s.trim()).filter(Boolean)
-    : [];
-  const weeklyRows = [];
-  for (let i = 0; i < weeklyLines.length; i++) {
-    const resetMatch = weeklyLines[i].match(/^Resets\\s+(.+)$/i);
-    if (!resetMatch) continue;
-    let label = null;
-    for (let j = i - 1; j >= 0 && j >= i - 3; j--) {
-      if (!/^Resets/i.test(weeklyLines[j]) && !/%\\s*used/i.test(weeklyLines[j])) { label = weeklyLines[j]; break; }
-    }
-    let percent = null;
-    for (let k = i + 1; k < weeklyLines.length && k <= i + 3; k++) {
-      const pctMatch = weeklyLines[k].match(/(\\d+)%\\s*used/i);
-      if (pctMatch) { percent = parseFloat(pctMatch[1]); break; }
-    }
-    if (label && percent !== null) {
-      weeklyRows.push({ label: label, reset_time: 'Resets ' + resetMatch[1].trim(), percent_used: percent });
-    }
-  }
-
-  // Only what this page actually said. A field the page did not show is left
-  // out, so a failed scrape reports nothing rather than a made-up figure.
-  if (!sessionMatch && weeklyRows.length === 0) {
-    alert('[AgnView] Nothing was read from this page. Open claude.ai settings, usage, and run this again.');
-    return;
-  }
-
-  const payload = { provider: 'claude', session_title: 'Current session', weekly_title: 'Weekly limits' };
-  if (planMatch) { payload.plan_label = planMatch[1].trim(); }
-  if (sessionMatch) {
-    payload.session_reset_time = 'Resets in ' + sessionMatch[1].trim();
-    payload.session_percent_used = parseFloat(sessionMatch[2]);
-  }
-  if (weeklyRows.length > 0) {
-    const primary = weeklyRows.find(r => /all models/i.test(r.label)) || weeklyRows[0];
-    payload.weekly_reset_time = primary.reset_time;
-    payload.weekly_percent_used = primary.percent_used;
-    payload.weekly_breakdown = weeklyRows;
-  }
-
-  const jsonStr = JSON.stringify(payload, null, 2);
-  if (typeof copy === 'function') { copy(jsonStr); }
-  console.log('[AgnView] Extracted Live Claude Telemetry:', payload);
-  try {
-    const r = await fetch('http://localhost:8765/api/usage/accounts/claude-d72ee8/telemetry', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: jsonStr
-    });
-    if (r.ok) {
-      alert('✓ Live Claude Telemetry synced directly to AgnView!');
-      return;
-    }
-  } catch(e) {}
-  alert('✓ Claude Telemetry copied to clipboard!\\n\\n' + jsonStr);
-})();`;
-      } else if (provider === 'chatgpt') {
-        script = `(async function() {
-  console.log('%c[AgnView] ChatGPT Telemetry Extractor', 'color: #10b981; font-weight: bold; font-size: 14px;');
-  try {
-    const res = await fetch('/backend-api/wham/usage');
-    if (res.ok) {
-      const data = await res.json();
-      const pw = data?.rate_limit?.primary_window || {};
-      const sw = data?.rate_limit?.secondary_window || {};
-      const pSec = pw.reset_after_seconds || 18000;
-      const sSec = sw.reset_after_seconds || 604800;
-      const payload = {
-        provider: 'chatgpt',
-        plan_name: 'ChatGPT Plus',
-        plan_label: 'Plus (Codex & Agents)',
-        session_title: '5-hour limit',
-        session_reset_time: 'Resets in ' + Math.floor(pSec / 3600) + 'h ' + Math.floor((pSec % 3600)/60) + 'm',
-        session_percent_used: pw.used_percent || 0,
-        session_percent_left: 100 - (pw.used_percent || 0),
-        weekly_title: 'Weekly limit',
-        weekly_reset_time: 'Resets in ' + Math.floor(sSec / 86400) + 'd ' + Math.floor((sSec % 86400)/3600) + 'h',
-        weekly_percent_used: sw.used_percent || 0,
-        weekly_percent_left: 100 - (sw.used_percent || 0)
-      };
-      const jsonStr = JSON.stringify(payload, null, 2);
-      if (typeof copy === 'function') copy(jsonStr);
-      try {
-        await fetch('http://localhost:8765/api/usage/accounts/chatgpt-08898b/telemetry', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: jsonStr
-        });
-        alert('✓ Live ChatGPT Telemetry synced directly to AgnView!');
-        return;
-      } catch(e) {}
-      alert('✓ ChatGPT Telemetry copied to clipboard!\\n\\n' + jsonStr);
-      return;
-    }
-  } catch(e) {}
-  alert('Please ensure you are logged in to chatgpt.com');
-})();`;
-      } else if (provider === 'gemini') {
-        script = `(async function() {
-  console.log('%c[AgnView] Google Gemini Telemetry Extractor', 'color: #06b6d4; font-weight: bold; font-size: 14px;');
-  const bodyText = document.body.innerText;
-  const currentMatch = bodyText.match(/Current usage[\\s\\S]*?Resets at ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
-  const weeklyMatch = bodyText.match(/Weekly limit[\\s\\S]*?Resets on ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
-  const planMatch = bodyText.match(/Usage limits\\s+([^\\n]+)/i);
-
-  // Only what this page actually said, so a failed scrape reports nothing
-  // rather than a made-up figure.
-  if (!currentMatch && !weeklyMatch) {
-    alert('[AgnView] Nothing was read from this page. Open the Gemini usage page and run this again.');
-    return;
-  }
-
-  const payload = { provider: 'gemini', session_title: 'Current usage', weekly_title: 'Weekly limit' };
-  if (planMatch) { payload.plan_label = planMatch[1].trim(); }
-  if (currentMatch) {
-    payload.session_reset_time = 'Resets at ' + currentMatch[1].trim();
-    payload.session_percent_used = parseFloat(currentMatch[2]);
-    payload.session_percent_left = 100 - parseFloat(currentMatch[2]);
-  }
-  if (weeklyMatch) {
-    payload.weekly_reset_time = 'Resets on ' + weeklyMatch[1].trim();
-    payload.weekly_percent_used = parseFloat(weeklyMatch[2]);
-    payload.weekly_percent_left = 100 - parseFloat(weeklyMatch[2]);
-  }
-
-  const jsonStr = JSON.stringify(payload, null, 2);
-  if (typeof copy === 'function') copy(jsonStr);
-  try {
-    await fetch('http://localhost:8765/api/usage/accounts/gemini-27e447/telemetry', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: jsonStr
-    });
-    alert('✓ Live Gemini Telemetry synced directly to AgnView!');
-    return;
-  } catch(e) {}
-  alert('✓ Gemini Telemetry copied to clipboard!\\n\\n' + jsonStr);
-})();`;
-      } else if (provider === 'deepseek') {
-        script = `(function() {
-  let tok = localStorage.getItem('userToken') || '';
-  if (typeof copy === 'function') copy(tok);
-  alert('✓ DeepSeek token copied!');
-})();`;
-      } else {
-        script = `// For Custom/Ollama harnesses, specify your endpoint base URL (e.g. http://localhost:11434).`;
+      function report(message) {
+        if (toast) {
+          toast.innerText = message;
+          toast.classList.remove('hidden');
+          setTimeout(() => toast.classList.add('hidden'), 5000);
+        } else {
+          showToast(message, 'info');
+        }
       }
 
-      navigator.clipboard.writeText(script);
-      const toast = document.getElementById(target === 'edit' ? 'edit-session-helper-toast' : 'session-helper-toast');
-      if (toast) {
-        toast.innerText = '✓ Extractor script copied!';
-        toast.classList.remove('hidden');
-        setTimeout(() => toast.classList.add('hidden'), 3500);
+      // A snippet has to target a saved account, because that is the id it
+      // posts to. There is nothing to generate before the account exists.
+      const accountId = target === 'edit'
+        ? (document.getElementById('edit-acc-id')?.value || '')
+        : '';
+      if (!accountId) {
+        report('Save the account first, then use Edit to copy its sync snippet.');
+        return;
+      }
+
+      try {
+        const res = await apiFetch('/api/usage/accounts/' + encodeURIComponent(accountId) + '/sync-snippet');
+        if (!res.ok) {
+          report('Could not build the snippet: HTTP ' + res.status);
+          return;
+        }
+        const data = await res.json();
+        if (!data.snippet) {
+          report(data.provider + ' has no usage page to read. Its card reads a real source directly.');
+          return;
+        }
+        await navigator.clipboard.writeText(data.snippet);
+        const where = data.usage_page ? ' Open ' + data.usage_page + ', then paste it in the console.' : '';
+        report('Snippet copied for this account.' + where);
+      } catch (err) {
+        report('Could not build the snippet: ' + err.message);
       }
     }
 

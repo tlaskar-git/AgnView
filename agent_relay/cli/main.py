@@ -748,15 +748,20 @@ def cmd_usage(args):
             sys.exit(1)
         accounts = r.json()
     else:
-        from ..core.usage_fetcher import fetch_account_usage
+        from ..core.usage import UnknownProvider, fetch_observation, observation_is_stale
         engine = get_local_engine()
         raw_accounts = engine.db.list_usage_accounts(provider=args.provider)
         accounts = []
         for raw in raw_accounts:
             acc = UsageAccount(**raw)
-            if args.refresh:
-                acc = fetch_account_usage(acc)
-                engine.db.save_usage_account(acc.model_dump())
+            if args.refresh or observation_is_stale(acc.observation):
+                try:
+                    acc.observation = fetch_observation(acc)
+                except UnknownProvider as exc:
+                    acc.observation = None
+                    acc.error_message = str(exc)
+                else:
+                    engine.db.save_usage_account(acc.model_dump())
             accounts.append(acc.masked())
 
     if not accounts:

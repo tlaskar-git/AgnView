@@ -6,7 +6,6 @@ import os
 import re
 import time
 import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional, Dict, Any
 import httpx
@@ -23,7 +22,22 @@ from ..core.models import (
     UsageAccount, CreateUsageAccountRequest, UpdateUsageAccountRequest, DetectTokenRequest, UsageTelemetryPayload, ConsoleDispatchPayload
 )
 from ..core.prompts import format_web_prompt_for_agent
-from ..core.usage_fetcher import fetch_account_usage, usage_is_stale
+from ..core.usage import (
+    CONFIDENCE_MEASURED,
+    UNIT_PERCENT,
+    USAGE_PAGES as _USAGE_PAGES,
+    PlanInfo,
+    UnknownProvider,
+    UsageObservation,
+    UsageWindow,
+    build_sync_snippet,
+    fetch_observation,
+    is_known,
+    observation_is_stale,
+    parse_instant,
+    provider_options,
+)
+from ..core.usage.discover import missing_providers
 from ..core.pairing import (
     build_pairing_payload, generate_qr_svg, get_or_create_pairing_token,
     regenerate_pairing_token
@@ -378,10 +392,15 @@ def list_usage_accounts(request: Request, provider: Optional[str] = None):
         # somebody clicked Refresh. The threshold is per provider: about a
         # minute for Claude Code, which is a local file walk, and fifteen
         # minutes for anything read over a rate-limited network endpoint. See
-        # usage_fetcher.LOCAL_STALE_SECONDS and REMOTE_STALE_SECONDS.
-        if usage_is_stale(acc):
-            acc = fetch_account_usage(acc)
-            db.save_usage_account(acc.model_dump())
+        # each adapter, because only the adapter knows how often its source moves.
+        if observation_is_stale(acc.observation):
+            try:
+                acc.observation = fetch_observation(acc)
+            except UnknownProvider as exc:
+                acc.observation = None
+                acc.error_message = str(exc)
+            else:
+                db.save_usage_account(acc.model_dump())
         masked_list.append(acc.masked())
     return masked_list
 
@@ -393,31 +412,35 @@ def add_usage_account(req: CreateUsageAccountRequest, request: Request):
     account_id = req.id or f"{req.provider.lower()}-{uuid.uuid4().hex[:6]}"
     cred = req.get_credential()
 
+    provider = req.provider.lower().strip()
+    # An unregistered provider is refused here rather than silently becoming a
+    # local-harness probe, which is what used to happen to any provider without
+    # an adapter. See docs/adr/ADR-USAGE-OBSERVATIONS.md.
+    if not is_known(provider):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"'{req.provider}' is not a usage provider. Known providers: "
+                + ", ".join(option["value"] for option in provider_options())
+                + "."
+            ),
+        )
+
+    # Only identity, credential and plan are accepted. A figure supplied by a
+    # client is not a measurement, and accepting one is how invented numbers
+    # reached the Usage tab. Every figure now comes from an adapter.
     account = UsageAccount(
         id=account_id,
-        provider=req.provider.lower(),
+        provider=provider,
         name=req.name,
         auth_type=req.auth_type,
         credential=cred,
         org_id=req.org_id,
         plan_name=req.plan_name or "Pro",
-        plan_label=req.plan_label,
-        session_title=req.session_title,
-        session_reset_time=req.session_reset_time,
-        session_percent_used=req.session_percent_used,
-        session_percent_left=req.session_percent_left,
-        weekly_title=req.weekly_title,
-        weekly_reset_time=req.weekly_reset_time,
-        weekly_percent_used=req.weekly_percent_used,
-        weekly_percent_left=req.weekly_percent_left,
-        weekly_breakdown=req.weekly_breakdown,
-        tokens_limit=req.tokens_limit,
-        cost_limit_usd=req.cost_limit_usd,
-        base_url=req.base_url
+        base_url=req.base_url,
     )
 
-    # Perform initial live fetch
-    account = fetch_account_usage(account)
+    account.observation = fetch_observation(account)
     db.save_usage_account(account.model_dump())
 
     engine = get_engine(request)
@@ -461,41 +484,25 @@ def update_usage_account(account_id: str, req: UpdateUsageAccountRequest, reques
         account.auth_type = req.auth_type.strip()
     if req.base_url is not None:
         account.base_url = req.base_url.strip() or None
-    if req.session_title is not None:
-        account.session_title = req.session_title
-    if req.session_reset_time is not None:
-        account.session_reset_time = req.session_reset_time
-        account.reset_time = req.session_reset_time
-    if req.session_percent_used is not None:
-        account.session_percent_used = req.session_percent_used
-        account.percent_used = req.session_percent_used
-    if req.session_percent_left is not None:
-        account.session_percent_left = req.session_percent_left
-    if req.weekly_title is not None:
-        account.weekly_title = req.weekly_title
-    if req.weekly_reset_time is not None:
-        account.weekly_reset_time = req.weekly_reset_time
-    if req.weekly_percent_used is not None:
-        account.weekly_percent_used = req.weekly_percent_used
-    if req.weekly_percent_left is not None:
-        account.weekly_percent_left = req.weekly_percent_left
-    if req.weekly_breakdown is not None:
-        account.weekly_breakdown = req.weekly_breakdown
+
+    # Figures are no longer accepted from a client. A number sent here is not a
+    # measurement, and storing one is how the Usage tab came to show percentages
+    # nobody had measured. Every figure comes from an adapter.
 
     new_cred = req.get_credential()
     if new_cred:
         account.credential = new_cred
 
-    # Re-probe live usage with updated credentials
-    account = fetch_account_usage(account)
+    account.observation = fetch_observation(account)
     db.save_usage_account(account.model_dump())
 
     engine = get_engine(request)
+    view = account.masked()
     engine._sync_broadcast("global", "usage_account_updated", {
         "id": account.id,
         "name": account.name,
-        "status": account.status,
-        "percent_used": account.percent_used
+        "status": view["status"],
+        "percent_used": view["percent_used"],
     })
 
     return account.masked()
@@ -503,69 +510,174 @@ def update_usage_account(account_id: str, req: UpdateUsageAccountRequest, reques
 
 @router.post("/usage/accounts/{account_id}/telemetry", response_model=Dict[str, Any])
 def sync_account_telemetry(account_id: str, payload: UsageTelemetryPayload, request: Request):
-    """Directly update detailed dual-limit telemetry (e.g. from browser extension or console snippet)."""
+    """Store a reading taken from a provider's own usage page.
+
+    This is one source among several, not an override. It is written as its own
+    observation with its own measurement time and competes on recency alone.
+
+    It used to be an override with a seven-day memory: the percentage was held
+    and written back over every fresh read, re-marking the account active, so a
+    three-day-old figure was presented as current. Nothing replays now.
+    """
     db = request.app.state.db
     raw = db.get_usage_account(account_id)
     if not raw:
         raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found.")
-    acc = UsageAccount(**raw)
-    # A percentage arriving here was read off the provider's own usage page, so
-    # it is the real share of a real window. Stamp the window it belongs to, so
-    # the next local recompute preserves it instead of blanking it and dropping
-    # back to a token count. Only a window that actually carried a percentage
-    # gets stamped.
-    synced_at = datetime.now(timezone.utc).isoformat()
-    if payload.session_percent_used is not None or payload.session_percent_left is not None:
-        acc.session_telemetry_synced_at = synced_at
-    if payload.weekly_percent_used is not None or payload.weekly_percent_left is not None:
-        acc.weekly_telemetry_synced_at = synced_at
-    if payload.plan_name:
-        acc.plan_name = payload.plan_name
-    if payload.plan_label:
-        acc.plan_label = payload.plan_label
-    if payload.session_title:
-        acc.session_title = payload.session_title
-    if payload.session_reset_time:
-        acc.session_reset_time = payload.session_reset_time
-        acc.reset_time = payload.session_reset_time
-    if payload.session_percent_used is not None:
-        acc.session_percent_used = payload.session_percent_used
-        acc.percent_used = payload.session_percent_used
-        acc.session_percent_left = round(100.0 - payload.session_percent_used, 1)
-    if payload.session_percent_left is not None:
-        acc.session_percent_left = payload.session_percent_left
-    if payload.weekly_title:
-        acc.weekly_title = payload.weekly_title
-    if payload.weekly_reset_time:
-        acc.weekly_reset_time = payload.weekly_reset_time
-    if payload.weekly_percent_used is not None:
-        acc.weekly_percent_used = payload.weekly_percent_used
-        acc.weekly_percent_left = round(100.0 - payload.weekly_percent_used, 1)
-    if payload.weekly_percent_left is not None:
-        acc.weekly_percent_left = payload.weekly_percent_left
-    if payload.weekly_breakdown is not None:
-        acc.weekly_breakdown = payload.weekly_breakdown
-    if payload.tokens_limit is not None:
-        acc.tokens_limit = payload.tokens_limit
-    if payload.tokens_used is not None:
-        acc.tokens_used = payload.tokens_used
-        acc.tokens_remaining = (
-            max(0, acc.tokens_limit - acc.tokens_used) if acc.tokens_limit is not None else None
+
+    account = UsageAccount(**raw)
+    windows = payload.to_windows()
+    if not windows:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This sync carried no usage window. Open the provider's usage "
+                "page and run the snippet again."
+            ),
         )
 
-    acc.last_checked = datetime.now(timezone.utc).isoformat()
-    acc.status = "active"
-    acc.error_message = None
+    built: List[UsageWindow] = []
+    for window in windows:
+        children: List[UsageWindow] = []
+        for row in window.breakdown or []:
+            if not isinstance(row, dict):
+                continue
+            percent = row.get("percent_used")
+            label = (row.get("label") or "").strip()
+            if percent is None or not label:
+                continue
+            try:
+                value = float(percent)
+            except (TypeError, ValueError):
+                continue
+            children.append(
+                UsageWindow(
+                    key=f"{window.key}_{label.lower().replace(' ', '_')}",
+                    label=label,
+                    unit=UNIT_PERCENT,
+                    used=value,
+                    limit=100.0,
+                    window_end=parse_instant(row.get("window_end")),
+                )
+            )
+        built.append(
+            UsageWindow(
+                key=window.key,
+                label=window.label or window.key.title(),
+                unit=UNIT_PERCENT,
+                used=float(window.percent_used),
+                limit=100.0,
+                # None when the page gave no absolute instant. The card then
+                # shows no countdown, which is correct, rather than a stale one.
+                window_end=parse_instant(window.window_end),
+                is_active=window.key == "session",
+                breakdown=children,
+            )
+        )
 
-    db.save_usage_account(acc.model_dump())
+    account.observation = UsageObservation(
+        source="browser_sync",
+        confidence=CONFIDENCE_MEASURED,
+        windows=built,
+        plan=PlanInfo(name=payload.plan_name, label=payload.plan_label),
+        # A synced window describes a window that is open now. It is treated as
+        # current for an hour, after which the card marks it stale and a real
+        # adapter read takes over.
+        expected_refresh_seconds=1800,
+    )
+    db.save_usage_account(account.model_dump())
+
+    view = account.masked()
     engine = get_engine(request)
     engine._sync_broadcast("global", "usage_account_telemetry_updated", {
-        "id": acc.id,
-        "name": acc.name,
-        "session_percent_used": acc.session_percent_used,
-        "weekly_percent_used": acc.weekly_percent_used
+        "id": account.id,
+        "name": account.name,
+        "session_percent_used": view["session_percent_used"],
+        "weekly_percent_used": view["weekly_percent_used"],
     })
-    return acc.masked()
+    return view
+
+
+@router.post("/usage/accounts/discover", response_model=Dict[str, Any])
+def discover_usage_accounts(request: Request):
+    """Add an account for every signed-in agent tool that has none yet.
+
+    A fresh install is seeded at startup. This is how an install picks up a
+    tool that was installed later, without the operator having to know which
+    credential file to point at: every adapter reads the tool's own sign-in, so
+    there is nothing to type in.
+
+    Accounts that already exist are left untouched, so this is safe to run
+    repeatedly.
+    """
+    db = request.app.state.db
+    existing = db.list_usage_accounts()
+    have = [account.get("provider") for account in existing]
+
+    added: List[Dict[str, Any]] = []
+    for found in missing_providers(have):
+        account = UsageAccount(
+            id=f"{found['provider']}-{uuid.uuid4().hex[:6]}",
+            provider=found["provider"],
+            name=found["name"],
+            auth_type="session_token",
+            credential="",
+            plan_name=found.get("plan_name") or "Unknown",
+        )
+        account.observation = fetch_observation(account)
+        db.save_usage_account(account.model_dump())
+        added.append(account.masked())
+
+    if added:
+        engine = get_engine(request)
+        engine._sync_broadcast("global", "usage_accounts_discovered", {
+            "added": [account["provider"] for account in added],
+        })
+
+    return {
+        "added": added,
+        "already_present": sorted({p for p in have if p}),
+    }
+
+
+@router.get("/usage/providers", response_model=List[Dict[str, str]])
+def list_usage_providers():
+    """The providers that have an adapter, for the Add Account dropdown.
+
+    The dropdown is generated from this so it cannot drift out of step with the
+    registry. A hand-written list was how AntiGravity came to be missing from
+    the UI while being named everywhere else in the product.
+    """
+    return provider_options()
+
+
+@router.get("/usage/accounts/{account_id}/sync-snippet", response_model=Dict[str, Any])
+def usage_sync_snippet(account_id: str, request: Request):
+    """The browser snippet for this account, generated with its real details.
+
+    The snippets used to be hardcoded in the page with account IDs that did not
+    match any account, no port, and no token, so every sync returned 404 or 401
+    inside a silent catch and then claimed success. Generating per account is
+    what makes the sync work at all.
+    """
+    db = request.app.state.db
+    raw = db.get_usage_account(account_id)
+    if not raw:
+        raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found.")
+    account = UsageAccount(**raw)
+
+    # The snippet must carry the token this hub actually enforces, or the POST
+    # returns 401. The previous hardcoded snippets sent none at all.
+    token = getattr(request.app.state, "auth_token", None) or get_or_create_pairing_token()
+    origin = str(request.base_url).rstrip("/")
+
+    return {
+        "account_id": account.id,
+        "provider": account.provider,
+        "endpoint": f"{origin}/api/usage/accounts/{account.id}/telemetry",
+        "token": token,
+        "usage_page": _USAGE_PAGES.get(account.provider),
+        "snippet": build_sync_snippet(account.provider, account.id, origin, token),
+    }
 
 
 @router.post("/usage/detect-local-token")
@@ -737,17 +849,18 @@ def refresh_usage_account(account_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found.")
 
     account = UsageAccount(**raw)
-    account = fetch_account_usage(account)
+    account.observation = fetch_observation(account)
     db.save_usage_account(account.model_dump())
 
+    view = account.masked()
     engine = get_engine(request)
     engine._sync_broadcast("global", "usage_refreshed", {
         "id": account.id,
         "provider": account.provider,
-        "percent_used": account.percent_used
+        "percent_used": view["percent_used"],
     })
 
-    return account.masked()
+    return view
 
 
 @router.post("/usage/refresh-all", response_model=List[Dict[str, Any]])
@@ -759,8 +872,14 @@ def refresh_all_usage_accounts(request: Request):
 
     for raw in raw_accounts:
         acc = UsageAccount(**raw)
-        acc = fetch_account_usage(acc)
-        db.save_usage_account(acc.model_dump())
+        try:
+            acc.observation = fetch_observation(acc)
+        except UnknownProvider as exc:
+            # One unregistered account must not stop the others refreshing.
+            acc.observation = None
+            acc.error_message = str(exc)
+        else:
+            db.save_usage_account(acc.model_dump())
         refreshed_list.append(acc.masked())
 
     engine = get_engine(request)

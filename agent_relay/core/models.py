@@ -6,6 +6,9 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
+from .usage.models import UsageObservation
+from .usage.render import legacy_status, project_legacy_fields, render_observation
+
 
 def _get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -188,13 +191,17 @@ class UsageAccount(BaseModel):
     weekly_percent_used: Optional[float] = None # e.g. 0.0, 3.0
     weekly_percent_left: Optional[float] = None # e.g. 100.0, 97.0
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None # e.g. [{"label": "All models", "percent_used": 0, "reset_time": "Resets Sat 7:00 PM"}, {"label": "Fable", ...}]
-    # When a genuine telemetry sync last wrote each window's percentage. They
-    # mark a figure as measured on the provider's own usage page rather than
-    # derived here, so a later local recompute knows not to throw it away. Only
-    # the telemetry endpoint sets them, and only for the window whose percentage
-    # the payload actually carried.
+    # Retained only so a row written by an older version still loads. Nothing
+    # reads them. The telemetry-replay mechanism they served is gone: it kept a
+    # synced percentage for seven days and wrote it back over every fresh read,
+    # re-marking the account active, which is how a three-day-old figure came to
+    # be shown as current. See docs/adr/ADR-USAGE-OBSERVATIONS.md.
     session_telemetry_synced_at: Optional[str] = None
     weekly_telemetry_synced_at: Optional[str] = None
+
+    # The single source of truth for every figure on the card. Everything a
+    # human sees is computed from this at request time and never stored.
+    observation: Optional[UsageObservation] = None
 
     def __init__(self, **data):
         if "auth_credential" in data and not data.get("credential"):
@@ -209,18 +216,59 @@ class UsageAccount(BaseModel):
         return "****"
 
     def masked(self) -> Dict[str, Any]:
-        """Return dict with sensitive credentials masked."""
+        """The account as the API returns it, with the credential masked.
+
+        Every figure is derived from ``observation`` here, at this moment, and
+        none of it is written back. A countdown produced at read time cannot be
+        stale, which is the defect that made the Claude card wrong.
+
+        ``usage`` is the shape the rebuilt front end reads. The flat fields
+        beside it are projected for the older markup and go away with it.
+        """
         d = self.model_dump()
         masked_c = self.masked_credential
         d["credential"] = masked_c
         d["masked_credential"] = masked_c
-        d["last_synced_at"] = self.last_checked
+
+        d["usage"] = render_observation(self.observation)
+        d.update(project_legacy_fields(self.observation))
+        d["status"] = legacy_status(self.observation)
+        d["error_message"] = self.observation.error if self.observation else None
+        measured_at = d["usage"].get("measured_at")
+        d["last_checked"] = measured_at or self.last_checked
+        d["last_synced_at"] = d["last_checked"]
         return d
 
 
+class UsageTelemetryWindow(BaseModel):
+    """One window read off a provider's own usage page.
+
+    ``window_end`` is an absolute ISO instant, computed in the browser from
+    whatever the page showed. The countdown text itself is never sent, because
+    it is only true at the moment it is read.
+    """
+
+    key: str                                 # "session" or "week"
+    label: Optional[str] = None
+    percent_used: float
+    window_end: Optional[str] = None         # ISO instant, not a countdown
+    breakdown: Optional[List[Dict[str, Any]]] = None
+
+
 class UsageTelemetryPayload(BaseModel):
+    """What a browser sync sends.
+
+    ``windows`` is the shape the generated snippets use. The flat fields below
+    it are accepted so a snippet from an older build still lands, but a reset
+    countdown sent as text is discarded rather than stored: it cannot be turned
+    back into an instant, and storing it is the defect this rebuild removes.
+    """
+
     plan_name: Optional[str] = None
     plan_label: Optional[str] = None
+    windows: Optional[List[UsageTelemetryWindow]] = None
+
+    # Accepted for compatibility. Percentages are used, reset strings are not.
     session_title: Optional[str] = None
     session_reset_time: Optional[str] = None
     session_percent_used: Optional[float] = None
@@ -233,6 +281,30 @@ class UsageTelemetryPayload(BaseModel):
     tokens_used: Optional[int] = None
     tokens_limit: Optional[int] = None
     percent_used: Optional[float] = None
+
+    def to_windows(self) -> List[UsageTelemetryWindow]:
+        """Normalise whichever shape arrived into a list of windows."""
+        if self.windows:
+            return list(self.windows)
+        built: List[UsageTelemetryWindow] = []
+        if self.session_percent_used is not None:
+            built.append(
+                UsageTelemetryWindow(
+                    key="session",
+                    label=self.session_title or "Session",
+                    percent_used=self.session_percent_used,
+                )
+            )
+        if self.weekly_percent_used is not None:
+            built.append(
+                UsageTelemetryWindow(
+                    key="week",
+                    label=self.weekly_title or "Weekly",
+                    percent_used=self.weekly_percent_used,
+                    breakdown=self.weekly_breakdown,
+                )
+            )
+        return built
 
 
 class CreateUsageAccountRequest(BaseModel):
