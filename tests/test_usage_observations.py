@@ -288,9 +288,18 @@ def test_the_page_holds_no_hardcoded_account_ids():
         assert dead_id not in html, f"{dead_id} is back in the page"
 
 
-def test_a_provider_with_no_usage_page_gets_no_snippet():
-    assert build_sync_snippet("antigravity", "acc", "http://h", "t") is None
+def test_a_provider_with_nothing_to_read_gets_no_snippet():
+    """Only DeepSeek and a local harness have no readable page.
+
+    AntiGravity does have one: its model picker, which its own app displays.
+    Asserting otherwise here was a consequence of having only inspected the agy
+    CLI, which publishes nothing.
+    """
+    assert build_sync_snippet("deepseek", "acc", "http://h", "t") is None
     assert build_sync_snippet("custom", "acc", "http://h", "t") is None
+    # Both of these read AntiGravity's panel, so both get a script.
+    assert build_sync_snippet("antigravity", "acc", "http://h", "t")
+    assert build_sync_snippet("gemini", "acc", "http://h", "t")
 
 
 # ---------------------------------------------------------------------------

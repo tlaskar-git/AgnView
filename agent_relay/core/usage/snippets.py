@@ -29,8 +29,11 @@ from typing import Optional
 USAGE_PAGES = {
     "claude": "https://claude.ai/settings/usage",
     "chatgpt": "https://chatgpt.com/codex/settings/usage",
-    "gemini": "https://gemini.google.com/",
-    "antigravity": None,
+    # Gemini's own site carries no quota figure, and Google no longer serves
+    # Code Assist quota to the CLI for personal accounts. The figure is in
+    # AntiGravity's model picker, which is where both of these snippets read.
+    "gemini": "AntiGravity's model picker (its own DevTools console)",
+    "antigravity": "AntiGravity's model picker (its own DevTools console)",
     "deepseek": None,
     "custom": None,
 }
@@ -39,7 +42,9 @@ USAGE_PAGES = {
 # outcome, including a failure, instead of swallowing it.
 _POST_HELPER = """
   async function send(payload) {
-    payload.plan_name = payload.plan_name || null;
+    // The payload is sent exactly as the reader built it. Adding a field here
+    // would put this script out of step with the Python parser that reads the
+    // same panel, and a test compares the two payloads for equality.
     const body = JSON.stringify(payload, null, 2);
     try { if (typeof copy === 'function') copy(body); } catch (e) {}
     console.log('[AgnView] read from this page:', payload);
@@ -186,53 +191,139 @@ _CHATGPT_BODY = """
   });
 """
 
-_GEMINI_BODY = """
-  const text = document.body.innerText;
+# AntiGravity prints one "Weekly Limit Remaining" and one "Five Hour Limit
+# Remaining" per model group in its model picker, for its own models and for
+# Gemini's. The automatic read in ``agent_relay.core.antigravity`` gets these
+# through the app's debug port; this snippet is the fallback for someone who
+# wants the figure without that, and it carries the same rules.
+#
+# Two copies of a rule drift apart, so tests/test_antigravity_cdp.py runs this
+# script in Node and the Python parser over the same panel fixtures and fails if
+# the two payloads differ. Sending the Python parser's output over the debug
+# port instead was not an option here: this runs in the operator's own console,
+# with no hub involvement until the POST.
+_ANTIGRAVITY_BODY = """
+  // Open AntiGravity's model picker first, so the usage panel is on screen and
+  // its text is in the DOM this script reads.
+  const bodyText = (document.body && document.body.innerText) || '';
+  const lines = bodyText.split('\\n').map(function (l) { return l.trim(); }).filter(Boolean);
 
-  function instantFromAbsolute(raw) {
-    if (!raw) return null;
-    const parsed = Date.parse(raw);
-    return isNaN(parsed) ? null : new Date(parsed).toISOString();
+  // A group heading names a family of models, for example "Gemini Models" or
+  // "Claude and GPT models". Every limit line under it belongs to that group
+  // until the next heading, so both groups are read, not just the first.
+  const isGroupHeading = function (line) {
+    return /\\bmodels?\\s*$/i.test(line) && !/%/.test(line)
+      && !/limit/i.test(line) && line.length <= 60;
+  };
+
+  // The wording says whether the number is what is left or what is spent. A
+  // line that says neither is skipped rather than read the wrong way round.
+  const limitPattern = /^(five[\\s-]?hour|5[\\s-]?hour|weekly)\\s+limit(?:\\s+(remaining|left|used))?\\b/i;
+  const percentOnLine = /(\\d+(?:\\.\\d+)?)\\s*%/;
+  const percentAlone = /^(\\d+(?:\\.\\d+)?)\\s*%$/;
+  const round1 = function (n) { return Math.round(n * 10) / 10; };
+
+  const groups = [];
+  let current = null;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (isGroupHeading(line)) {
+      current = { group: line, windows: {} };
+      groups.push(current);
+      continue;
+    }
+    const limitMatch = line.match(limitPattern);
+    if (!limitMatch || !current) continue;
+    const sense = (limitMatch[2] || '').toLowerCase();
+    if (!sense) continue;
+    // The figure sits on the label's own line, or on one of the next two lines
+    // when the panel puts it underneath.
+    let percentMatch = line.match(percentOnLine);
+    for (let k = i + 1; !percentMatch && k < lines.length && k <= i + 2; k++) {
+      percentMatch = lines[k].match(percentAlone);
+    }
+    if (!percentMatch) continue;
+    const value = parseFloat(percentMatch[1]);
+    const used = sense === 'used' ? value : round1(100 - value);
+    const left = sense === 'used' ? round1(100 - value) : value;
+    const key = /weekly/i.test(limitMatch[1]) ? 'weekly' : 'session';
+    current.windows[key] = {
+      title: line.replace(percentOnLine, '').trim(), used: used, left: left
+    };
   }
 
-  const windows = [];
-  const current = text.match(/Current usage[\\s\\S]*?Resets at ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
-  if (current) {
-    windows.push({ key: 'session', label: 'Current usage',
-                   percent_used: parseFloat(current[2]),
-                   window_end: instantFromAbsolute(current[1]) });
-  }
-  const weekly = text.match(/Weekly limit[\\s\\S]*?Resets on ([^\\n]+)[\\s\\S]*?(\\d+)%\\s*used/i);
-  if (weekly) {
-    windows.push({ key: 'week', label: 'Weekly limit',
-                   percent_used: parseFloat(weekly[2]),
-                   window_end: instantFromAbsolute(weekly[1]) });
-  }
+  const weeklyRows = [];
+  const sessionRows = [];
+  groups.forEach(function (g) {
+    if (g.windows.weekly) {
+      weeklyRows.push({
+        group: g.group,
+        weekly_title: g.windows.weekly.title,
+        weekly_percent_used: g.windows.weekly.used,
+        weekly_percent_left: g.windows.weekly.left
+      });
+    }
+    if (g.windows.session) {
+      sessionRows.push({
+        group: g.group,
+        session_title: g.windows.session.title,
+        session_percent_used: g.windows.session.used,
+        session_percent_left: g.windows.session.left
+      });
+    }
+  });
 
-  if (!windows.length) {
-    alert('[AgnView] Nothing was read from this page. Open the Gemini usage page '
-          + 'and run this again.');
+  // Only what the window actually said. A group or a window that could not be
+  // read is left out, so a failed scrape reports nothing rather than a guess.
+  if (weeklyRows.length === 0 && sessionRows.length === 0) {
+    alert('[AgnView] Nothing was read from this window. Open the model picker '
+          + 'so the usage panel is on screen, then run this again.');
     return;
   }
-  const plan = text.match(/Usage limits\\s+([^\\n]+)/i);
-  await send({ plan_label: plan ? plan[1].trim() : null, windows: windows });
+
+  const payload = { provider: 'gemini' };
+  if (weeklyRows.length > 0) {
+    payload.weekly_breakdown = weeklyRows;
+    // The headline figure is the group closest to its limit, so the single
+    // number on the card is the one that actually constrains the account. It is
+    // picked from the rows above, never computed out of nothing.
+    const tightest = weeklyRows.reduce(function (a, b) {
+      return b.weekly_percent_used > a.weekly_percent_used ? b : a;
+    });
+    payload.weekly_title = tightest.weekly_title;
+    payload.weekly_percent_used = tightest.weekly_percent_used;
+    payload.weekly_percent_left = tightest.weekly_percent_left;
+  }
+  if (sessionRows.length > 0) {
+    payload.session_breakdown = sessionRows;
+    const tightest = sessionRows.reduce(function (a, b) {
+      return b.session_percent_used > a.session_percent_used ? b : a;
+    });
+    payload.session_title = tightest.session_title;
+    payload.session_percent_used = tightest.session_percent_used;
+    payload.session_percent_left = tightest.session_percent_left;
+  }
+
+  await send(payload);
 """
 
 _BODIES = {
     "claude": _CLAUDE_BODY,
     "chatgpt": _CHATGPT_BODY,
-    "gemini": _GEMINI_BODY,
+    # Both read AntiGravity's model picker, because that is where the figures
+    # for both actually are.
+    "gemini": _ANTIGRAVITY_BODY,
+    "antigravity": _ANTIGRAVITY_BODY,
 }
 
 
 def build_sync_snippet(
     provider: str, account_id: str, origin: str, token: str
 ) -> Optional[str]:
-    """The snippet for this account, or None when the provider has no page.
+    """The snippet for this account, or None when there is nothing to read.
 
-    AntiGravity, DeepSeek and a local harness publish no usage page worth
-    scraping, and their adapters read a real source directly, so no snippet is
-    generated for them.
+    DeepSeek and a local harness have no page: their adapters read a real
+    source directly, so there is never a script to paste for them.
     """
     body = _BODIES.get((provider or "").lower())
     if body is None:

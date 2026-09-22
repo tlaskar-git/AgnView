@@ -36,8 +36,9 @@ SOURCE_LABELS: Dict[str, str] = {
     # Gemini
     "gemini_code_assist": "Google Code Assist tier",
     "gemini_api_key": "Gemini API key check",
-    # AntiGravity
-    "agy_local_server": "AntiGravity local server",
+    # AntiGravity. The panel is the only source on this machine that yields a
+    # real percentage for either AntiGravity or Gemini.
+    "agy_panel": "AntiGravity usage panel",
     "agy_log": "AntiGravity log",
     # Others
     "deepseek_api": "DeepSeek account balance",

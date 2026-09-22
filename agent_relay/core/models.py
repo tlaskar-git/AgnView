@@ -7,11 +7,21 @@ from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
 from .usage.models import UsageObservation
+from .usage.snippets import USAGE_PAGES
 from .usage.render import legacy_status, project_legacy_fields, render_observation
 
 
 def _get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _provider_has_usage_page(provider: Optional[str]) -> bool:
+    """True when this provider has a page a browser sync could read.
+
+    AntiGravity, DeepSeek and a local harness have none: their adapters read a
+    real source directly, so there is never a script to paste for them.
+    """
+    return bool(USAGE_PAGES.get((provider or "").strip().lower()))
 
 
 def agent_role_of(assigned_agent: str) -> str:
@@ -149,6 +159,28 @@ class TaskWaitResponse(BaseModel):
 
 # ----------------- Subscription Usage & Quota Models -----------------
 
+# Providers whose only real quota percentage comes from the browser telemetry
+# sync. Matched as substrings, so "anthropic" and "google" land here too.
+_TELEMETRY_SYNC_PROVIDERS = ("claude", "anthropic", "gemini", "google", "antigravity")
+
+_PERCENT_KEYS = (
+    "percent_used",
+    "percent_left",
+    "session_percent_used",
+    "session_percent_left",
+    "weekly_percent_used",
+    "weekly_percent_left",
+)
+
+
+def rows_carry_a_percentage(rows: Optional[List[Dict[str, Any]]]) -> bool:
+    """True when any breakdown row holds a percentage something really measured."""
+    for row in rows or []:
+        if any(row.get(key) is not None for key in _PERCENT_KEYS):
+            return True
+    return False
+
+
 class UsageAccount(BaseModel):
     id: str = Field(default_factory=lambda: f"acc-{uuid.uuid4().hex[:8]}")  # e.g., "claude-pro-personal", "chatgpt-team-work"
     provider: str                            # "claude", "chatgpt", "gemini"
@@ -191,11 +223,17 @@ class UsageAccount(BaseModel):
     weekly_percent_used: Optional[float] = None # e.g. 0.0, 3.0
     weekly_percent_left: Optional[float] = None # e.g. 100.0, 97.0
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None # e.g. [{"label": "All models", "percent_used": 0, "reset_time": "Resets Sat 7:00 PM"}, {"label": "Fable", ...}]
-    # Retained only so a row written by an older version still loads. Nothing
-    # reads them. The telemetry-replay mechanism they served is gone: it kept a
-    # synced percentage for seven days and wrote it back over every fresh read,
-    # re-marking the account active, which is how a three-day-old figure came to
-    # be shown as current. See docs/adr/ADR-USAGE-OBSERVATIONS.md.
+    # AntiGravity publishes a five-hour figure per model group as well as a
+    # weekly one. The observation model carries those as breakdown rows on the
+    # window they belong to, which is what keeps the two clocks apart without a
+    # second flat field. This stays so a row written by an older version loads.
+    session_breakdown: Optional[List[Dict[str, Any]]] = None
+
+    # Retained only so an older row still loads. Nothing reads them. The
+    # telemetry-replay mechanism they served is gone: it kept a synced
+    # percentage for seven days and wrote it back over every fresh read,
+    # re-marking the account active, which is how a three-day-old figure came
+    # to be shown as current. See docs/adr/ADR-USAGE-OBSERVATIONS.md.
     session_telemetry_synced_at: Optional[str] = None
     weekly_telemetry_synced_at: Optional[str] = None
 
@@ -214,6 +252,27 @@ class UsageAccount(BaseModel):
         if len(c) > 8:
             return f"{c[:4]}...{c[-4:]}"
         return "****"
+
+    @property
+    def needs_telemetry_sync(self) -> bool:
+        """True when a browser sync is the only thing that would fill this card.
+
+        Asked by the Usage tab so a card can offer the sync. It reads the
+        observation, because that is where every figure lives now: asking for a
+        sync while an adapter is already measuring the account would send an
+        operator to paste a script they do not need.
+
+        The question is therefore not "which provider is this" but "did the
+        source ladder produce a window". A provider whose top rung works needs
+        nothing; one whose rungs all came back empty is waiting on a sync, if it
+        has a usage page at all.
+        """
+        observation = self.observation
+        if observation is None:
+            return _provider_has_usage_page(self.provider)
+        if observation.windows:
+            return False
+        return _provider_has_usage_page(self.provider)
 
     def masked(self) -> Dict[str, Any]:
         """The account as the API returns it, with the credential masked.
@@ -237,6 +296,7 @@ class UsageAccount(BaseModel):
         measured_at = d["usage"].get("measured_at")
         d["last_checked"] = measured_at or self.last_checked
         d["last_synced_at"] = d["last_checked"]
+        d["needs_telemetry_sync"] = self.needs_telemetry_sync
         return d
 
 
@@ -253,6 +313,35 @@ class UsageTelemetryWindow(BaseModel):
     percent_used: float
     window_end: Optional[str] = None         # ISO instant, not a countdown
     breakdown: Optional[List[Dict[str, Any]]] = None
+
+
+def _telemetry_rows(raw, used_key: str, title_key: str) -> Optional[List[Dict[str, Any]]]:
+    """Normalise a per-group breakdown onto one shape.
+
+    AntiGravity names its columns session_percent_used / weekly_percent_used and
+    its label session_title / weekly_title, while the claude.ai reader sends
+    percent_used and label. Both are accepted, because a sync that silently
+    dropped its breakdown would leave a headline figure with nothing under it.
+
+    Module level rather than a method: pydantic reserves underscore-prefixed
+    names on a model and hides them from instance access.
+    """
+    if not raw:
+        return None
+    rows: List[Dict[str, Any]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        percent = row.get(used_key, row.get("percent_used"))
+        label = (row.get("group") or row.get("label") or row.get(title_key) or "").strip()
+        if percent is None or not label:
+            continue
+        rows.append({
+            "label": label,
+            "percent_used": percent,
+            "window_end": row.get("window_end"),
+        })
+    return rows or None
 
 
 class UsageTelemetryPayload(BaseModel):
@@ -278,6 +367,7 @@ class UsageTelemetryPayload(BaseModel):
     weekly_percent_used: Optional[float] = None
     weekly_percent_left: Optional[float] = None
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None
+    session_breakdown: Optional[List[Dict[str, Any]]] = None
     tokens_used: Optional[int] = None
     tokens_limit: Optional[int] = None
     percent_used: Optional[float] = None
@@ -293,6 +383,9 @@ class UsageTelemetryPayload(BaseModel):
                     key="session",
                     label=self.session_title or "Session",
                     percent_used=self.session_percent_used,
+                    breakdown=_telemetry_rows(
+                        self.session_breakdown, "session_percent_used", "session_title"
+                    ),
                 )
             )
         if self.weekly_percent_used is not None:
@@ -301,7 +394,9 @@ class UsageTelemetryPayload(BaseModel):
                     key="week",
                     label=self.weekly_title or "Weekly",
                     percent_used=self.weekly_percent_used,
-                    breakdown=self.weekly_breakdown,
+                    breakdown=_telemetry_rows(
+                        self.weekly_breakdown, "weekly_percent_used", "weekly_title"
+                    ),
                 )
             )
         return built
@@ -326,6 +421,7 @@ class CreateUsageAccountRequest(BaseModel):
     weekly_percent_used: Optional[float] = None
     weekly_percent_left: Optional[float] = None
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None
+    session_breakdown: Optional[List[Dict[str, Any]]] = None
     tokens_limit: Optional[int] = None
     cost_limit_usd: Optional[float] = None
     base_url: Optional[str] = None           # Custom API base URL or local harness
@@ -352,6 +448,7 @@ class UpdateUsageAccountRequest(BaseModel):
     weekly_percent_used: Optional[float] = None
     weekly_percent_left: Optional[float] = None
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None
+    session_breakdown: Optional[List[Dict[str, Any]]] = None
 
     def get_credential(self) -> Optional[str]:
         val = self.credential or self.auth_credential

@@ -12,7 +12,19 @@ import httpx
 
 from ..base import AccountLike, SourceFn, UsageAdapter
 from ..models import PlanInfo, UsageObservation
+from .agy_panel import fetch_panel
 from .google_code_assist import REFRESH_SECONDS, fetch_code_assist
+
+
+def fetch_antigravity_panel(account: AccountLike) -> Optional[UsageObservation]:
+    """Read the Gemini limits from AntiGravity's model picker.
+
+    AntiGravity prints the Gemini model limits alongside its own, and its window
+    is reachable on a loopback debug port. That makes it the only source on this
+    machine that yields a real Gemini percentage, now that Google refuses Code
+    Assist to the CLI for personal accounts.
+    """
+    return fetch_panel("Gemini")
 
 
 def fetch_tier(account: AccountLike) -> Optional[UsageObservation]:
@@ -62,10 +74,11 @@ def fetch_api_key(account: AccountLike) -> Optional[UsageObservation]:
 class GeminiAdapter(UsageAdapter):
     provider = "gemini"
     display_name = "Google Gemini"
-    hint = "Gemini CLI sign-in, or an AIza API key"
+    hint = "Reads the AntiGravity app's panel; CLI sign-in names the account"
 
     def sources(self) -> List[Tuple[str, SourceFn]]:
         return [
+            ("agy_panel", fetch_antigravity_panel),
             ("gemini_code_assist", fetch_tier),
             ("gemini_api_key", fetch_api_key),
         ]

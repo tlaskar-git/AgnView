@@ -1144,6 +1144,9 @@
           <button onclick="openAddAccountModal()" class="flex items-center gap-2 bg-[var(--color-action)] hover:bg-[var(--color-action-hover)] text-white text-xs font-semibold px-4 py-2 rounded-xl shadow-sm transition" aria-label="Add Subscription Account">
             <i data-lucide="plus" class="w-3.5 h-3.5"></i> Add Account
           </button>
+          <button onclick="openUsageHelpModal()" class="flex items-center gap-2 bg-[var(--bg-raised)] hover:bg-[var(--border-color)] text-[var(--text-main)] border border-[var(--border-color)] text-xs font-semibold px-3.5 py-2 rounded-xl transition shadow-sm" aria-label="How live usage works">
+            <i data-lucide="circle-help" class="w-3.5 h-3.5 text-[var(--color-action)]"></i> How this works
+          </button>
         </div>
       </div>
 
@@ -1555,6 +1558,80 @@
         <button onclick="closeAddAccountModal()" class="text-[var(--text-secondary)] hover:text-[var(--text-main)] px-4 py-2">Cancel</button>
         <button onclick="submitNewAccount()" id="btn-save-account" class="font-semibold bg-[var(--color-action)] hover:bg-[var(--color-action-hover)] text-white px-5 py-2 rounded-lg shadow-sm transition">
           Connect & Probe Quota
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ========================================================================= -->
+  <!-- MODAL: HOW LIVE USAGE WORKS                                               -->
+  <!-- ========================================================================= -->
+  <div id="usage-help-modal" role="dialog" aria-modal="true" aria-labelledby="usage-help-modal-title" class="fixed inset-0 bg-black/75 backdrop-blur-sm z-50 flex items-center justify-center hidden p-4">
+    <div class="bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-xl max-w-2xl w-full p-6 shadow-2xl transition-colors max-h-[92vh] overflow-y-auto custom-scrollbar">
+      <div class="flex items-center justify-between mb-4">
+        <h3 id="usage-help-modal-title" class="text-base font-bold text-[var(--text-main)] flex items-center gap-2">
+          <i data-lucide="circle-help" class="w-4 h-4 text-[var(--color-action)]"></i> How live usage works
+        </h3>
+        <button onclick="closeUsageHelpModal()" class="text-[var(--text-secondary)] hover:text-[var(--text-main)] p-1 rounded-lg" aria-label="Close dialog">
+          <i data-lucide="x" class="w-4 h-4"></i>
+        </button>
+      </div>
+
+      <div class="space-y-5 text-xs text-[var(--text-main)] leading-relaxed">
+        <p class="text-[var(--text-secondary)]">
+          Every figure here comes from the tool's own sign-in on this machine. AgnView never stores a number: it asks each source, and the card shows what came back, which source it came from, and how long ago. A provider with nothing to report says so, with the reason, instead of showing a figure nobody measured.
+        </p>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-amber-500 dark:text-amber-400 mb-1">Claude &mdash; live, nothing to do</p>
+          <p class="mb-2">Reads Anthropic's own account usage endpoint with the sign-in Claude Code already holds on this machine, so you get the same session and weekly percentages the <code class="font-mono text-[10px]">/usage</code> command shows, including the per-model weekly limit and the split across Claude Code, chats and Cowork.</p>
+          <p class="mb-2">No cookie to paste. Earlier builds asked for the <code class="font-mono text-[10px]">sessionKey</code> from your browser; that step is gone.</p>
+          <p>AgnView only ever reads that sign-in and never writes to it, because the file belongs to Claude Code and rewriting it would risk your login. So if the token has gone stale, the card says exactly that and asks you to start Claude Code, which refreshes it by itself.</p>
+        </div>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-emerald-500 dark:text-emerald-400 mb-1">ChatGPT / Codex &mdash; live, nothing to do</p>
+          <p>Reads a real API (<code class="font-mono text-[10px]">/backend-api/wham/usage</code>) with the token from your Codex CLI sign-in at <code class="font-mono text-[10px]">~/.codex/auth.json</code>. The 5-hour and weekly windows update on every refresh.</p>
+        </div>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-violet-500 dark:text-violet-400 mb-2">AntiGravity and Gemini &mdash; keep AntiGravity open</p>
+          <p class="mb-2"><b>This is the one thing on this page that needs you.</b> Both of these figures come from the same place: the AntiGravity <b>desktop app</b>, which prints its own limits and the Gemini model limits side by side in its model picker. Nothing else on this machine publishes either number.</p>
+          <ol class="list-decimal list-inside space-y-1 ml-1 mb-2">
+            <li>Open the <b>AntiGravity desktop app</b> and leave it running. The <code class="font-mono text-[10px]">agy</code> command line on its own publishes no figure, so the app is what matters.</li>
+            <li>Open its <b>model picker</b> so the Five Hour and Weekly figures are on screen.</li>
+            <li>Refresh here while that panel is still showing.</li>
+          </ol>
+          <p class="mb-2">While the app is open, AgnView reads the panel by itself over AntiGravity's own local debug connection. Nothing to paste, no console. The catch is timing: the panel is a hover menu that closes the moment you click elsewhere, including clicking into this window, so a scheduled refresh only catches a figure when the panel happens to be open at that moment. That is why the card can say "AntiGravity is running, but its usage panel is not on screen" &mdash; it is telling you which of the two steps is missing.</p>
+          <p class="mb-2">If the timing is awkward, the card's <b>Edit</b> screen gives you a snippet to paste into AntiGravity's own DevTools console instead, which reads the same panel and posts the same figures.</p>
+          <p>Why there is no paste-once, live-forever option: AntiGravity holds its credential inside the running process and binds a new local port every time it starts, so there is nothing stable for AgnView to keep. Separately, Google has stopped serving Code Assist quota to the Gemini CLI for personal accounts and points at AntiGravity instead, so the AntiGravity panel is now the only route to a Gemini figure as well.</p>
+        </div>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-blue-500 dark:text-blue-400 mb-1">DeepSeek and local harnesses &mdash; live, nothing to do</p>
+          <p>DeepSeek reports your account balance from its own API with the key you added. That is money, not a share of a window, so it shows as a balance with no progress bar. A local harness (Ollama, vLLM, LM Studio) enforces no quota at all, so its card confirms the endpoint answers and shows no figure, because there is none to show.</p>
+        </div>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-[var(--text-main)] mb-2">Reading the cards</p>
+          <ul class="list-disc list-inside space-y-1 ml-1">
+            <li><b>Source and age</b>, on every card: which source produced the figure and how long ago. A reading that has gone stale is marked, so an old number can never pass for a current one.</li>
+            <li><b>Countdowns are live.</b> AgnView stores the instant a window ends, never the words, so the time remaining is worked out fresh every time you load the page and stays right across restarts.</li>
+            <li><b>No bar means no published limit.</b> A figure with no denominator, such as a token count or a balance, shows the number and no progress bar rather than implying a limit nobody published.</li>
+            <li><b>"binding"</b> marks the window the provider says is the one currently constraining the account, which is not always the highest percentage.</li>
+            <li><b>"derived"</b> means AgnView worked the figure out on this machine rather than the provider reporting it, so it is real but is not a share of a plan limit.</li>
+          </ul>
+        </div>
+
+        <div class="border border-[var(--border-color)] rounded-lg p-3.5 bg-[var(--bg-raised)]">
+          <p class="font-bold text-[var(--text-main)] mb-1">A new install</p>
+          <p>Nothing to set up. On first start AgnView finds the agent tools already signed in on the machine and adds a card for each, so usage is correct straight away. Install another tool later and <b>Add Account</b> picks it up. No provider needs a credential pasted in except DeepSeek, which has no local sign-in to read.</p>
+        </div>
+      </div>
+
+      <div class="mt-6 flex items-center justify-end text-xs">
+        <button onclick="closeUsageHelpModal()" class="font-semibold bg-[var(--color-action)] hover:bg-[var(--color-action-hover)] text-white px-5 py-2 rounded-lg shadow-sm transition">
+          Got it
         </button>
       </div>
     </div>
@@ -5974,6 +6051,26 @@
       const provenance = usageProvenanceHtml(acc);
       const planDisplay = acc.plan_label ? `${escapeHtml(acc.plan_label)}` : `${escapeHtml(acc.plan_name || 'Standard Tier')}`;
 
+      // A one-time browser sync is the only way Claude and Gemini ever show a
+      // real percentage, and the step is easy to miss when it lives inside the
+      // Add Account modal. The hub computes needs_telemetry_sync, which is true
+      // only for a provider that can hold a synced percentage and holds none.
+      // ChatGPT reads a real API, so it never carries this prompt.
+      const syncHint = acc.needs_telemetry_sync ? telemetrySyncHint(acc.provider) : null;
+      const syncCtaHtml = syncHint ? `
+              <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg p-2.5 space-y-2">
+                <div class="flex items-start gap-1.5">
+                  <i data-lucide="alert-circle" class="w-3.5 h-3.5 text-amber-500 dark:text-amber-400 shrink-0 mt-0.5"></i>
+                  <div class="text-[11px] text-[var(--text-main)] leading-snug">
+                    <span class="font-semibold">One-time browser sync needed for a real percentage.</span>
+                    <span class="text-[var(--text-secondary)]">${escapeHtml(syncHint.detail)}</span>
+                  </div>
+                </div>
+                <button id="sync-cta-${acc.id}" onclick="copyTelemetryExtractorForAccount('${acc.id}', '${acc.provider}')" class="w-full text-[11px] bg-[var(--bg-raised)] hover:bg-[var(--bg-surface-hover)] border border-amber-500/40 text-[var(--text-main)] px-2 py-1.5 rounded-lg flex items-center justify-center gap-1.5 transition font-medium">
+                  <i data-lucide="copy" class="w-3 h-3 text-amber-500 dark:text-amber-400"></i> ${escapeHtml(syncHint.button)}
+                </button>
+              </div>` : '';
+
       // =========================================================================
       // DEDICATED GEMINI TELEMETRY: Matches Google Antigravity / Gemini Desktop IDE
       // =========================================================================
@@ -5981,7 +6078,26 @@
         // Only groups the hub actually received. There is no stand-in set:
         // this card used to draw two model groups with invented percentages
         // whenever the API sent none.
-        const groups = (acc.weekly_breakdown && acc.weekly_breakdown.length > 0) ? acc.weekly_breakdown : [];
+        //
+        // The two windows arrive in separate fields because they age out on
+        // separate clocks, five hours against seven days, so they are joined
+        // back together here on the group name the provider printed. A row that
+        // carries both windows at once still works unchanged.
+        const geminiRows = [
+          ...((acc.weekly_breakdown && acc.weekly_breakdown.length > 0) ? acc.weekly_breakdown : []),
+          ...((acc.session_breakdown && acc.session_breakdown.length > 0) ? acc.session_breakdown : [])
+        ];
+        const geminiByGroup = new Map();
+        geminiRows.forEach(row => {
+          const key = String(row.group || row.label || 'Models');
+          const merged = geminiByGroup.get(key) || { group: key };
+          Object.keys(row).forEach(field => {
+            if (row[field] !== null && row[field] !== undefined) merged[field] = row[field];
+          });
+          merged.group = key;
+          geminiByGroup.set(key, merged);
+        });
+        const groups = Array.from(geminiByGroup.values());
 
         return `
           <div class="bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-xl p-4 flex flex-col justify-between shadow-sm relative transition hover:border-slate-500/40 min-h-[350px]">
@@ -6005,6 +6121,7 @@
 
               <!-- Model group quota telemetry, when the provider reports any -->
               <div class="space-y-3">
+                ${syncCtaHtml}
                 ${groups.length === 0 ? noticeHtml : ''}
                 ${groups.map((grp, idx) => {
                   const hasWeeklyLimit = (grp.weekly_percent_used !== null && grp.weekly_percent_used !== undefined) || (grp.weekly_percent_left !== null && grp.weekly_percent_left !== undefined);
@@ -6111,6 +6228,7 @@
 
             <!-- Every limit window the source reported -->
             <div class="space-y-2.5">
+              ${syncCtaHtml}
               ${noticeHtml}
               ${limitsHtml}
             </div>
@@ -6282,6 +6400,17 @@
       document.getElementById('add-account-modal').classList.add('hidden');
     }
 
+    function openUsageHelpModal() {
+      document.getElementById('usage-help-modal').classList.remove('hidden');
+      trapModalFocus('usage-help-modal');
+      safeCreateIcons();
+    }
+
+    function closeUsageHelpModal() {
+      untrapModalFocus();
+      document.getElementById('usage-help-modal').classList.add('hidden');
+    }
+
     function onProviderChange() {
       const provider = document.getElementById('acc-provider').value;
       const planInput = document.getElementById('acc-plan');
@@ -6302,12 +6431,12 @@
       } else if (provider === 'gemini') {
         planInput.placeholder = 'Gemini Pro / Advanced';
         credInput.placeholder = 'Leave empty to use the Gemini CLI sign-in';
-        if (helperText) helperText.innerHTML = '<b>Gemini:</b> leave the credential empty. AgnView reads the Gemini sign-in at <code>~/.gemini/oauth_creds.json</code>. Google publishes no quota figure for an <code>AIzaSy...</code> key, so one is only checked for validity.';
+        if (helperText) helperText.innerHTML = '<b>Gemini:</b> leave the credential empty. Google no longer serves Code Assist quota to the Gemini CLI for personal accounts, and an <code>AIzaSy...</code> key carries no quota either. The working source is the AntiGravity <b>desktop app</b>, which prints the Gemini limits in its model picker: keep it open with that panel on screen.';
         if (baseContainer) baseContainer.classList.add('hidden');
       } else if (provider === 'antigravity') {
         planInput.placeholder = 'AntiGravity';
         credInput.placeholder = 'Leave empty to use the AntiGravity sign-in';
-        if (helperText) helperText.innerHTML = '<b>AntiGravity:</b> leave the credential empty. AgnView reads the Google sign-in AntiGravity shares, and its own log for the last quota refresh. Run <code>agy</code> and sign in, or the card will say it is signed out.';
+        if (helperText) helperText.innerHTML = '<b>AntiGravity:</b> leave the credential empty. AgnView reads the figure from the AntiGravity <b>desktop app</b>, through the app\'s own local debug port. Keep the app open with its usage panel on screen (the model picker) and the number appears by itself. The <code>agy</code> CLI does not publish a figure.';
         if (baseContainer) baseContainer.classList.add('hidden');
       } else if (provider === 'deepseek') {
         planInput.placeholder = 'DeepSeek-V3 / DeepSeek-R1';
@@ -6515,6 +6644,62 @@
       } catch (err) {
         report('Could not build the snippet: ' + err.message);
       }
+    }
+
+    // What a card says when a browser sync is the only thing that would fill
+    // it, and what its button offers.
+    //
+    // Claude is deliberately absent: it reads Anthropic's own account usage
+    // endpoint with the Claude Code sign-in and needs no sync at all. Telling
+    // an operator to paste a cookie for it, as an earlier build did, sent them
+    // to do work the adapter already does.
+    function telemetrySyncHint(provider) {
+      if (provider === 'gemini' || provider === 'antigravity') {
+        return {
+          detail: 'Open the AntiGravity desktop app and bring its model picker on screen, so the Five Hour and Weekly figures are showing, then click Refresh here. AgnView reads them from AntiGravity\'s own local debug port, with nothing to paste. The panel closes when you click away, which is why a scheduled refresh can miss it.',
+          button: 'Copy the AntiGravity console script instead'
+        };
+      }
+      return {
+        detail: 'This provider publishes no figure AgnView can read on its own. Its usage page can be read with the script below, pasted into that page\'s own browser console.',
+        button: 'Copy the sync script for this account'
+      };
+    }
+
+    async function copyTelemetryExtractorForAccount(accountId, provider) {
+      let script = null;
+      let page = null;
+      try {
+        const res = await apiFetch('/api/usage/accounts/' + encodeURIComponent(accountId) + '/sync-snippet');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        const data = await res.json();
+        script = data.snippet;
+        page = data.usage_page;
+      } catch (err) {
+        console.error('Could not build the sync script', err);
+        showToast('Could not build the sync script: ' + err.message, 'error');
+        return;
+      }
+      if (!script) {
+        showToast('This provider has no page to read. Its card reads a real source directly.', 'info');
+        return;
+      }
+      try {
+        await navigator.clipboard.writeText(script);
+      } catch (err) {
+        console.error('Could not copy the sync script', err);
+        return;
+      }
+      const btn = document.getElementById('sync-cta-' + accountId);
+      if (!btn) return;
+      const previous = btn.innerHTML;
+      btn.innerHTML = page
+        ? '&#10003; Copied. Paste it into the console on ' + escapeHtml(page)
+        : '&#10003; Copied. Paste it into that page\'s console.';
+      setTimeout(() => {
+        btn.innerHTML = previous;
+        safeCreateIcons();
+      }, 4000);
     }
 
     async function autoDetectLocalToken(target = 'add') {

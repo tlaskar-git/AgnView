@@ -199,7 +199,21 @@ def test_the_sync_snippet_is_built_for_the_account_that_asked(client, no_local_s
     assert "localhost:8765" not in body["snippet"]
 
 
-def test_a_provider_without_a_usage_page_gets_no_snippet(client, no_local_signins):
+def test_a_provider_with_nothing_to_read_gets_no_snippet(client, no_local_signins):
+    """DeepSeek's adapter reads its API directly, so there is no script to paste."""
+    created = client.post("/api/usage/accounts", json={
+        "provider": "deepseek",
+        "name": "DeepSeek",
+        "auth_type": "api_key",
+        "auth_credential": "sk-placeholder-deepseek-key",
+    }).json()
+
+    body = client.get(f"/api/usage/accounts/{created['id']}/sync-snippet").json()
+    assert body["snippet"] is None
+
+
+def test_antigravity_gets_a_snippet_for_its_own_panel(client, no_local_signins):
+    """AntiGravity's model picker is readable, so it gets a script too."""
     created = client.post("/api/usage/accounts", json={
         "provider": "antigravity",
         "name": "AntiGravity",
@@ -208,7 +222,9 @@ def test_a_provider_without_a_usage_page_gets_no_snippet(client, no_local_signin
     }).json()
 
     body = client.get(f"/api/usage/accounts/{created['id']}/sync-snippet").json()
-    assert body["snippet"] is None
+    assert body["snippet"]
+    assert created["id"] in body["snippet"]
+    assert "model picker" in body["usage_page"]
 
 
 # ---------------------------------------------------------------------------

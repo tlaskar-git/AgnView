@@ -8,27 +8,24 @@ localhost:11434. The Add Account dropdown had no AntiGravity option either, so
 one could not be created in the first place. This module and the registry entry
 beside it are what make it a real provider.
 
-What AntiGravity does not offer, established by inspection on 2026-09-22:
+Two sources, in order.
 
-- No quota figure on disk. ``~/.gemini/antigravity-cli/cli.log`` records
-  ``GetG1Credits: starting fetch`` and ``doRefreshQuota: starting reload`` but
-  never the result, so the log says whether a refresh worked and never how much
-  is left.
-- No readable token. Signing in to AntiGravity leaves
-  ``~/.gemini/oauth_creds.json`` untouched and writes nothing to
-  ``%APPDATA%/Antigravity/app_storage.json`` or the Windows Credential Manager.
-  Its credential lives in the running process, so AgnView cannot present it to
-  Google on AntiGravity's behalf. This is also why the Gemini Code Assist source
-  is deliberately not used here: it would read the *Gemini* account's tier and
-  label it AntiGravity, which is the wrong attribution.
-- No stable local endpoint. The language server binds a fresh random port on
-  every run (logged as "listening on random port at NNNNN for HTTP") and exits
-  with the process, so there is nothing for a dashboard to poll between runs.
+The **desktop app's usage panel** carries the real figures. AntiGravity is an
+Electron app whose packaged build still opens a Chromium debug port on loopback,
+so its own window can be read while the app is open. That is handled in
+``agent_relay.core.antigravity`` and adapted in ``agy_panel``. It needs the app
+running with the model picker on screen, and both conditions are reported as
+instructions rather than worked around.
 
-So this adapter reports whether AntiGravity is signed in, and says plainly that
-no figure is published. That is the whole truthful answer available today. If
-AntiGravity later logs its credit balance or writes a quota file, this is the
-one place that has to change.
+The **CLI log** carries sign-in state and nothing else. Checked by inspection on
+2026-09-22: ``~/.gemini/antigravity-cli/cli.log`` records
+``GetG1Credits: starting fetch`` and ``doRefreshQuota: starting reload`` but
+never the result; signing in leaves ``~/.gemini/oauth_creds.json`` untouched and
+writes nothing readable to ``%APPDATA%/Antigravity/app_storage.json`` or the
+Credential Manager; and the CLI's language server binds a fresh random port on
+every run and exits with the process. So the log sits below the panel as the
+explanation for an empty card, never as a source of numbers.
+
 """
 
 import re
@@ -37,6 +34,7 @@ from pathlib import Path
 from typing import List, Optional, Tuple
 
 from ..base import AccountLike, SourceFn, UsageAdapter
+from .agy_panel import fetch_panel
 from ..models import (
     PlanInfo,
     UsageObservation,
@@ -222,10 +220,10 @@ def fetch_log(account: AccountLike) -> Optional[UsageObservation]:
     # result, and it is different from being signed out.
     observation = UsageObservation.unavailable(
         "agy_log",
-        "AntiGravity is signed in. It publishes no quota figure on this machine: "
-        "its credit refresh is logged without the numbers, and its language "
-        "server exits with the process, so there is nothing for AgnView to read. "
-        "Check your balance in AntiGravity itself.",
+        # Short on purpose. The panel rung above owns the instruction, and the
+        # ladder prints the highest rung's reason first, so repeating it here
+        # gave the card the same sentence twice.
+        "AntiGravity is signed in.",
         plan=plan,
         expected_refresh_seconds=REFRESH_SECONDS,
     )
@@ -241,10 +239,21 @@ def fetch_log(account: AccountLike) -> Optional[UsageObservation]:
     return observation
 
 
+def fetch_desktop_panel(account: AccountLike) -> Optional[UsageObservation]:
+    """Read the figure from the AntiGravity desktop app's own window."""
+    return fetch_panel("AntiGravity")
+
+
 class AntiGravityAdapter(UsageAdapter):
     provider = "antigravity"
     display_name = "AntiGravity (AGY)"
-    hint = "Reports sign-in state; AntiGravity publishes no quota figure"
+    hint = "Reads the desktop app's usage panel while the app is open"
 
     def sources(self) -> List[Tuple[str, SourceFn]]:
-        return [("agy_log", fetch_log)]
+        # The desktop app's panel carries the real figures. The CLI log carries
+        # only sign-in state, so it sits below as the explanation for an empty
+        # card rather than as a source of numbers.
+        return [
+            ("agy_panel", fetch_desktop_panel),
+            ("agy_log", fetch_log),
+        ]

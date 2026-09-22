@@ -60,7 +60,7 @@ class UsageAdapter:
         rung can still fill.
         """
         failures: List[str] = []
-        last_unavailable: Optional[UsageObservation] = None
+        empty: List[UsageObservation] = []
 
         for source_name, source_fn in self.sources():
             try:
@@ -78,16 +78,32 @@ class UsageAdapter:
                     observation.notes["skipped_sources"] = failures
                 return observation
 
-            # Applicable but empty. Remember the reason and keep walking, so a
-            # lower rung with a real figure still wins.
-            last_unavailable = observation
+            # Applicable but empty. Keep walking, so a lower rung with a real
+            # figure still wins, but keep the reason.
+            empty.append(observation)
             if observation.error:
                 failures.append(f"{source_name}: {observation.error}")
 
-        if last_unavailable is not None:
+        if empty:
+            # Report the highest rung's reason first, because that is the source
+            # that could actually have produced a figure and therefore the one
+            # worth acting on. Taking the last rung's reason instead buried the
+            # useful instruction: with AntiGravity closed, a Gemini card said
+            # "Google will not serve Code Assist" and dropped
+            # "open the AntiGravity app", which is the thing that fixes it.
+            primary = empty[0]
+            others = [
+                other.error
+                for other in empty[1:]
+                if other.error and other.error != primary.error
+            ]
+            if others:
+                primary = primary.model_copy(
+                    update={"error": " ".join([primary.error or ""] + others).strip()}
+                )
             if failures:
-                last_unavailable.notes["skipped_sources"] = failures
-            return last_unavailable
+                primary.notes["skipped_sources"] = failures
+            return primary
 
         reason = (
             "No usage source applies to this account. "
