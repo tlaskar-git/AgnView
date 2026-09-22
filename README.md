@@ -23,8 +23,16 @@ agent picks it up with the upstream summaries and artefacts attached. If one
 agent finds a defect in another's work, it can send the task back for revision,
 or mark it failed, which blocks everything downstream.
 
-**Keep an eye on quotas.** Session and weekly limits for your Claude, ChatGPT
-and Gemini subscriptions, in one place.
+**Keep an eye on quotas.** Session and weekly limits for your Claude, ChatGPT,
+Gemini, AntiGravity and DeepSeek accounts, in one place.
+
+Every figure comes from the tool's own sign-in on this machine. AgnView reads
+the Claude Code, Codex and Gemini credentials, asks each provider for the real
+windows, and shows which source a figure came from and how long ago it was
+measured. A provider that publishes no figure says so, with the reason, rather
+than showing a number nobody measured. Nothing is ever written back to those
+credential files, so a signed-out or expired tool reports that instead of being
+refreshed behind your back.
 
 AgnView runs entirely on your own machine. It is free, and there is nothing to
 sign up for.

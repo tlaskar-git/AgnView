@@ -6,9 +6,22 @@ from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 
+from .usage.models import UsageObservation
+from .usage.snippets import USAGE_PAGES
+from .usage.render import legacy_status, project_legacy_fields, render_observation
+
 
 def _get_utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _provider_has_usage_page(provider: Optional[str]) -> bool:
+    """True when this provider has a page a browser sync could read.
+
+    AntiGravity, DeepSeek and a local harness have none: their adapters read a
+    real source directly, so there is never a script to paste for them.
+    """
+    return bool(USAGE_PAGES.get((provider or "").strip().lower()))
 
 
 def agent_role_of(assigned_agent: str) -> str:
@@ -210,19 +223,23 @@ class UsageAccount(BaseModel):
     weekly_percent_used: Optional[float] = None # e.g. 0.0, 3.0
     weekly_percent_left: Optional[float] = None # e.g. 100.0, 97.0
     weekly_breakdown: Optional[List[Dict[str, Any]]] = None # e.g. [{"label": "All models", "percent_used": 0, "reset_time": "Resets Sat 7:00 PM"}, {"label": "Fable", ...}]
-    # The same shape as weekly_breakdown, for the short window. Antigravity
-    # publishes a five-hour figure per model group as well as a weekly one, and
-    # the two windows expire on different clocks. Keeping the five-hour rows in
-    # their own field is what lets the staleness rules age them out after five
-    # hours while the weekly rows stand for seven days.
-    session_breakdown: Optional[List[Dict[str, Any]]] = None # e.g. [{"group": "Gemini Models", "session_percent_used": 9, "session_title": "Five Hour Limit Remaining"}]
-    # When a genuine telemetry sync last wrote each window's percentage. They
-    # mark a figure as measured on the provider's own usage page rather than
-    # derived here, so a later local recompute knows not to throw it away. Only
-    # the telemetry endpoint sets them, and only for the window whose percentage
-    # the payload actually carried.
+    # AntiGravity publishes a five-hour figure per model group as well as a
+    # weekly one. The observation model carries those as breakdown rows on the
+    # window they belong to, which is what keeps the two clocks apart without a
+    # second flat field. This stays so a row written by an older version loads.
+    session_breakdown: Optional[List[Dict[str, Any]]] = None
+
+    # Retained only so an older row still loads. Nothing reads them. The
+    # telemetry-replay mechanism they served is gone: it kept a synced
+    # percentage for seven days and wrote it back over every fresh read,
+    # re-marking the account active, which is how a three-day-old figure came
+    # to be shown as current. See docs/adr/ADR-USAGE-OBSERVATIONS.md.
     session_telemetry_synced_at: Optional[str] = None
     weekly_telemetry_synced_at: Optional[str] = None
+
+    # The single source of truth for every figure on the card. Everything a
+    # human sees is computed from this at request time and never stored.
+    observation: Optional[UsageObservation] = None
 
     def __init__(self, **data):
         if "auth_credential" in data and not data.get("credential"):
@@ -238,49 +255,109 @@ class UsageAccount(BaseModel):
 
     @property
     def needs_telemetry_sync(self) -> bool:
-        """True when this account can hold a real percentage but holds none.
+        """True when a browser sync is the only thing that would fill this card.
 
-        Claude and Gemini publish no local endpoint that says what share of a
-        subscription window is spent. The only real figure for either comes from
-        the one-time browser telemetry sync, so an account of theirs with no
-        percentage in any window is an account waiting on that sync, and the
-        Usage tab says so on the card itself.
+        Asked by the Usage tab so a card can offer the sync. It reads the
+        observation, because that is where every figure lives now: asking for a
+        sync while an adapter is already measuring the account would send an
+        operator to paste a script they do not need.
 
-        ChatGPT is deliberately not in the list. It reads a real API and gets a
-        real percentage with no sync at all, so its card must never ask for one.
+        The question is therefore not "which provider is this" but "did the
+        source ladder produce a window". A provider whose top rung works needs
+        nothing; one whose rungs all came back empty is waiting on a sync, if it
+        has a usage page at all.
         """
-        provider = (self.provider or "").lower()
-        if not any(name in provider for name in _TELEMETRY_SYNC_PROVIDERS):
+        observation = self.observation
+        if observation is None:
+            return _provider_has_usage_page(self.provider)
+        if observation.windows:
             return False
-        if any(
-            value is not None
-            for value in (
-                self.session_percent_used,
-                self.session_percent_left,
-                self.weekly_percent_used,
-                self.weekly_percent_left,
-            )
-        ):
-            return False
-        return not (
-            rows_carry_a_percentage(self.weekly_breakdown)
-            or rows_carry_a_percentage(self.session_breakdown)
-        )
+        return _provider_has_usage_page(self.provider)
 
     def masked(self) -> Dict[str, Any]:
-        """Return dict with sensitive credentials masked."""
+        """The account as the API returns it, with the credential masked.
+
+        Every figure is derived from ``observation`` here, at this moment, and
+        none of it is written back. A countdown produced at read time cannot be
+        stale, which is the defect that made the Claude card wrong.
+
+        ``usage`` is the shape the rebuilt front end reads. The flat fields
+        beside it are projected for the older markup and go away with it.
+        """
         d = self.model_dump()
         masked_c = self.masked_credential
         d["credential"] = masked_c
         d["masked_credential"] = masked_c
-        d["last_synced_at"] = self.last_checked
+
+        d["usage"] = render_observation(self.observation)
+        d.update(project_legacy_fields(self.observation))
+        d["status"] = legacy_status(self.observation)
+        d["error_message"] = self.observation.error if self.observation else None
+        measured_at = d["usage"].get("measured_at")
+        d["last_checked"] = measured_at or self.last_checked
+        d["last_synced_at"] = d["last_checked"]
         d["needs_telemetry_sync"] = self.needs_telemetry_sync
         return d
 
 
+class UsageTelemetryWindow(BaseModel):
+    """One window read off a provider's own usage page.
+
+    ``window_end`` is an absolute ISO instant, computed in the browser from
+    whatever the page showed. The countdown text itself is never sent, because
+    it is only true at the moment it is read.
+    """
+
+    key: str                                 # "session" or "week"
+    label: Optional[str] = None
+    percent_used: float
+    window_end: Optional[str] = None         # ISO instant, not a countdown
+    breakdown: Optional[List[Dict[str, Any]]] = None
+
+
+def _telemetry_rows(raw, used_key: str, title_key: str) -> Optional[List[Dict[str, Any]]]:
+    """Normalise a per-group breakdown onto one shape.
+
+    AntiGravity names its columns session_percent_used / weekly_percent_used and
+    its label session_title / weekly_title, while the claude.ai reader sends
+    percent_used and label. Both are accepted, because a sync that silently
+    dropped its breakdown would leave a headline figure with nothing under it.
+
+    Module level rather than a method: pydantic reserves underscore-prefixed
+    names on a model and hides them from instance access.
+    """
+    if not raw:
+        return None
+    rows: List[Dict[str, Any]] = []
+    for row in raw:
+        if not isinstance(row, dict):
+            continue
+        percent = row.get(used_key, row.get("percent_used"))
+        label = (row.get("group") or row.get("label") or row.get(title_key) or "").strip()
+        if percent is None or not label:
+            continue
+        rows.append({
+            "label": label,
+            "percent_used": percent,
+            "window_end": row.get("window_end"),
+        })
+    return rows or None
+
+
 class UsageTelemetryPayload(BaseModel):
+    """What a browser sync sends.
+
+    ``windows`` is the shape the generated snippets use. The flat fields below
+    it are accepted so a snippet from an older build still lands, but a reset
+    countdown sent as text is discarded rather than stored: it cannot be turned
+    back into an instant, and storing it is the defect this rebuild removes.
+    """
+
     plan_name: Optional[str] = None
     plan_label: Optional[str] = None
+    windows: Optional[List[UsageTelemetryWindow]] = None
+
+    # Accepted for compatibility. Percentages are used, reset strings are not.
     session_title: Optional[str] = None
     session_reset_time: Optional[str] = None
     session_percent_used: Optional[float] = None
@@ -294,6 +371,35 @@ class UsageTelemetryPayload(BaseModel):
     tokens_used: Optional[int] = None
     tokens_limit: Optional[int] = None
     percent_used: Optional[float] = None
+
+    def to_windows(self) -> List[UsageTelemetryWindow]:
+        """Normalise whichever shape arrived into a list of windows."""
+        if self.windows:
+            return list(self.windows)
+        built: List[UsageTelemetryWindow] = []
+        if self.session_percent_used is not None:
+            built.append(
+                UsageTelemetryWindow(
+                    key="session",
+                    label=self.session_title or "Session",
+                    percent_used=self.session_percent_used,
+                    breakdown=_telemetry_rows(
+                        self.session_breakdown, "session_percent_used", "session_title"
+                    ),
+                )
+            )
+        if self.weekly_percent_used is not None:
+            built.append(
+                UsageTelemetryWindow(
+                    key="week",
+                    label=self.weekly_title or "Weekly",
+                    percent_used=self.weekly_percent_used,
+                    breakdown=_telemetry_rows(
+                        self.weekly_breakdown, "weekly_percent_used", "weekly_title"
+                    ),
+                )
+            )
+        return built
 
 
 class CreateUsageAccountRequest(BaseModel):

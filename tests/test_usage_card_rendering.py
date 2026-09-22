@@ -66,7 +66,15 @@ def _render_claude_card(tmp_path: Path, account: dict) -> str:
     source = TEMPLATE_PATH.read_text(encoding="utf-8")
     js_functions = "\n\n".join(
         _extract_function(source, name)
-        for name in ("escapeHtml", "formatTokenCount", "renderAccountCard")
+        for name in (
+            "escapeHtml",
+            "formatTokenCount",
+            "usageWindowColours",
+            "renderUsageWindowRow",
+            "renderUsageWindowsHtml",
+            "usageProvenanceHtml",
+            "renderAccountCard",
+        )
     )
     driver = f"""
 {js_functions}
@@ -91,52 +99,91 @@ process.stdout.write(renderAccountCard(account));
 
 
 def _claude_account_like_the_bug_report() -> dict:
-    """Shape matching what usage_fetcher._fetch_claude_live() writes for a
-    heavy, locally-measured Claude Code account: no plan percentage, a long
-    descriptive sub-line, and a large token count, for both windows.
+    """A heavy, locally-counted Claude Code account.
+
+    Two token windows with no limit, each carrying a long descriptive
+    sub-line. That combination is what produced the overlapping text: the
+    sub-line was drawn on top of the token count beside it.
     """
+    session_sub = "433 turns across 30 projects, subagents included"
+    weekly_sub = "16692 turns across 30 projects, subagents included"
     return {
         "provider": "claude",
-        "name": "Test User · Max",
+        "name": "Test User \u00b7 Max",
         "status": "active",
         "error_message": None,
         "plan_name": "Max",
         "plan_label": "Max 20x",
-        "session_title": "Last 5 hours, this machine",
-        "session_reset_time": "433 turns across 30 projects, subagents included",
-        "session_tokens_used": 119_100_000,
-        "session_percent_used": None,
-        "session_percent_left": None,
-        "percent_used": None,
-        "weekly_title": "Last 7 days, this machine",
-        "weekly_reset_time": "16692 turns across 30 projects, subagents included",
-        "weekly_tokens_used": 3_570_000_000,
-        "weekly_percent_used": None,
-        "weekly_percent_left": None,
-        "weekly_breakdown": None,
         "last_synced_at": None,
+        "usage": {
+            "source": "claude_transcripts",
+            "source_label": "Counted from local transcripts",
+            "confidence": "derived",
+            "measured_at": "2026-09-22T17:00:00+00:00",
+            "age_seconds": 12.0,
+            "age_text": "measured 12s ago",
+            "is_stale": False,
+            "error": None,
+            "plan_name": "Max",
+            "plan_label": "Max 20x",
+            "windows": [
+                {
+                    "key": "session",
+                    "label": "Counted, last 5 hours on this machine",
+                    "sub_label": session_sub,
+                    "unit": "tokens",
+                    "amount_text": "119,100,000 tokens",
+                    "percent_used": None,
+                    "has_bar": False,
+                    "used": 119100000.0,
+                    "limit": None,
+                    "severity": None,
+                    "is_active": False,
+                    "window_start": None,
+                    "window_end": None,
+                    "countdown_text": None,
+                    "breakdown": [],
+                },
+                {
+                    "key": "week",
+                    "label": "Counted, last 7 days on this machine",
+                    "sub_label": weekly_sub,
+                    "unit": "tokens",
+                    "amount_text": "3,570,000,000 tokens",
+                    "percent_used": None,
+                    "has_bar": False,
+                    "used": 3570000000.0,
+                    "limit": None,
+                    "severity": None,
+                    "is_active": False,
+                    "window_start": None,
+                    "window_end": None,
+                    "countdown_text": None,
+                    "breakdown": [],
+                },
+            ],
+        },
     }
 
 
 @pytest.mark.skipif(not NODE_AVAILABLE, reason="node is required to execute the template's client-side JS")
-def test_claude_card_session_and_weekly_blocks_render_as_distinct_values(tmp_path):
+def test_claude_card_sub_line_and_value_render_as_distinct_elements(tmp_path):
     html = _render_claude_card(tmp_path, _claude_account_like_the_bug_report())
 
     session_sub_line = "433 turns across 30 projects, subagents included"
     weekly_sub_line = "16692 turns across 30 projects, subagents included"
-    session_tokens_label = "119.1M tokens"
-    weekly_tokens_label = "3.6B tokens"
+    session_tokens_label = "119,100,000 tokens"
+    weekly_tokens_label = "3,570,000,000 tokens"
 
-    # Both figures are present at all (a prerequisite, not the regression itself).
+    # Both figures are present at all (a prerequisite, not the regression).
     assert session_sub_line in html
     assert weekly_sub_line in html
     assert session_tokens_label in html
     assert weekly_tokens_label in html
 
     # The regression: the sub-line used to sit in a `shrink-0` span with no
-    # truncation, crammed beside the value in the same row, so a long
-    # sub-line overflowed and drew over the value. That exact markup pattern
-    # must not come back.
+    # truncation, crammed beside the value in the same row, so a long sub-line
+    # overflowed and drew over the value. That markup must not come back.
     assert f'shrink-0">{session_sub_line}' not in html, (
         "session sub-line is back in a non-shrinking span next to its value "
         "-- this is the overlapping-text bug"
@@ -150,10 +197,92 @@ def test_claude_card_session_and_weekly_blocks_render_as_distinct_values(tmp_pat
     assert f'truncate mb-1.5">{session_sub_line}</div>' in html
     assert f'truncate mb-1.5">{weekly_sub_line}</div>' in html
 
-    # And each sub-line's row is a distinct element from the row carrying its
-    # value -- the value is never found immediately adjacent to the sub-line
-    # text inside one shared element.
+    # And the value is never immediately adjacent to the sub-line text inside
+    # one shared element.
     session_row_start = html.index(session_sub_line)
     assert session_tokens_label not in html[max(0, session_row_start - 5):session_row_start]
     weekly_row_start = html.index(weekly_sub_line)
     assert weekly_tokens_label not in html[max(0, weekly_row_start - 5):weekly_row_start]
+
+
+@pytest.mark.skipif(not NODE_AVAILABLE, reason="node is required to execute the template's client-side JS")
+def test_a_window_with_no_limit_draws_no_bar(tmp_path):
+    """A counted token total has no denominator, so it gets no progress bar.
+
+    Drawing one would imply a limit that nobody published.
+    """
+    html = _render_claude_card(tmp_path, _claude_account_like_the_bug_report())
+    assert "rounded-full transition-all" not in html, (
+        "a bar was drawn for a window with no limit"
+    )
+
+
+@pytest.mark.skipif(not NODE_AVAILABLE, reason="node is required to execute the template's client-side JS")
+def test_the_card_states_its_source_and_age(tmp_path):
+    """Provenance is not optional. A figure with no age passed for a live one."""
+    html = _render_claude_card(tmp_path, _claude_account_like_the_bug_report())
+    assert "Counted from local transcripts" in html
+    assert "measured 12s ago" in html
+    # "derived" means this machine worked it out, which the card must say.
+    assert "derived, not a plan limit" in html
+
+
+@pytest.mark.skipif(not NODE_AVAILABLE, reason="node is required to execute the template's client-side JS")
+def test_every_window_renders_including_a_scoped_one(tmp_path):
+    """All windows render, not just one session and one weekly.
+
+    The flat-field renderer kept exactly one of each, which silently dropped
+    the scoped per-model weekly limit -- often the binding one.
+    """
+    account = _claude_account_like_the_bug_report()
+    account["usage"]["source"] = "claude_oauth_api"
+    account["usage"]["source_label"] = "Anthropic account usage"
+    account["usage"]["confidence"] = "measured"
+    account["usage"]["windows"] = [
+        {
+            "key": "session", "label": "Session, last 5 hours", "sub_label": None,
+            "unit": "percent", "amount_text": "35% used", "percent_used": 35.0,
+            "has_bar": True, "used": 35.0, "limit": 100.0, "severity": "normal",
+            "is_active": False, "window_start": None,
+            "window_end": "2026-09-22T20:30:00+00:00",
+            "countdown_text": "Resets in 2h 44m", "breakdown": [],
+        },
+        {
+            "key": "week", "label": "Weekly, all models, 7 days", "sub_label": None,
+            "unit": "percent", "amount_text": "38% used", "percent_used": 38.0,
+            "has_bar": True, "used": 38.0, "limit": 100.0, "severity": "normal",
+            "is_active": False, "window_start": None,
+            "window_end": "2026-09-26T18:00:00+00:00",
+            "countdown_text": "Resets in 4d 0h",
+            "breakdown": [
+                {
+                    "key": "week_surface_claude_code", "label": "Claude Code",
+                    "sub_label": None, "unit": "percent", "amount_text": "71% used",
+                    "percent_used": 71.0, "has_bar": True, "used": 71.0, "limit": 100.0,
+                    "severity": None, "is_active": False, "window_start": None,
+                    "window_end": None, "countdown_text": None, "breakdown": [],
+                }
+            ],
+        },
+        {
+            "key": "week", "label": "Weekly, Fable", "sub_label": None,
+            "unit": "percent", "amount_text": "42% used", "percent_used": 42.0,
+            "has_bar": True, "used": 42.0, "limit": 100.0, "severity": "warning",
+            "is_active": True, "window_start": None,
+            "window_end": "2026-09-26T18:00:00+00:00",
+            "countdown_text": "Resets in 4d 0h", "breakdown": [],
+        },
+    ]
+
+    html = _render_claude_card(tmp_path, account)
+
+    assert "Session, last 5 hours" in html
+    assert "Weekly, all models, 7 days" in html
+    assert "Weekly, Fable" in html, "the scoped weekly limit was dropped again"
+    assert "42% used" in html
+    # The per-surface split renders under the window it belongs to.
+    assert "Claude Code" in html and "71% used" in html
+    # The provider says which window is binding, and the card shows it.
+    assert "binding" in html
+    # Countdowns come from the hub, computed from the absolute instant.
+    assert "Resets in 2h 44m" in html

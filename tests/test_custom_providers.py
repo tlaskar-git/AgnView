@@ -1,4 +1,4 @@
-﻿"""Tests for DeepSeek, Custom LLM harnesses, Account Editing, and Token Detection."""
+"""Tests for DeepSeek, Custom LLM harnesses, Account Editing, and Token Detection."""
 
 from pathlib import Path
 
@@ -8,7 +8,13 @@ from fastapi.testclient import TestClient
 from agent_relay.api.app import create_app
 from agent_relay.core.db import Database
 from agent_relay.core.models import UsageAccount
-from agent_relay.core.usage_fetcher import fetch_account_usage
+from agent_relay.core.usage import (
+    CONFIDENCE_MEASURED,
+    CONFIDENCE_UNAVAILABLE,
+    UNIT_CURRENCY,
+    fetch_observation,
+    render_observation,
+)
 from agent_relay.core.runner import AgentRunner
 
 
@@ -19,7 +25,7 @@ def client(tmp_path):
     return TestClient(app)
 
 
-def test_deepseek_usage_fetcher_reports_only_the_balance_it_reads():
+def test_deepseek_reports_only_the_balance_it_reads():
     # 1. An account with no key has nothing to read. It used to answer with an
     #    invented $45.40 balance and an 18.4% meter.
     acc_demo = UsageAccount(
@@ -29,10 +35,10 @@ def test_deepseek_usage_fetcher_reports_only_the_balance_it_reads():
         auth_type="api_key",
         auth_credential="",
     )
-    res_demo = fetch_account_usage(acc_demo)
-    assert res_demo.status == "unavailable"
-    assert res_demo.cost_used_usd is None
-    assert res_demo.percent_used is None
+    obs_demo = fetch_observation(acc_demo)
+    assert obs_demo.confidence == CONFIDENCE_UNAVAILABLE
+    assert obs_demo.windows == []
+    assert obs_demo.error
 
     # 2. Test live API probe parsing with mocked responses
     acc_live = UsageAccount(
@@ -67,15 +73,27 @@ def test_deepseek_usage_fetcher_reports_only_the_balance_it_reads():
         return mock_resp_models
 
     with patch("httpx.Client.get", side_effect=mock_get):
-        res_live = fetch_account_usage(acc_live)
+        obs_live = fetch_observation(acc_live)
 
-    assert res_live.status == "active"
-    assert "USD 85.20" in res_live.reset_time
-    assert res_live.cost_used_usd == 75.20
-    assert res_live.masked_credential.startswith("sk-")
+    assert obs_live.confidence == CONFIDENCE_MEASURED
+    balance = obs_live.windows[0]
+    # Money, not a share of a window. No percentage is back-derived from it,
+    # because nobody reported a starting figure to divide by.
+    assert balance.unit == UNIT_CURRENCY
+    assert balance.used == 85.20
+    assert balance.currency == "USD"
+    assert balance.limit is None
+    assert balance.has_bar is False
+    assert render_observation(obs_live)["windows"][0]["amount_text"] == "USD 85.20"
+    assert acc_live.masked_credential.startswith("sk-")
 
 
-def test_custom_harness_usage_fetcher():
+def test_custom_harness_reports_reachability_and_no_quota():
+    """A local harness enforces no quota, so it reports no window at all.
+
+    Reachable with nothing to measure is the honest result. The card shows the
+    endpoint and draws no bar, because there is no share of anything.
+    """
     acc = UsageAccount(
         provider="custom",
         name="Local Ollama Server",
@@ -90,11 +108,25 @@ def test_custom_harness_usage_fetcher():
     mock_resp.json.return_value = {"models": [{"name": "qwen2.5-coder:32b"}]}
 
     with patch("httpx.Client.get", return_value=mock_resp):
-        res = fetch_account_usage(acc)
+        obs = fetch_observation(acc)
 
-    assert res.status == "active"
-    assert res.base_url == "http://localhost:11434"
-    assert "Online at http://localhost:11434" in res.reset_time
+    assert obs.confidence == CONFIDENCE_MEASURED
+    assert obs.windows == []
+    assert obs.error is None
+    assert obs.notes["endpoint"] == "http://localhost:11434"
+
+
+def test_the_custom_adapter_is_no_longer_a_silent_fallthrough():
+    """It used to serve every unrecognised provider, AntiGravity included."""
+    from agent_relay.core.usage import UnknownProvider, get_adapter
+
+    assert get_adapter("custom").provider == "custom"
+    for name in ("antigravity", "mistral", "cohere"):
+        if name == "antigravity":
+            assert get_adapter(name).provider == "antigravity"
+            continue
+        with pytest.raises(UnknownProvider):
+            get_adapter(name)
 
 
 def test_account_update_api(client):

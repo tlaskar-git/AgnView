@@ -17,7 +17,8 @@ import pytest
 
 from agent_relay.core import antigravity
 from agent_relay.core.models import UsageAccount
-from agent_relay.core.usage_fetcher import _fetch_gemini_live
+from agent_relay.core.usage import fetch_observation, render_observation
+from agent_relay.core.usage.adapters import google_code_assist as google_adapter
 
 from test_antigravity_extractor import INLINE_PANEL, STACKED_PANEL, _run_extractor
 
@@ -332,7 +333,19 @@ def _gemini_account():
     return UsageAccount(id="acc-antigravity", provider="gemini", name="AntiGravity")
 
 
-def test_a_live_read_fills_the_same_fields_a_manual_sync_does(monkeypatch):
+@pytest.fixture
+def no_google_signin(tmp_path, monkeypatch):
+    """Leave Code Assist with nothing to read, so the panel rung is what is tested.
+
+    Without this the lower rungs would reach the developer's own Google
+    credential and their reason would join the one under test.
+    """
+    monkeypatch.setattr(google_adapter, "CREDS_PATH", tmp_path / "no-creds.json")
+    monkeypatch.setattr(google_adapter, "ACCOUNTS_PATH", tmp_path / "no-accounts.json")
+
+
+def test_a_live_read_fills_the_windows_a_manual_sync_would(monkeypatch, no_google_signin):
+    """The panel is the top rung for Gemini, so a live read wins outright."""
     monkeypatch.setattr(
         antigravity,
         "read_usage",
@@ -341,42 +354,49 @@ def test_a_live_read_fills_the_same_fields_a_manual_sync_does(monkeypatch):
         ),
     )
 
-    account = _fetch_gemini_live(_gemini_account())
+    observation = fetch_observation(_gemini_account())
+    view = render_observation(observation)
 
-    assert account.status == "active"
-    assert account.error_message is None
-    assert account.session_percent_used == 15
-    assert account.session_percent_left == 85
-    assert account.percent_used == 15
-    assert account.weekly_percent_used == 0
-    assert account.session_title == "Five Hour Limit Remaining"
-    assert len(account.session_breakdown) == 2
-    assert len(account.weekly_breakdown) == 2
-    # Stamped as measured, so the next refresh keeps it for the life of the
-    # window instead of blanking it the moment AntiGravity is closed.
-    assert account.session_telemetry_synced_at
-    assert account.weekly_telemetry_synced_at
+    assert view["confidence"] == "measured"
+    assert view["source"] == "agy_panel"
+    assert view["source_label"] == "AntiGravity usage panel"
+    assert view["error"] is None
+
+    session = observation.window("session")
+    weekly = observation.window("week")
+    assert session.used == 15
+    assert session.label == "Five Hour Limit Remaining"
+    assert weekly.used == 0
+    # Per-model-group rows land on the window they describe, so the two clocks
+    # stay apart without a second flat field.
+    assert len(session.breakdown) == 2
+    assert len(weekly.breakdown) == 2
+
     # A share of a window is not a token count, so nothing is back-derived.
-    assert account.tokens_used is None
+    assert all(w.unit == "percent" for w in observation.windows)
+    assert all(w.limit == 100.0 for w in observation.windows)
+
+    # The panel publishes no reset time, so no countdown is invented for it.
+    assert session.window_end is None
+    assert view["windows"][0]["countdown_text"] is None
 
 
-def test_a_closed_antigravity_says_what_to_do_about_it(monkeypatch):
+def test_a_closed_antigravity_says_what_to_do_about_it(monkeypatch, no_google_signin):
     monkeypatch.setattr(
         antigravity,
         "read_usage",
         lambda *_a, **_k: antigravity.AntigravityRead(error=antigravity.NOT_RUNNING_MESSAGE),
     )
 
-    account = _fetch_gemini_live(_gemini_account())
+    observation = fetch_observation(_gemini_account())
 
-    assert account.status == "unavailable"
-    assert account.error_message == antigravity.NOT_RUNNING_MESSAGE
-    assert "needs to be running" in account.error_message
-    assert account.session_percent_used is None
-    assert account.session_breakdown is None
+    assert observation.confidence == "unavailable"
+    assert "needs to be running" in observation.error
+    # No windows at all, so no figure can be shown by accident.
+    assert observation.windows == []
 
 
-def test_a_failed_read_says_it_failed_rather_than_going_generic(monkeypatch):
+def test_a_failed_read_says_it_failed_rather_than_going_generic(monkeypatch, no_google_signin):
     reason = "AntiGravity is running, but reading its window failed (timed out)."
     monkeypatch.setattr(
         antigravity,
@@ -384,26 +404,53 @@ def test_a_failed_read_says_it_failed_rather_than_going_generic(monkeypatch):
         lambda *_a, **_k: antigravity.AntigravityRead(error=reason),
     )
 
-    account = _fetch_gemini_live(_gemini_account())
+    observation = fetch_observation(_gemini_account())
 
-    assert account.status == "unavailable"
-    assert account.error_message == reason
+    assert observation.confidence == "unavailable"
+    assert reason in observation.error
 
 
-def test_the_reason_reaches_a_signed_in_gemini_account_too(tmp_path, monkeypatch):
-    gemini = tmp_path / ".gemini"
-    gemini.mkdir()
-    gemini.joinpath("google_accounts.json").write_text(
-        json.dumps({"active": "someone@example.com"}), encoding="utf-8"
-    )
-    monkeypatch.setattr("agent_relay.core.usage_fetcher.Path.home", staticmethod(lambda: tmp_path))
+def test_the_panel_reason_leads_even_when_a_lower_rung_also_failed(tmp_path, monkeypatch):
+    """The highest rung's reason comes first, because it is the actionable one.
+
+    Reporting the last rung's reason instead buried the useful instruction: a
+    Gemini card said only that Google refuses Code Assist, and dropped
+    "open the AntiGravity app", which is the thing that fixes it.
+    """
+    creds = tmp_path / "oauth_creds.json"
+    creds.write_text(json.dumps({"access_token": "t", "expiry_date": 1}), encoding="utf-8")
+    accounts = tmp_path / "google_accounts.json"
+    accounts.write_text(json.dumps({"active": "someone@example.com"}), encoding="utf-8")
+    monkeypatch.setattr(google_adapter, "CREDS_PATH", creds)
+    monkeypatch.setattr(google_adapter, "ACCOUNTS_PATH", accounts)
     monkeypatch.setattr(
         antigravity,
         "read_usage",
         lambda *_a, **_k: antigravity.AntigravityRead(error=antigravity.NOT_RUNNING_MESSAGE),
     )
 
-    account = _fetch_gemini_live(_gemini_account())
+    observation = fetch_observation(_gemini_account())
 
-    assert "someone@example.com" in account.error_message
-    assert "needs to be running" in account.error_message
+    assert observation.source == "agy_panel", "the panel rung must own the message"
+    assert observation.error.startswith(antigravity.NOT_RUNNING_MESSAGE[:30])
+    # The lower rung's reason is kept after it, not instead of it.
+    assert "someone@example.com" in observation.error
+
+
+def test_the_panel_also_serves_the_antigravity_card(monkeypatch):
+    """One reader, both cards. AntiGravity prints its own limits and Gemini's."""
+    monkeypatch.setattr(
+        antigravity,
+        "read_usage",
+        lambda *_a, **_k: antigravity.AntigravityRead(
+            payload=antigravity.parse_usage_panel(INLINE_PANEL)
+        ),
+    )
+
+    observation = fetch_observation(
+        UsageAccount(id="acc-agy", provider="antigravity", name="AntiGravity")
+    )
+
+    assert observation.source == "agy_panel"
+    assert observation.confidence == "measured"
+    assert observation.window("session").used == 15
