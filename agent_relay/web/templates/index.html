@@ -6071,132 +6071,15 @@
                 </button>
               </div>` : '';
 
-      // =========================================================================
-      // DEDICATED GEMINI TELEMETRY: Matches Google Antigravity / Gemini Desktop IDE
-      // =========================================================================
-      if (acc.provider === 'gemini') {
-        // Only groups the hub actually received. There is no stand-in set:
-        // this card used to draw two model groups with invented percentages
-        // whenever the API sent none.
-        //
-        // The two windows arrive in separate fields because they age out on
-        // separate clocks, five hours against seven days, so they are joined
-        // back together here on the group name the provider printed. A row that
-        // carries both windows at once still works unchanged.
-        const geminiRows = [
-          ...((acc.weekly_breakdown && acc.weekly_breakdown.length > 0) ? acc.weekly_breakdown : []),
-          ...((acc.session_breakdown && acc.session_breakdown.length > 0) ? acc.session_breakdown : [])
-        ];
-        const geminiByGroup = new Map();
-        geminiRows.forEach(row => {
-          const key = String(row.group || row.label || 'Models');
-          const merged = geminiByGroup.get(key) || { group: key };
-          Object.keys(row).forEach(field => {
-            if (row[field] !== null && row[field] !== undefined) merged[field] = row[field];
-          });
-          merged.group = key;
-          geminiByGroup.set(key, merged);
-        });
-        const groups = Array.from(geminiByGroup.values());
-
-        return `
-          <div class="bg-[var(--bg-surface)] border border-[var(--border-color)] rounded-xl p-4 flex flex-col justify-between shadow-sm relative transition hover:border-slate-500/40 min-h-[350px]">
-            <div>
-              <!-- Header Row: Provider Badge + Account Name + Status -->
-              <div class="flex items-center justify-between gap-2 mb-1">
-                <div class="flex items-center gap-2 min-w-0 flex-1">
-                  <span class="text-[10px] border px-1.5 py-0.5 rounded font-mono font-medium shrink-0 ${badgeTheme}">GEMINI</span>
-                  <span class="text-xs font-bold text-[var(--text-main)] truncate" title="${escapeHtml(acc.name)}">${escapeHtml(acc.name)}</span>
-                </div>
-                <span class="text-[10px] uppercase px-2 py-0.5 rounded font-semibold font-mono shrink-0 ${statusTheme}">${statusLabel}</span>
-              </div>
-
-              <!-- Plan / Limits Tier Banner -->
-              <div class="flex items-center justify-between text-[11px] text-[var(--text-secondary)] font-mono mb-3">
-                <div class="flex items-center gap-1.5 truncate">
-                  <span>Plan limits:</span>
-                  <span class="font-semibold text-[var(--text-main)]">${planDisplay}</span>
-                </div>
-              </div>
-
-              <!-- Model group quota telemetry, when the provider reports any -->
-              <div class="space-y-3">
-                ${syncCtaHtml}
-                ${groups.length === 0 ? noticeHtml : ''}
-                ${groups.map((grp, idx) => {
-                  const hasWeeklyLimit = (grp.weekly_percent_used !== null && grp.weekly_percent_used !== undefined) || (grp.weekly_percent_left !== null && grp.weekly_percent_left !== undefined);
-                  const hasSessionLimit = (grp.session_percent_used !== null && grp.session_percent_used !== undefined) || (grp.session_percent_left !== null && grp.session_percent_left !== undefined);
-
-                  const wUsed = grp.weekly_percent_used !== null && grp.weekly_percent_used !== undefined
-                    ? grp.weekly_percent_used
-                    : (grp.weekly_percent_left !== null && grp.weekly_percent_left !== undefined ? (100 - grp.weekly_percent_left) : null);
-                  const sUsed = grp.session_percent_used !== null && grp.session_percent_used !== undefined
-                    ? grp.session_percent_used
-                    : (grp.session_percent_left !== null && grp.session_percent_left !== undefined ? (100 - grp.session_percent_left) : null);
-
-                  const wColor = wUsed === null ? 'text-[var(--text-secondary)]' : (wUsed >= 85 ? 'text-red-500 dark:text-red-400' : (wUsed >= 60 ? 'text-amber-500 dark:text-amber-400' : 'text-emerald-500 dark:text-emerald-400'));
-                  const sColor = sUsed === null ? 'text-[var(--text-secondary)]' : (sUsed >= 85 ? 'text-red-500 dark:text-red-400' : (sUsed >= 60 ? 'text-amber-500 dark:text-amber-400' : 'text-emerald-500 dark:text-emerald-400'));
-
-                  const wLabel = hasWeeklyLimit && wUsed !== null ? `${Math.round(wUsed)}% used` : 'No limit reported';
-                  const sLabel = hasSessionLimit && sUsed !== null ? `${Math.round(sUsed)}% used` : 'No limit reported';
-
-                  const wBarWidth = wUsed !== null ? Math.min(100, Math.max(0, wUsed)) : 0;
-                  const sBarWidth = sUsed !== null ? Math.min(100, Math.max(0, sUsed)) : 0;
-
-                  return `
-                    <div class="${idx > 0 ? 'pt-2.5 border-t border-[var(--border-color)]' : ''} space-y-1.5">
-                      <div class="flex items-center justify-between">
-                        <span class="text-[11px] font-bold text-[var(--text-main)]">${escapeHtml(grp.group || grp.label || 'Models')}</span>
-                        ${grp.models ? `<span class="text-[9px] text-[var(--text-secondary)] truncate max-w-[160px]" title="${escapeHtml(grp.models)}">${escapeHtml(grp.models)}</span>` : ''}
-                      </div>
-
-                      <!-- Weekly Limit -->
-                      <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg px-2.5 py-2 flex items-center justify-between">
-                        <div class="min-w-0 flex-1 pr-2">
-                          <div class="text-xs font-medium text-[var(--text-main)] truncate">${escapeHtml(grp.weekly_title || 'Weekly Limit')}</div>
-                          ${grp.weekly_sub ? `<div class="text-[10px] text-[var(--text-secondary)] truncate">${escapeHtml(grp.weekly_sub)}</div>` : ''}
-                        </div>
-                        <div class="flex items-center gap-2 shrink-0">
-                          <span class="font-mono font-bold text-xs ${wColor}">${wLabel}</span>
-                          ${hasWeeklyLimit && wUsed !== null ? renderProgressRing(Math.max(0, 100 - wUsed), 18, 3.2) : ''}
-                        </div>
-                      </div>
-
-                      <!-- Five Hour Limit -->
-                      <div class="bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg px-2.5 py-2 flex items-center justify-between">
-                        <div class="min-w-0 flex-1 pr-2">
-                          <div class="text-xs font-medium text-[var(--text-main)] truncate">${escapeHtml(grp.session_title || 'Five Hour Limit')}</div>
-                          ${grp.session_sub ? `<div class="text-[10px] text-[var(--text-secondary)] truncate">${escapeHtml(grp.session_sub)}</div>` : ''}
-                        </div>
-                        <div class="flex items-center gap-2 shrink-0">
-                          <span class="font-mono font-bold text-xs ${sColor}">${sLabel}</span>
-                          ${hasSessionLimit && sUsed !== null ? renderProgressRing(Math.max(0, 100 - sUsed), 18, 3.2) : ''}
-                        </div>
-                      </div>
-                    </div>
-                  `;
-                }).join('')}
-              </div>
-            </div>
-
-            <!-- Bottom Actions Row -->
-            <div class="flex items-center justify-between pt-3 mt-3 border-t border-[var(--border-color)] text-xs">
-              ${provenance}
-              <div class="flex items-center gap-1.5">
-                <button onclick="openEditAccountModal('${acc.id}')" aria-label="Edit ${escapeHtml(acc.name)}" title="Edit account" class="p-1.5 bg-[var(--bg-raised)] hover:bg-[var(--bg-surface-hover)] text-[var(--text-main)] border border-[var(--border-color)] rounded-lg transition flex items-center gap-1 text-[11px]">
-                  <i data-lucide="edit-3" class="w-3.5 h-3.5 text-[#2563EB] dark:text-[#3B82F6]"></i> Edit
-                </button>
-                <button onclick="refreshSingleAccount('${acc.id}')" aria-label="Refresh quota for ${escapeHtml(acc.name)}" title="Refresh quota" class="p-1.5 bg-[var(--bg-raised)] hover:bg-[var(--bg-surface-hover)] text-[var(--text-main)] border border-[var(--border-color)] rounded-lg transition flex items-center gap-1 text-[11px]">
-                  <i data-lucide="refresh-cw" class="w-3.5 h-3.5 text-[#2563EB] dark:text-[#3B82F6]"></i> Refresh
-                </button>
-                <button onclick="deleteUsageAccount('${acc.id}', '${escapeHtml(acc.name)}')" aria-label="Delete ${escapeHtml(acc.name)}" title="Delete account" class="p-1.5 hover:bg-red-500/10 text-[var(--text-secondary)] hover:text-red-500 rounded-lg transition">
-                  <i data-lucide="trash-2" class="w-3.5 h-3.5"></i>
-                </button>
-              </div>
-            </div>
-          </div>
-        `;
-      }
+      // Gemini had a card of its own here, because the flat fields could not
+      // express one figure per model group and the generic card could only draw
+      // one session row and one weekly row. It read acc.weekly_breakdown and
+      // acc.session_breakdown in a shape nothing produces any more, so with the
+      // observation model in place it rendered "No limit reported" over four
+      // rows while AntiGravity showed 100% beside it.
+      //
+      // The generic renderer handles nesting, so there is one card for every
+      // provider now and no branch to fall out of step.
 
       // Every window the source reported, in the order it reported them.
       //

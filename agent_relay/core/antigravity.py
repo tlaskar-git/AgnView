@@ -366,6 +366,27 @@ _LIMIT_LINE = re.compile(
 _PERCENT_ON_LINE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 _PERCENT_ALONE = re.compile(r"^(\d+(?:\.\d+)?)\s*%$")
 
+# "Resets in 2d 14h", "Resets in 3h 47m". Carried as an offset in seconds, not
+# as an instant: the JavaScript extractor parses the same line, and a test
+# compares the two payloads for equality, so both have to produce the same
+# value without depending on when each one ran. The offset is anchored to an
+# absolute instant by whoever receives it.
+_RESET_LINE = re.compile(r"\bresets?\s+in\b", re.IGNORECASE)
+_RESET_PARTS = re.compile(r"(\d+)\s*([dhm])", re.IGNORECASE)
+
+
+def _reset_seconds(line: str):
+    """Seconds until a reset, from the panel's own wording. None when absent."""
+    if not _RESET_LINE.search(line or ""):
+        return None
+    total = 0
+    matched = False
+    for amount, unit in _RESET_PARTS.findall(line):
+        unit = unit.lower()
+        total += int(amount) * {"d": 86400, "h": 3600, "m": 60}[unit]
+        matched = True
+    return total if matched else None
+
 
 def _round1(value: float) -> float:
     """Round half up to one decimal, the way the JavaScript extractor does."""
@@ -417,10 +438,19 @@ def parse_usage_panel(panel_text: str) -> dict:
         used = value if sense == "used" else _round1(100 - value)
         left = _round1(100 - value) if sense == "used" else value
         key = "weekly" if re.search(r"weekly", limit_match.group(1), re.IGNORECASE) else "session"
+        # The reset sits between the label and the figure when the panel shows
+        # one at all. Only the Gemini group carries one on some builds, so its
+        # absence is normal and leaves the window with no countdown.
+        resets_in = _reset_seconds(line)
+        scan = index + 1
+        while resets_in is None and scan < len(lines) and scan <= index + 2:
+            resets_in = _reset_seconds(lines[scan])
+            scan += 1
         current["windows"][key] = {
             "title": _PERCENT_ON_LINE.sub("", line, count=1).strip(),
             "used": used,
             "left": left,
+            "resets_in_seconds": resets_in,
         }
 
     weekly_rows = []
@@ -434,6 +464,7 @@ def parse_usage_panel(panel_text: str) -> dict:
                     "weekly_title": weekly["title"],
                     "weekly_percent_used": weekly["used"],
                     "weekly_percent_left": weekly["left"],
+                    "weekly_resets_in_seconds": weekly.get("resets_in_seconds"),
                 }
             )
         session = group["windows"].get("session")
@@ -444,6 +475,7 @@ def parse_usage_panel(panel_text: str) -> dict:
                     "session_title": session["title"],
                     "session_percent_used": session["used"],
                     "session_percent_left": session["left"],
+                    "session_resets_in_seconds": session.get("resets_in_seconds"),
                 }
             )
 
@@ -460,12 +492,14 @@ def parse_usage_panel(panel_text: str) -> dict:
         payload["weekly_title"] = tightest["weekly_title"]
         payload["weekly_percent_used"] = tightest["weekly_percent_used"]
         payload["weekly_percent_left"] = tightest["weekly_percent_left"]
+        payload["weekly_resets_in_seconds"] = tightest.get("weekly_resets_in_seconds")
     if session_rows:
         payload["session_breakdown"] = session_rows
         tightest = _tightest(session_rows, "session_percent_used")
         payload["session_title"] = tightest["session_title"]
         payload["session_percent_used"] = tightest["session_percent_used"]
         payload["session_percent_left"] = tightest["session_percent_left"]
+        payload["session_resets_in_seconds"] = tightest.get("session_resets_in_seconds")
     return payload
 
 

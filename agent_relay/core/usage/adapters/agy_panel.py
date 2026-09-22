@@ -17,11 +17,15 @@ Two conditions, both reported rather than worked around:
   displayed. That is the instruction an operator needs, so it is passed through
   verbatim.
 
-The panel shows no reset time, so these windows carry no ``window_end`` and the
-card draws no countdown for them. That is correct: inventing one would be the
-same defect this rebuild removed.
+The panel prints a reset for the windows that have one, as "Resets in 2d 14h".
+The reader carries that as an offset in seconds so its two implementations stay
+comparable, and it is anchored to an absolute instant here, at the moment of the
+read. A window the panel showed no reset for carries no ``window_end`` and draws
+no countdown, which is correct: inventing one would be the defect this rebuild
+removed.
 """
 
+from datetime import timedelta
 from typing import List, Optional
 
 # The module is held, not the function. Binding read_usage here would take a
@@ -36,6 +40,7 @@ from ..models import (
     UsageWindow,
     WINDOW_SESSION,
     WINDOW_WEEK,
+    utc_now,
 )
 
 # The panel is read from a live window, so it is current whenever the app is
@@ -44,8 +49,39 @@ from ..models import (
 REFRESH_SECONDS = 120
 
 
-def _rows_to_breakdown(rows, prefix: str, used_key: str, title_key: str) -> List[UsageWindow]:
-    """One window per model group, as the panel listed them."""
+def _sub_label(title, parent_label: str) -> Optional[str]:
+    """A row's own title, unless it merely repeats the window above it."""
+    text = (title or "").strip()
+    if not text or text.casefold() == (parent_label or "").strip().casefold():
+        return None
+    return text
+
+
+def _window_end(resets_in_seconds):
+    """Anchor a "resets in N seconds" offset to an instant, or None.
+
+    An offset only means anything at the moment it was read, so it is pinned
+    immediately. Everything downstream works from the instant.
+    """
+    if resets_in_seconds is None:
+        return None
+    try:
+        seconds = int(resets_in_seconds)
+    except (TypeError, ValueError):
+        return None
+    return utc_now() + timedelta(seconds=seconds) if seconds >= 0 else None
+
+
+def _rows_to_breakdown(
+    rows, prefix: str, used_key: str, title_key: str, reset_key: str, parent_label: str
+) -> List[UsageWindow]:
+    """One window per model group, as the panel listed them.
+
+    ``parent_label`` is the window these rows sit under. Every row in the panel
+    carries the same window title as its parent, so repeating it on each row put
+    "Five Hour Limit Remaining" under a heading already reading exactly that.
+    The title is kept only on a row that says something different.
+    """
     children: List[UsageWindow] = []
     for row in rows or []:
         if not isinstance(row, dict):
@@ -62,10 +98,11 @@ def _rows_to_breakdown(rows, prefix: str, used_key: str, title_key: str) -> List
             UsageWindow(
                 key=f"{prefix}_{group.lower().replace(' ', '_')}",
                 label=group,
-                sub_label=(row.get(title_key) or "").strip() or None,
+                sub_label=_sub_label(row.get(title_key), parent_label),
                 unit=UNIT_PERCENT,
                 used=value,
                 limit=100.0,
+                window_end=_window_end(row.get(reset_key)),
             )
         )
     return children
@@ -76,38 +113,46 @@ def observation_from_payload(payload: dict, product: str) -> Optional[UsageObser
     windows: List[UsageWindow] = []
 
     session_used = payload.get("session_percent_used")
+    session_label = (payload.get("session_title") or "Session limit").strip()
     if session_used is not None:
         windows.append(
             UsageWindow(
                 key=WINDOW_SESSION,
-                label=(payload.get("session_title") or "Session limit").strip(),
+                label=session_label,
                 unit=UNIT_PERCENT,
                 used=float(session_used),
                 limit=100.0,
+                window_end=_window_end(payload.get("session_resets_in_seconds")),
                 is_active=True,
                 breakdown=_rows_to_breakdown(
                     payload.get("session_breakdown"),
                     "session_group",
                     "session_percent_used",
                     "session_title",
+                    "session_resets_in_seconds",
+                    session_label,
                 ),
             )
         )
 
     weekly_used = payload.get("weekly_percent_used")
+    weekly_label = (payload.get("weekly_title") or "Weekly limit").strip()
     if weekly_used is not None:
         windows.append(
             UsageWindow(
                 key=WINDOW_WEEK,
-                label=(payload.get("weekly_title") or "Weekly limit").strip(),
+                label=weekly_label,
                 unit=UNIT_PERCENT,
                 used=float(weekly_used),
                 limit=100.0,
+                window_end=_window_end(payload.get("weekly_resets_in_seconds")),
                 breakdown=_rows_to_breakdown(
                     payload.get("weekly_breakdown"),
                     "week_group",
                     "weekly_percent_used",
                     "weekly_title",
+                    "weekly_resets_in_seconds",
+                    weekly_label,
                 ),
             )
         )

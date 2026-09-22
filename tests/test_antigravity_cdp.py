@@ -10,6 +10,7 @@ implementations are compared against each other so they cannot drift apart.
 
 import inspect
 import json
+import re
 import socket
 import threading
 
@@ -454,3 +455,93 @@ def test_the_panel_also_serves_the_antigravity_card(monkeypatch):
     assert observation.source == "agy_panel"
     assert observation.confidence == "measured"
     assert observation.window("session").used == 15
+
+
+# ---------------------------------------------------------------------------
+# The reset the panel prints beside each figure
+# ---------------------------------------------------------------------------
+
+# The panel exactly as AntiGravity draws it, captured live on 2026-09-22. The
+# reset sits between the label and the figure, and only the Gemini group has one.
+_PANEL_WITH_RESETS = "\n".join(
+    [
+        "Gemini Models",
+        "Weekly Limit Remaining",
+        "Resets in 2d 14h",
+        "100%",
+        "Five Hour Limit Remaining",
+        "Resets in 3h 47m",
+        "100%",
+        "Claude and GPT models",
+        "Weekly Limit Remaining",
+        "100%",
+        "Five Hour Limit Remaining",
+        "100%",
+    ]
+)
+
+
+def test_the_reset_beside_a_figure_is_read_as_an_offset():
+    """The panel shows a countdown; discarding it left the card without one."""
+    payload = antigravity.parse_usage_panel(_PANEL_WITH_RESETS)
+
+    assert payload["weekly_resets_in_seconds"] == 2 * 86400 + 14 * 3600
+    assert payload["session_resets_in_seconds"] == 3 * 3600 + 47 * 60
+    # Per group, so a group the panel gave no reset for carries none rather
+    # than borrowing another group's.
+    weekly = {row["group"]: row["weekly_resets_in_seconds"] for row in payload["weekly_breakdown"]}
+    assert weekly["Gemini Models"] == 2 * 86400 + 14 * 3600
+    assert weekly["Claude and GPT models"] is None
+
+
+def test_the_offset_becomes_a_live_countdown_on_the_card(monkeypatch, no_google_signin):
+    """An offset only means anything when it was read, so it is pinned at once."""
+    monkeypatch.setattr(
+        antigravity,
+        "read_usage",
+        lambda *_a, **_k: antigravity.AntigravityRead(
+            payload=antigravity.parse_usage_panel(_PANEL_WITH_RESETS)
+        ),
+    )
+
+    observation = fetch_observation(_gemini_account())
+    session = observation.window("session")
+    weekly = observation.window("week")
+
+    assert session.window_end is not None
+    assert weekly.window_end is not None
+    # Rendered against a later clock, the countdown has moved.
+    from agent_relay.core.usage import format_countdown
+    from datetime import timedelta
+
+    # Matched as a shape and a difference rather than exact strings: the
+    # window is anchored to the real clock, so the minute depends on how long
+    # the read took.
+    at_read = format_countdown(session.window_end, observation.measured_at)
+    an_hour_on = format_countdown(
+        session.window_end, observation.measured_at + timedelta(hours=1)
+    )
+    assert re.fullmatch(r"Resets in 3h \d{1,2}m", at_read), at_read
+    assert re.fullmatch(r"Resets in 2h \d{1,2}m", an_hour_on), an_hour_on
+    assert at_read != an_hour_on
+
+
+def test_a_group_row_does_not_repeat_the_window_above_it(monkeypatch, no_google_signin):
+    """Every panel row carries its parent's title, which is noise on the card."""
+    monkeypatch.setattr(
+        antigravity,
+        "read_usage",
+        lambda *_a, **_k: antigravity.AntigravityRead(
+            payload=antigravity.parse_usage_panel(_PANEL_WITH_RESETS)
+        ),
+    )
+
+    observation = fetch_observation(_gemini_account())
+    session = observation.window("session")
+
+    assert session.label == "Five Hour Limit Remaining"
+    assert [child.label for child in session.breakdown] == [
+        "Gemini Models",
+        "Claude and GPT models",
+    ]
+    assert all(child.sub_label is None for child in session.breakdown)
