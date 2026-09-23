@@ -74,11 +74,16 @@ with `remainingFraction` and `resetTime`, which is what the model picker draws.
 Models are grouped as the picker groups them, Gemini models and Claude and GPT
 models, and only the models the picker offers are counted.
 
-The access token is used as stored. Antigravity renews it whenever the app runs.
-When it has expired, the card keeps its last reading until that window resets
-(see "held readings" in `agent_relay/core/usage/service.py`) and says to open
-Antigravity. The token stays in memory, is never logged, and goes only to
-Google. Set `AGNVIEW_AGY_CLOUD=0` to turn this rung off. The test suite sets it,
+The stored access token lasts about an hour, and Antigravity renews it only
+while the app runs. When it has expired, AgnView renews a copy in memory: the
+client ID comes from the stored ID token, and the client secret is read at run
+time from the installed `language_server.exe`, where the installed app ships
+it. Nothing of Google's or Antigravity's is carried in this repository. Google
+does not rotate the refresh token on renewal, so Antigravity's stored sign-in
+stays valid, and AgnView never writes it. If renewal fails, the card keeps its
+last reading until that window resets (see "held readings" in
+`agent_relay/core/usage/service.py`) and says what to do. Tokens stay in memory,
+are never logged, and go only to Google. Set `AGNVIEW_AGY_CLOUD=0` to turn this rung off. The test suite sets it,
 so a test run never reads the developer's own account.
 
 The Gemini CLI sign-in in `~/.gemini/oauth_creds.json` is no route to this
