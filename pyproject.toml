@@ -46,10 +46,18 @@ dev = [
     "pytest==9.1.1",
     "ruff==0.15.4"
 ]
+desktop = [
+    "pywebview==6.2.1; sys_platform == 'win32'",
+    "pystray==0.19.5; sys_platform == 'win32'",
+    "pillow==12.3.0; sys_platform == 'win32'",
+]
 
 [project.scripts]
 agnview = "agent_relay.cli.main:main"
 agent-relay = "agent_relay.cli.main:main"
+
+[project.gui-scripts]
+agnview-desktop = "agent_relay.desktop.app:main"
 
 [tool.setuptools.packages.find]
 include = ["agent_relay*"]

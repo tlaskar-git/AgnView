@@ -91,6 +91,26 @@ pip install -e .
 
 `agent-relay` is supported as an alias for the `agnview` command.
 
+## Windows desktop app
+
+On Windows, AgnView also runs as a desktop app with its own window, so no
+browser is needed. Build and install it from a source checkout:
+
+```powershell
+.\tools\build-windows.ps1 -Install
+```
+
+This builds `AgnView.exe`, copies it to `%LOCALAPPDATA%\Programs\AgnView` and
+adds a Start menu shortcut. The app runs the hub on loopback, shows the
+dashboard in a window and keeps a tray icon. Closing the window hides it to the
+tray, and the hub keeps serving paired phones and agent CLIs. Quit from the tray
+menu stops it.
+
+The tray menu has a **Start with Windows** toggle. It is on by default and starts
+AgnView hidden in the tray when you sign in. Settings live in
+`~/.agnview/desktop.json`. Pass `--port` once to change the port, and the app
+remembers it.
+
 ## Start
 
 ```bash

@@ -55,3 +55,4 @@ htmlcov/
 .env
 .env.local
 .env.*.local
+.venv-desktop/
