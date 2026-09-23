@@ -55,6 +55,12 @@ FAKE_HOME = Path.home()
 os.environ["APPDATA"] = str(_FAKE_HOME / "AppData" / "Roaming")
 os.environ["XDG_CONFIG_HOME"] = str(_FAKE_HOME / ".config")
 
+# A Claude card with an expired sign-in asks Claude Code to refresh it by
+# running a real prompt. A test must never do that, so it is off for the
+# whole suite. Tests of the refresh itself switch it back on and replace the
+# command.
+os.environ["AGNVIEW_CLAUDE_REFRESH"] = "0"
+
 
 def pytest_sessionfinish(session, exitstatus):
     shutil.rmtree(_FAKE_HOME, ignore_errors=True)

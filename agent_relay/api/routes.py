@@ -395,7 +395,7 @@ def list_usage_accounts(request: Request, provider: Optional[str] = None):
         # each adapter, because only the adapter knows how often its source moves.
         if observation_is_stale(acc.observation):
             try:
-                acc.observation = fetch_observation(acc)
+                acc.observation = fetch_observation(acc, previous=acc.observation)
             except UnknownProvider as exc:
                 acc.observation = None
                 acc.error_message = str(exc)
@@ -440,7 +440,7 @@ def add_usage_account(req: CreateUsageAccountRequest, request: Request):
         base_url=req.base_url,
     )
 
-    account.observation = fetch_observation(account)
+    account.observation = fetch_observation(account, previous=account.observation)
     db.save_usage_account(account.model_dump())
 
     engine = get_engine(request)
@@ -623,7 +623,7 @@ def discover_usage_accounts(request: Request):
             credential="",
             plan_name=found.get("plan_name") or "Unknown",
         )
-        account.observation = fetch_observation(account)
+        account.observation = fetch_observation(account, previous=account.observation)
         db.save_usage_account(account.model_dump())
         added.append(account.masked())
 
@@ -849,7 +849,7 @@ def refresh_usage_account(account_id: str, request: Request):
         raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found.")
 
     account = UsageAccount(**raw)
-    account.observation = fetch_observation(account)
+    account.observation = fetch_observation(account, previous=account.observation)
     db.save_usage_account(account.model_dump())
 
     view = account.masked()
@@ -873,7 +873,7 @@ def refresh_all_usage_accounts(request: Request):
     for raw in raw_accounts:
         acc = UsageAccount(**raw)
         try:
-            acc.observation = fetch_observation(acc)
+            acc.observation = fetch_observation(acc, previous=acc.observation)
         except UnknownProvider as exc:
             # One unregistered account must not stop the others refreshing.
             acc.observation = None
