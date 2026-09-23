@@ -41,7 +41,6 @@ sign up for.
 
 | | Light | Dark |
 |---|---|---|
-| **Console** | ![Console, light](docs/screenshots/console-light.png) | ![Console, dark](docs/screenshots/console-dark.png) |
 | **Pipelines** | ![Pipelines, light](docs/screenshots/pipelines-light.png) | ![Pipelines, dark](docs/screenshots/pipelines-dark.png) |
 | **Usage** | ![Usage, light](docs/screenshots/usage-light.png) | ![Usage, dark](docs/screenshots/usage-dark.png) |
 
