@@ -60,6 +60,9 @@ os.environ["XDG_CONFIG_HOME"] = str(_FAKE_HOME / ".config")
 # whole suite. Tests of the refresh itself switch it back on and replace the
 # command.
 os.environ["AGNVIEW_CLAUDE_REFRESH"] = "0"
+# The same for AntiGravity's sign-in in Windows Credential Manager: a test run
+# must not read the developer's own account or call Google with it.
+os.environ["AGNVIEW_AGY_CLOUD"] = "0"
 
 
 def pytest_sessionfinish(session, exitstatus):

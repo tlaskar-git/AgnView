@@ -38,6 +38,7 @@ SOURCE_LABELS: Dict[str, str] = {
     "gemini_api_key": "Gemini API key check",
     # AntiGravity. The panel is the only source on this machine that yields a
     # real percentage for either AntiGravity or Gemini.
+    "agy_cloud": "AntiGravity account quota",
     "agy_panel": "AntiGravity usage panel",
     "agy_log": "AntiGravity log",
     # Others

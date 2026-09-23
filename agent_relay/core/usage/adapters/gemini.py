@@ -12,6 +12,7 @@ import httpx
 
 from ..base import AccountLike, SourceFn, UsageAdapter
 from ..models import PlanInfo, UsageObservation
+from .agy_cloud import fetch_gemini
 from .agy_panel import fetch_panel
 from .google_code_assist import REFRESH_SECONDS, fetch_code_assist
 
@@ -74,10 +75,11 @@ def fetch_api_key(account: AccountLike) -> Optional[UsageObservation]:
 class GeminiAdapter(UsageAdapter):
     provider = "gemini"
     display_name = "Google Gemini"
-    hint = "Reads the AntiGravity app's panel; CLI sign-in names the account"
+    hint = "Reads Gemini quota from Google with AntiGravity's sign-in"
 
     def sources(self) -> List[Tuple[str, SourceFn]]:
         return [
+            ("agy_cloud", fetch_gemini),
             ("agy_panel", fetch_antigravity_panel),
             ("gemini_code_assist", fetch_tier),
             ("gemini_api_key", fetch_api_key),

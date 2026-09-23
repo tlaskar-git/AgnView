@@ -35,6 +35,7 @@ from typing import List, Optional, Tuple
 
 from ..base import AccountLike, SourceFn, UsageAdapter
 from .agy_panel import fetch_panel
+from .agy_cloud import fetch_antigravity
 from ..models import (
     PlanInfo,
     UsageObservation,
@@ -247,13 +248,15 @@ def fetch_desktop_panel(account: AccountLike) -> Optional[UsageObservation]:
 class AntiGravityAdapter(UsageAdapter):
     provider = "antigravity"
     display_name = "AntiGravity (AGY)"
-    hint = "Reads the desktop app's usage panel while the app is open"
+    hint = "Reads AntiGravity's quota from Google with the app's own sign-in"
 
     def sources(self) -> List[Tuple[str, SourceFn]]:
-        # The desktop app's panel carries the real figures. The CLI log carries
-        # only sign-in state, so it sits below as the explanation for an empty
-        # card rather than as a source of numbers.
+        # Google's own quota answer comes first: it needs neither the app window
+        # nor its model picker. The desktop app's panel is next, for a machine
+        # where the sign-in cannot be read. The CLI log carries only sign-in
+        # state, so it sits last as the explanation for an empty card.
         return [
+            ("agy_cloud", fetch_antigravity),
             ("agy_panel", fetch_desktop_panel),
             ("agy_log", fetch_log),
         ]
