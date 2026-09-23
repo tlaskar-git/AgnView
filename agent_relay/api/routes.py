@@ -1230,9 +1230,9 @@ def get_system_capabilities(request: Request):
     }
     default_cwd = cwd
 
-    # 6. Autostart Status, from the registration the CLI actually writes
+    # 6. Autostart Status, from whichever registration this hub runs under
     try:
-        autostart_enabled = autostart.status()
+        autostart_enabled = _autostart_status()
     except Exception:
         autostart_enabled = False
 
@@ -1327,6 +1327,18 @@ def delete_saved_prompt(prompt_id: str, request: Request):
     return {"message": "Prompt removed.", "id": prompt_id}
 
 
+def _in_desktop_app() -> bool:
+    return os.environ.get("AGNVIEW_DESKTOP") == "1"
+
+
+def _autostart_status() -> bool:
+    if _in_desktop_app():
+        from ..desktop.app import autostart_enabled
+
+        return autostart_enabled()
+    return autostart.status()
+
+
 @router.get("/system/autostart")
 def get_autostart_status():
     """Report whether AgnView is registered to start at login.
@@ -1336,6 +1348,11 @@ def get_autostart_status():
     reported autostart off on every normal install, where the CLI had already
     registered it.
     """
+    if _in_desktop_app():
+        # Inside the desktop app this switch and the tray menu's Start with
+        # Windows are one setting. Reading the Run key here showed a second,
+        # unrelated switch that looked on when the tray said off.
+        return {"enabled": _autostart_status(), "command": None, "os": os.name}
     return {
         "enabled": autostart.status(),
         "command": autostart.registered_command(),
@@ -1352,6 +1369,15 @@ def toggle_autostart(req: Dict[str, bool]):
     at all and report success anyway.
     """
     enable = req.get("enable", True)
+    if _in_desktop_app():
+        from ..desktop.app import change_autostart
+
+        try:
+            change_autostart(bool(enable))
+        except OSError as e:
+            return {"success": False, "enabled": _autostart_status(), "message": str(e)}
+        state = "on" if enable else "off"
+        return {"success": True, "enabled": _autostart_status(), "message": f"Start with Windows is {state}."}
     try:
         if enable:
             message = autostart.enable_and_clear_opt_out()

@@ -9,7 +9,7 @@ from agent_relay.desktop import app as desktop
 
 def test_settings_default_when_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "desktop.json")
-    assert desktop.load_settings() == {"port": desktop.DEFAULT_PORT, "autostart": True}
+    assert desktop.load_settings() == {"port": desktop.DEFAULT_PORT, "autostart": False}
 
 
 def test_settings_keep_known_keys_only(tmp_path, monkeypatch):
@@ -53,3 +53,67 @@ def test_sign_in_task_starts_hidden_after_a_delay_and_retries():
     assert "<RunLevel>LeastPrivilege</RunLevel>" in xml
     assert r"<Command>C:\Apps\AgnView &amp; Co\AgnView.exe</Command>" in xml
     assert "<Arguments>--minimized</Arguments>" in xml
+
+
+def test_start_with_windows_is_off_until_turned_on(tmp_path, monkeypatch):
+    monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "desktop.json")
+    assert desktop.autostart_enabled() is False
+
+
+def test_changing_start_with_windows_saves_the_choice(tmp_path, monkeypatch):
+    monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "desktop.json")
+    desktop.save_settings({"port": 9300, "autostart": False})
+    calls = []
+    monkeypatch.setattr(desktop, "set_autostart", lambda enabled: calls.append(enabled))
+
+    desktop.change_autostart(True)
+
+    assert calls == [True]
+    assert desktop.load_settings() == {"port": 9300, "autostart": True}
+    assert desktop.autostart_enabled() is True
+
+
+def test_a_refused_change_saves_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "desktop.json")
+
+    def refuse(enabled):
+        raise OSError("Access is denied.")
+
+    monkeypatch.setattr(desktop, "set_autostart", refuse)
+    try:
+        desktop.change_autostart(True)
+    except OSError:
+        pass
+    assert desktop.autostart_enabled() is False
+
+
+def test_the_close_button_minimises_instead_of_quitting():
+    class Window:
+        minimised = False
+
+        def minimize(self):
+            self.minimised = True
+
+    app = desktop.DesktopApp(hub=None, settings={}, start_hidden=False)
+    app.window = Window()
+    assert app.on_closing() is False
+    assert app.window.minimised
+
+    app.quitting = True
+    assert app.on_closing() is True
+
+
+def test_the_dashboard_switch_drives_the_desktop_setting(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from agent_relay.api.app import create_app
+
+    monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "desktop.json")
+    monkeypatch.setattr(desktop, "set_autostart", lambda enabled: None)
+    monkeypatch.setenv(desktop.DESKTOP_ENV, "1")
+    client = TestClient(create_app(db_path=str(tmp_path / "hub.db")))
+
+    assert client.get("/api/system/autostart").json()["enabled"] is False
+    assert client.post("/api/system/autostart", json={"enable": True}).json()["enabled"] is True
+    assert desktop.autostart_enabled() is True
+    assert client.post("/api/system/autostart", json={"enable": False}).json()["enabled"] is False
