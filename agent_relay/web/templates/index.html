@@ -527,14 +527,15 @@
 <body class="h-full flex flex-col custom-scrollbar">
 
   <!-- Top Global Header (Neutral Slate Developer Tool Aesthetic) -->
-  <header class="h-14 border-b border-[var(--border-color)] bg-[var(--bg-surface)] px-3 sm:px-5 flex items-center justify-between shrink-0 z-40 transition-colors">
-    <!-- Left: Brand + Navigation -->
-    <div class="flex items-center gap-3 sm:gap-6 min-w-0">
+  <header class="h-14 border-b border-[var(--border-color)] bg-[var(--bg-surface)] px-3 sm:px-5 flex items-center justify-between gap-3 shrink-0 z-40 transition-colors">
+    <!-- Left: Brand + Navigation. It never shrinks, so the search button on
+         the right gives way in a narrow window instead of covering the tabs. -->
+    <div class="flex items-center gap-3 sm:gap-6 shrink-0">
       <div class="flex items-center gap-2.5 shrink-0">
         <div class="w-8 h-8 rounded-lg bg-[var(--bg-raised)] border border-[var(--border-color)] p-1 flex items-center justify-center shadow-xs">
           <img src="/static/agnview-icon.png" alt="AgnView" class="w-full h-full object-contain">
         </div>
-        <div class="hidden sm:block">
+        <div class="hidden lg:block">
           <div class="flex items-center gap-2">
             <span class="text-[var(--text-main)] flex items-center">
               <svg class="h-5 w-auto" viewBox="0 0 106 24" fill="currentColor" aria-label="AgnView" role="img">
@@ -551,49 +552,51 @@
 
       <!-- Main Navigation Tabs (Segmented Control) -->
       <nav class="segmented-control flex items-center gap-1 text-xs font-medium shrink-0" aria-label="Main Navigation">
-        <button id="tab-nav-console" onclick="switchView('console')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-active transition select-none" aria-current="page">
+        <!-- Below 960px the labels give way to icons, so the header fits a narrow window. -->
+        <button id="tab-nav-console" onclick="switchView('console')" title="Console" aria-label="Console" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-active transition select-none" aria-current="page">
           <i data-lucide="terminal" class="w-4 h-4"></i>
-          <span>Console</span>
+          <span class="hidden min-[960px]:inline">Console</span>
         </button>
-        <button id="tab-nav-sessions" onclick="switchView('sessions')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-inactive transition select-none">
+        <button id="tab-nav-sessions" onclick="switchView('sessions')" title="Sessions" aria-label="Sessions" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-inactive transition select-none">
           <i data-lucide="radio" class="w-4 h-4"></i>
-          <span>Sessions</span>
+          <span class="hidden min-[960px]:inline">Sessions</span>
           <span id="tab-nav-sessions-count" class="hidden text-[10px] font-mono bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 px-1.5 rounded-full">0</span>
         </button>
-        <button id="tab-nav-pipelines" onclick="switchView('pipelines')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-inactive transition select-none">
+        <button id="tab-nav-pipelines" onclick="switchView('pipelines')" title="Pipelines" aria-label="Pipelines" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-inactive transition select-none">
           <span class="icon-pipelines"></span>
-          <span>Pipelines</span>
+          <span class="hidden min-[960px]:inline">Pipelines</span>
         </button>
-        <button id="tab-nav-usage" onclick="switchView('usage')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-inactive transition select-none">
+        <button id="tab-nav-usage" onclick="switchView('usage')" title="Usage" aria-label="Usage" class="flex items-center gap-1.5 px-3 py-1.5 rounded-md nav-tab-inactive transition select-none">
           <i data-lucide="gauge" class="w-4 h-4"></i>
-          <span>Usage</span>
+          <span class="hidden min-[960px]:inline">Usage</span>
         </button>
       </nav>
     </div>
 
     <!-- Right: Header Actions (All grouped together on the very right) -->
-    <div class="flex items-center gap-2 shrink-0">
+    <div class="flex items-center justify-end gap-2 flex-1 min-w-0">
       <!-- Desktop-only Actions: Leftmost is Command Palette Trigger (Ctrl+K) -->
-      <div class="hidden sm:flex items-center gap-2">
-        <!-- Expanded Ctrl+K button: same h-8 height as other header buttons and extends to the left -->
-        <button onclick="openPalette()" class="h-8 flex items-center justify-between w-64 md:w-80 lg:w-96 bg-[var(--bg-raised)] hover:bg-[var(--border-color)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-main)] text-xs px-3 rounded-lg transition font-medium shadow-xs" title="Command Palette (Ctrl+K)" aria-label="Open Command Palette">
+      <div class="hidden min-[700px]:flex items-center justify-end gap-2 flex-1 min-w-0">
+        <!-- Ctrl+K button: grows up to 24rem and shrinks with the window, down
+             to its search icon, so it never overlaps the navigation tabs -->
+        <button onclick="openPalette()" class="h-8 flex items-center justify-between w-full min-w-[2.25rem] max-w-96 overflow-hidden bg-[var(--bg-raised)] hover:bg-[var(--border-color)] border border-[var(--border-color)] text-[var(--text-secondary)] hover:text-[var(--text-main)] text-xs px-3 rounded-lg transition font-medium shadow-xs" title="Command Palette (Ctrl+K)" aria-label="Open Command Palette">
           <span class="flex items-center gap-2 min-w-0">
             <i data-lucide="search" class="w-3.5 h-3.5 text-[var(--color-action)] shrink-0"></i>
             <span class="font-medium text-xs text-[var(--text-main)] truncate">Search or command...</span>
           </span>
-          <kbd class="bg-[var(--bg-surface)] text-[var(--text-secondary)] text-[10px] px-1.5 py-0.5 rounded font-mono border border-[var(--border-color)] shadow-2xs font-semibold shrink-0 ml-2">Ctrl+K</kbd>
+          <kbd class="hidden xl:inline-block bg-[var(--bg-surface)] text-[var(--text-secondary)] text-[10px] px-1.5 py-0.5 rounded font-mono border border-[var(--border-color)] shadow-2xs font-semibold shrink-0 ml-2">Ctrl+K</kbd>
         </button>
       </div>
 
       <!-- Theme Switcher Pill Toggle -->
-      <button id="theme-toggle-btn" onclick="toggleTheme()" class="theme-pill-toggle" title="Toggle Theme" aria-label="Toggle Dark / Light Mode" role="switch" aria-checked="false">
+      <button id="theme-toggle-btn" onclick="toggleTheme()" class="theme-pill-toggle shrink-0" title="Toggle Theme" aria-label="Toggle Dark / Light Mode" role="switch" aria-checked="false">
         <div class="theme-pill-thumb">
           <i id="theme-icon" data-lucide="sun" class="w-3.5 h-3.5"></i>
         </div>
       </button>
 
       <!-- Desktop-only Actions Continued -->
-      <div class="hidden sm:flex items-center gap-2">
+      <div class="hidden sm:flex items-center gap-2 shrink-0">
         <!-- Transport State Indicator: which path traffic is taking right now -->
         <button id="transport-indicator" onclick="openTransportModal()" class="flex items-center gap-1.5 h-8 px-2.5 rounded-lg bg-[var(--bg-raised)] hover:bg-[var(--border-color)] border border-[var(--border-color)] text-[var(--text-secondary)] transition shadow-sm" title="Transport: checking" aria-label="Transport status: checking">
           <i id="transport-indicator-icon" data-lucide="loader-2" class="w-3.5 h-3.5 animate-spin"></i>
