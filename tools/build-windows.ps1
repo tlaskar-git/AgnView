@@ -54,6 +54,13 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller build failed." }
 $Exe = Join-Path $Root "dist\AgnView\AgnView.exe"
 Write-Host "Built $Exe"
 
+# The zip attached to a GitHub release. It holds the AgnView folder, because
+# the exe needs the files beside it.
+$Zip = Join-Path $Root "dist\AgnView-windows-x64.zip"
+if (Test-Path $Zip) { Remove-Item -Force $Zip }
+Compress-Archive -Path (Join-Path $Root "dist\AgnView") -DestinationPath $Zip
+Write-Host "Packaged $Zip"
+
 if ($Install) {
     $Target = Join-Path $env:LOCALAPPDATA "Programs\AgnView"
     Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force

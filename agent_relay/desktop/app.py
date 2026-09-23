@@ -3,8 +3,8 @@ start at sign-in.
 
 The hub still serves its API on loopback, because paired phones and the agent
 CLIs talk to it. Nobody opens a browser any more: the window hosts the
-dashboard in WebView2, closing the window hides it to the tray, and Quit in
-the tray menu stops the hub.
+dashboard in WebView2. Closing the window, or Quit in the tray menu, stops the
+app and the hub. At sign-in it starts hidden in the tray.
 """
 
 from __future__ import annotations
@@ -268,7 +268,14 @@ class Hub:
         os.environ[BIND_MODE_ENV] = "loopback"
 
         app = create_app(port=self.port)
-        config = uvicorn.Config(app, host="127.0.0.1", port=self.port, log_config=None, log_level="info")
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=self.port,
+            log_config=None,
+            log_level="info",
+            timeout_graceful_shutdown=3,
+        )
         self.server = uvicorn.Server(config)
         self.thread = threading.Thread(target=self.server.run, name="agnview-hub", daemon=True)
         self.thread.start()
@@ -313,12 +320,11 @@ class DesktopApp:
         self.window.restore()
 
     def on_closing(self):
-        # Closing the window hides it. The hub keeps running for paired phones
-        # and agent CLIs until Quit is chosen in the tray.
-        if self.quitting:
-            return True
-        self.window.hide()
-        return False
+        # Closing the window quits AgnView, from the title bar, the taskbar or
+        # Alt+F4 alike. Hiding it to the tray instead left people with an app
+        # they could not close. The sign-in task brings it back next time.
+        self.quitting = True
+        return True
 
     def toggle_autostart(self, _icon=None, _item=None) -> None:
         enabled = not self.settings.get("autostart", True)
@@ -332,12 +338,18 @@ class DesktopApp:
         save_settings(self.settings)
 
     def quit(self, _icon=None, _item=None) -> None:
+        """Quit from the tray menu. Destroying the window ends webview.start,
+        and main() then stops the tray and the hub."""
         self.quitting = True
-        if self.tray is not None:
-            self.tray.stop()
-        self.hub.stop()
         if self.window is not None:
             self.window.destroy()
+
+    def stop_tray(self) -> None:
+        if self.tray is not None:
+            try:
+                self.tray.stop()
+            except Exception:
+                logger.exception("Could not remove the tray icon")
 
     def start_tray(self) -> None:
         import pystray
@@ -365,11 +377,14 @@ class DesktopApp:
         self.window.events.closing += self.on_closing
         watch_for_show_requests(self.show)
         self.start_tray()
-        webview.start(
-            gui="edgechromium",
-            private_mode=False,
-            storage_path=str(DATA_DIR / "webview"),
-        )
+        try:
+            webview.start(
+                gui="edgechromium",
+                private_mode=False,
+                storage_path=str(DATA_DIR / "webview"),
+            )
+        finally:
+            self.stop_tray()
 
 
 # --- Entry point ---------------------------------------------------------------
@@ -434,6 +449,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         message_box(f"AgnView could not start: {exc}\n\nLog: {LOG_PATH}")
         return 1
 
-    DesktopApp(hub, settings, start_hidden=args.minimized).run()
-    hub.stop()
-    return 0
+    try:
+        DesktopApp(hub, settings, start_hidden=args.minimized).run()
+    finally:
+        hub.stop()
+        logger.info("AgnView closed")
+        logging.shutdown()
+        # Worker threads started by the hub, such as the iroh transport, must
+        # not keep a closed app alive in the background.
+        os._exit(0)

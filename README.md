@@ -94,22 +94,40 @@ pip install -e .
 ## Windows desktop app
 
 On Windows, AgnView also runs as a desktop app with its own window, so no
-browser is needed. Build and install it from a source checkout:
+browser is needed. Pick one of three ways to install it.
+
+**Download the app.** No Python is needed. Download `AgnView-windows-x64.zip`
+from the [latest release](https://github.com/tlaskar-git/AgnView/releases/latest),
+extract the `AgnView` folder to `%LOCALAPPDATA%\Programs\AgnView` and run
+`AgnView.exe`. Keep the whole folder together, because the exe needs the files
+beside it.
+
+**Install from PyPI.** This needs Python 3.10 or later:
+
+```bash
+pip install "agnview[desktop]"
+agnview-desktop
+```
+
+**Build it from source.** From a clone of this repository:
 
 ```powershell
 .\tools\build-windows.ps1 -Install
 ```
 
 This builds `AgnView.exe`, copies it to `%LOCALAPPDATA%\Programs\AgnView` and
-adds a Start menu shortcut. The app runs the hub on loopback, shows the
-dashboard in a window and keeps a tray icon. Closing the window hides it to the
-tray, and the hub keeps serving paired phones and agent CLIs. Quit from the tray
-menu stops it.
+adds a Start menu shortcut.
 
-The tray menu has a **Start with Windows** toggle. It is on by default and starts
-AgnView hidden in the tray when you sign in. Settings live in
-`~/.agnview/desktop.json`. Pass `--port` once to change the port, and the app
-remembers it.
+The app needs the Microsoft Edge WebView2 runtime, which Windows 11 and current
+Windows Server include. It runs the hub on loopback and shows the dashboard in
+its window. Closing the window, from the title bar, the taskbar or with Alt+F4,
+quits AgnView and stops the hub.
+
+The tray menu has a **Start with Windows** toggle. It is on by default. It
+creates a Task Scheduler sign-in task for your account, which starts AgnView
+hidden in the tray 15 seconds after you sign in. Open it from the tray icon or
+the Start menu. Settings live in `~/.agnview/desktop.json`. Pass `--port` once to
+change the port, and the app remembers it.
 
 ## Start
 
