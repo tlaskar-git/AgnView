@@ -756,7 +756,7 @@ def cmd_usage(args):
             acc = UsageAccount(**raw)
             if args.refresh or observation_is_stale(acc.observation):
                 try:
-                    acc.observation = fetch_observation(acc)
+                    acc.observation = fetch_observation(acc, previous=acc.observation)
                 except UnknownProvider as exc:
                     acc.observation = None
                     acc.error_message = str(exc)

@@ -7,14 +7,25 @@ Claude Code ``/usage`` command shows. Nothing else on the machine can produce a
 share of a plan limit: the transcripts under ~/.claude/projects carry token
 counts and no rate-limit data at all.
 
-AgnView reads the token and never writes it. Refreshing it would mean rewriting
-the file Claude Code owns, which races Claude Code and risks the sign-in. An
-expired token is reported as expired and the ladder falls through.
+AgnView reads the token and never writes it. Rewriting the file Claude Code
+owns would race Claude Code and risk the sign-in. The token lasts about eight
+hours, and only a Claude Code session refreshes it, so on a machine where
+Claude Code runs from the desktop app rather than the terminal the file went
+stale overnight and the card fell back to a local token count. When the token
+is close to expiry, AgnView now asks Claude Code itself to refresh it, by
+running the smallest possible prompt with the claude command. Claude Code
+stays the only writer of its own credential. Set AGNVIEW_CLAUDE_REFRESH=0 to
+turn this off.
 """
 
 import json
+import os
 import platform
+import shutil
 import subprocess
+import tempfile
+import threading
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -55,6 +66,18 @@ PROFILE_PATH = Path.home() / ".claude.json"
 OAUTH_REFRESH_SECONDS = 300
 # A local file walk hits nothing remote, so it can be recomputed freely.
 LOCAL_REFRESH_SECONDS = 60
+
+# Ask Claude Code to refresh its sign-in this long before the token expires,
+# so the card never sees an expired token while Claude Code is installed.
+SIGN_IN_REFRESH_MARGIN_SECONDS = 30 * 60
+# At most one attempt in this interval, so a broken Claude Code install is not
+# started on every page poll.
+SIGN_IN_REFRESH_RETRY_SECONDS = 15 * 60
+SIGN_IN_REFRESH_TIMEOUT_SECONDS = 120
+SIGN_IN_REFRESH_ENV = "AGNVIEW_CLAUDE_REFRESH"
+# One word back from the smallest model. It is a real request, which is what
+# makes Claude Code refresh the token, and it costs close to nothing.
+SIGN_IN_REFRESH_PROMPT = "Reply with the single word OK."
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +173,100 @@ def _plan_from_profile() -> Optional[PlanInfo]:
 
 
 # ---------------------------------------------------------------------------
+# Keeping the sign-in fresh
+# ---------------------------------------------------------------------------
+
+_refresh_lock = threading.Lock()
+_last_refresh_attempt = 0.0
+_last_refresh_error: Optional[str] = None
+
+
+def _seconds_left(oauth: dict) -> Optional[float]:
+    expires_at = oauth.get("expiresAt")
+    if not isinstance(expires_at, (int, float)):
+        return None
+    return expires_at / 1000.0 - utc_now().timestamp()
+
+
+def _claude_command() -> Optional[str]:
+    return shutil.which("claude")
+
+
+def refresh_sign_in_via_claude_code() -> Optional[str]:
+    """Run Claude Code once so it refreshes its own token.
+
+    Returns None on success, or the reason it did not happen. Attempts are
+    rate limited across threads.
+    """
+    global _last_refresh_attempt, _last_refresh_error
+
+    if os.environ.get(SIGN_IN_REFRESH_ENV, "1").strip().lower() in ("0", "false", "no", "off"):
+        return f"Automatic sign-in refresh is off ({SIGN_IN_REFRESH_ENV}=0)."
+    command = _claude_command()
+    if not command:
+        return "The claude command is not on PATH, so AgnView cannot ask Claude Code to refresh its sign-in."
+
+    with _refresh_lock:
+        now = time.monotonic()
+        if _last_refresh_attempt and now - _last_refresh_attempt < SIGN_IN_REFRESH_RETRY_SECONDS:
+            return _last_refresh_error
+        _last_refresh_attempt = now
+        flags = 0x08000000 if platform.system() == "Windows" else 0  # CREATE_NO_WINDOW
+        try:
+            with tempfile.TemporaryDirectory(prefix="agnview-claude-") as folder:
+                result = subprocess.run(
+                    [command, "-p", SIGN_IN_REFRESH_PROMPT, "--model", "haiku"],
+                    cwd=folder,
+                    capture_output=True,
+                    text=True,
+                    timeout=SIGN_IN_REFRESH_TIMEOUT_SECONDS,
+                    creationflags=flags,
+                )
+        except subprocess.TimeoutExpired:
+            _last_refresh_error = "Claude Code did not finish refreshing its sign-in in time."
+            return _last_refresh_error
+        except OSError as exc:
+            _last_refresh_error = f"Could not start Claude Code to refresh its sign-in: {exc}"
+            return _last_refresh_error
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip().splitlines()
+            _last_refresh_error = (
+                "Claude Code could not refresh its sign-in"
+                + (f": {detail[-1]}" if detail else ".")
+            )
+            return _last_refresh_error
+        _last_refresh_error = None
+        return None
+
+
+def _refresh_in_background() -> None:
+    threading.Thread(
+        target=refresh_sign_in_via_claude_code, name="agnview-claude-sign-in", daemon=True
+    ).start()
+
+
+def fresh_claude_oauth() -> Tuple[Optional[dict], Optional[str]]:
+    """The Claude Code OAuth record, refreshed by Claude Code when needed.
+
+    An expired token is refreshed before the read, which blocks for the
+    few seconds a Claude Code prompt takes. A token close to expiry is
+    refreshed in the background while the current one is still used.
+    """
+    oauth = read_claude_oauth()
+    if not oauth:
+        return None, None
+    left = _seconds_left(oauth)
+    if left is None:
+        return oauth, None
+    if left <= 0:
+        problem = refresh_sign_in_via_claude_code()
+        return read_claude_oauth() or oauth, problem
+    if left <= SIGN_IN_REFRESH_MARGIN_SECONDS:
+        _refresh_in_background()
+    return oauth, None
+
+
+# ---------------------------------------------------------------------------
 # Rung 1: the account usage endpoint
 # ---------------------------------------------------------------------------
 
@@ -223,7 +340,7 @@ def fetch_oauth_api(account: AccountLike) -> Optional[UsageObservation]:
         # handle it rather than reading a different account's windows.
         return None
 
-    oauth = read_claude_oauth()
+    oauth, refresh_problem = fresh_claude_oauth()
     if not oauth:
         return UsageObservation.unavailable(
             "claude_oauth_api",
@@ -247,9 +364,9 @@ def fetch_oauth_api(account: AccountLike) -> Optional[UsageObservation]:
         if expires_at / 1000.0 <= utc_now().timestamp():
             return UsageObservation.unavailable(
                 "claude_oauth_api",
-                "The Claude Code access token has expired. Start Claude Code to "
-                "refresh it. AgnView does not refresh it, because writing that "
-                "file would race Claude Code.",
+                "The Claude Code sign-in has expired. "
+                + (refresh_problem or "Claude Code did not renew it.")
+                + " Run any claude command, or sign in again with claude auth login.",
                 plan=plan,
                 expected_refresh_seconds=OAUTH_REFRESH_SECONDS,
             )

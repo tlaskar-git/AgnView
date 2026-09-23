@@ -202,15 +202,16 @@ def test_claude_ignores_the_codenamed_limit_keys(tmp_path, monkeypatch):
         assert codename not in labels
 
 
-def test_claude_reports_an_expired_token_rather_than_refreshing_it(tmp_path, monkeypatch):
-    """AgnView never rewrites the file Claude Code owns."""
+def test_claude_reports_an_expired_token_it_could_not_renew(tmp_path, monkeypatch):
+    """AgnView never rewrites the file Claude Code owns. With the renewal
+    through Claude Code switched off, the card says what to run."""
     _write_claude_token(tmp_path, monkeypatch, expires_in_hours=-1)
 
     observation = claude_adapter.fetch_oauth_api(_account("claude"))
 
     assert observation.confidence == CONFIDENCE_UNAVAILABLE
     assert "expired" in observation.error
-    assert "Start Claude Code" in observation.error
+    assert "Run any claude command" in observation.error
     # The plan is still known from the credential, so the card can name it.
     assert observation.plan.label == "Max 20x"
 

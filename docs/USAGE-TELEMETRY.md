@@ -11,7 +11,7 @@ provider's own usage panel once and posts the real numbers to
 |---|---|---|---|
 | ChatGPT / Codex | Yes, from `/backend-api/wham/usage` | Always | Not needed |
 | Claude | No | Yes, if a claude.ai session cookie is pasted into the account's credential (Authentication Method: Session Token) | Browser console on claude.ai, settings, usage |
-| Gemini (Antigravity) | No | Yes, while Antigravity is running (its own local debug port, see below) | Antigravity's own DevTools console, advanced builds only |
+| Gemini (Antigravity) | Yes on Windows, from Google's quota service with Antigravity's own sign-in (see below) | Yes, while the stored sign-in is valid. Otherwise, while Antigravity is running (its debug port) | Antigravity's own DevTools console, advanced builds only |
 | DeepSeek | Balance only, from its account API | Always | Not needed |
 
 ## Claude: a pasted session cookie calls claude.ai's own API directly
@@ -63,6 +63,28 @@ automatic refreshes for as long as the window it describes stays open: five
 hours for the session window, seven days for the weekly one. After that the
 figure expires and the card asks for a new sync.
 
+## Antigravity on Windows: Google's own quota answer
+
+The top rung for Antigravity and Gemini is `agent_relay/core/usage/adapters/agy_cloud.py`.
+Antigravity keeps its Google sign-in in Windows Credential Manager under
+`gemini:antigravity`. AgnView reads that entry, never writes it, and calls
+`https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels`, the same
+Code Assist service Antigravity asks. The answer carries a `quotaInfo` per model,
+with `remainingFraction` and `resetTime`, which is what the model picker draws.
+Models are grouped as the picker groups them, Gemini models and Claude and GPT
+models, and only the models the picker offers are counted.
+
+The access token is used as stored. Antigravity renews it whenever the app runs.
+When it has expired, the card keeps its last reading until that window resets
+(see "held readings" in `agent_relay/core/usage/service.py`) and says to open
+Antigravity. The token stays in memory, is never logged, and goes only to
+Google. Set `AGNVIEW_AGY_CLOUD=0` to turn this rung off. The test suite sets it,
+so a test run never reads the developer's own account.
+
+The Gemini CLI sign-in in `~/.gemini/oauth_creds.json` is no route to this
+figure any more. Google answers that client with `UNSUPPORTED_CLIENT` for
+personal accounts and points to Antigravity.
+
 ## Antigravity reads itself, while it is running
 
 Antigravity needs no paste. Every refresh of a Gemini or Antigravity account
@@ -96,7 +118,7 @@ Nothing here reads a browser cookie store, a browser profile or any stored
 credential. It is the app's own loopback debug interface, describing the app's
 own window, reading text already on screen.
 
-## Why Antigravity has no Claude-style permanent option
+## The local quota endpoint, and why the panel read stays as a fallback
 
 Investigated directly: Antigravity's window makes its real quota call to its
 own local backend, not to a Google web page, at
