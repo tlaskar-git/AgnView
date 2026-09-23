@@ -8,10 +8,12 @@ nor its model picker to be open.
 
 On Windows, AntiGravity keeps its sign-in in Windows Credential Manager under
 ``gemini:antigravity``. AgnView reads it and never writes it. The access token
-is used as stored. AntiGravity renews it whenever the app runs, and a token
-that has expired is reported as such, so the card keeps its last reading
-until the app next runs. The token stays in memory, is never logged, and goes
-only to Google.
+lasts about an hour, and AntiGravity renews it only while the app runs. When
+the stored one has expired, AgnView renews a copy in memory with the stored
+refresh token and AntiGravity's own sign-in client, whose secret it reads from
+the installed app at run time. Google does not rotate the refresh token on
+renewal, so the stored sign-in stays valid for AntiGravity. Tokens stay in
+memory, are never logged, and go only to Google.
 
 Google reports one limit per model. Models are grouped the way the model
 picker groups them: Gemini models, and Claude and GPT models. A group's usage
@@ -52,9 +54,10 @@ EXPIRY_MARGIN = timedelta(seconds=60)
 GROUP_GEMINI = "Gemini models"
 GROUP_OTHERS = "Claude and GPT models"
 
+TOKEN_URL = "https://oauth2.googleapis.com/token"
 OPEN_APP_HINT = (
-    "Open AntiGravity once so it renews its sign-in. AgnView does not renew "
-    "it, and keeps the last reading until then."
+    "Open AntiGravity once so it renews its sign-in. AgnView keeps the last "
+    "reading until then."
 )
 
 
@@ -139,6 +142,108 @@ def account_email(sign_in: dict) -> Optional[str]:
         return None
     email = claims.get("email")
     return email if isinstance(email, str) else None
+
+
+# ---------------------------------------------------------------------------
+# Renewal
+# ---------------------------------------------------------------------------
+
+# Renewed access tokens, by refresh token, with their expiry. In memory only.
+_renewed: Dict[str, Tuple[str, datetime]] = {}
+# The secret that worked for a client ID, so the install is read once.
+_client_secrets: Dict[str, str] = {}
+
+
+def id_token_client(sign_in: dict) -> Optional[str]:
+    """The OAuth client the sign-in was issued to, from its ID token."""
+    parts = (sign_in.get("id_token") or "").split(".")
+    if len(parts) < 2:
+        return None
+    payload = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(payload))
+    except (ValueError, TypeError):
+        return None
+    aud = claims.get("aud")
+    return aud if isinstance(aud, str) else None
+
+
+def installed_client_secrets() -> List[str]:
+    """Client secrets compiled into the installed AntiGravity language server.
+
+    AntiGravity is an installed app, so its sign-in client secret ships inside
+    it and is not secret in the usual sense. AgnView reads it from the
+    person's own install at run time rather than carrying a copy, so nothing
+    of Google's or AntiGravity's is in this repository. The binary holds more
+    than one, and the one that renews the sign-in is remembered.
+    """
+    import re
+
+    root = os.environ.get("LOCALAPPDATA")
+    if not root:
+        return []
+    path = os.path.join(root, "Programs", "antigravity", "resources", "bin", "language_server.exe")
+    try:
+        with open(path, "rb") as handle:
+            blob = handle.read()
+    except OSError:
+        return []
+    found: List[str] = []
+    for match in re.finditer(rb"GOCSPX-[A-Za-z0-9_-]{28}", blob):
+        value = match.group(0).decode("ascii")
+        if value not in found:
+            found.append(value)
+    return found[:4]
+
+
+def renew_access_token(sign_in: dict) -> Tuple[Optional[str], Optional[str]]:
+    """A fresh access token in memory, or None and the reason."""
+    refresh_token = ((sign_in.get("token") or {}).get("refresh_token") or "").strip()
+    client_id = id_token_client(sign_in)
+    if not refresh_token or not client_id:
+        return None, "AntiGravity's stored sign-in carries no refresh token."
+
+    cached = _renewed.get(refresh_token)
+    if cached and cached[1] - EXPIRY_MARGIN > utc_now():
+        return cached[0], None
+
+    known = _client_secrets.get(client_id)
+    candidates = [known] if known else installed_client_secrets()
+    if not candidates:
+        return None, "AntiGravity is not installed where AgnView looks for it."
+
+    last_error = "Google did not renew AntiGravity's sign-in."
+    try:
+        with httpx.Client(timeout=20.0) as client:
+            for secret in candidates:
+                res = client.post(
+                    TOKEN_URL,
+                    data={
+                        "client_id": client_id,
+                        "client_secret": secret,
+                        "refresh_token": refresh_token,
+                        "grant_type": "refresh_token",
+                    },
+                )
+                if res.status_code == 200:
+                    body = res.json()
+                    token = body.get("access_token")
+                    if not token:
+                        continue
+                    lifetime = int(body.get("expires_in") or 3600)
+                    _client_secrets[client_id] = secret
+                    _renewed[refresh_token] = (token, utc_now() + timedelta(seconds=lifetime))
+                    return token, None
+                try:
+                    error = res.json().get("error")
+                except ValueError:
+                    error = None
+                if error == "invalid_grant":
+                    return None, "AntiGravity's sign-in was revoked. Sign in to AntiGravity again."
+                last_error = f"Google did not renew AntiGravity's sign-in (status {res.status_code})."
+    except Exception as exc:
+        return None, f"Could not reach Google to renew AntiGravity's sign-in: {exc}"
+    return None, last_error
 
 
 # ---------------------------------------------------------------------------
@@ -262,10 +367,12 @@ def fetch_cloud_quota(product: str) -> Optional[UsageObservation]:
             plan=plan, expected_refresh_seconds=REFRESH_SECONDS,
         )
     if expiry is not None and expiry - EXPIRY_MARGIN <= utc_now():
-        return UsageObservation.unavailable(
-            "agy_cloud", "AntiGravity's sign-in has expired. " + OPEN_APP_HINT,
-            plan=plan, expected_refresh_seconds=REFRESH_SECONDS,
-        )
+        token, problem = renew_access_token(sign_in)
+        if not token:
+            return UsageObservation.unavailable(
+                "agy_cloud", f"AntiGravity's sign-in has expired. {problem} " + OPEN_APP_HINT,
+                plan=plan, expected_refresh_seconds=REFRESH_SECONDS,
+            )
 
     # Google answers this service for the AntiGravity client, which names
     # itself in the user agent.

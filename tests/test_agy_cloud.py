@@ -79,9 +79,12 @@ class _Response:
 
 
 class _Client:
-    def __init__(self, models_response):
+    def __init__(self, models_response, token_responses=None):
         self.models_response = models_response
+        self.token_responses = dict(token_responses or {})
         self.calls = []
+        self.secrets_tried = []
+        self.last_headers = None
 
     def __enter__(self):
         return self
@@ -89,20 +92,70 @@ class _Client:
     def __exit__(self, *exc):
         return False
 
-    def post(self, url, headers=None, json=None):
+    def post(self, url, headers=None, json=None, data=None):
         self.calls.append(url)
+        if url == agy_cloud.TOKEN_URL:
+            self.secrets_tried.append(data["client_secret"])
+            return self.token_responses.get(data["client_secret"], _Response(401, {"error": "invalid_client"}))
+        self.last_headers = headers
         if url.endswith(":loadCodeAssist"):
             return _Response(200, {"cloudaicompanionProject": "test-project", "paidTier": {"name": "Google AI Pro"}})
         return self.models_response
 
 
-def _enable(monkeypatch, sign_in, models_response):
+def _enable(monkeypatch, sign_in, models_response, secrets=(), token_responses=None):
     monkeypatch.setenv(agy_cloud.ENABLE_ENV, "1")
     monkeypatch.setattr(agy_cloud, "read_sign_in", lambda: sign_in)
     monkeypatch.setattr(agy_cloud, "_project_cache", {})
-    client = _Client(models_response)
+    monkeypatch.setattr(agy_cloud, "_renewed", {})
+    monkeypatch.setattr(agy_cloud, "_client_secrets", {})
+    # Never read the developer's own AntiGravity install.
+    monkeypatch.setattr(agy_cloud, "installed_client_secrets", lambda: list(secrets))
+    client = _Client(models_response, token_responses)
     monkeypatch.setattr(agy_cloud.httpx, "Client", lambda **kwargs: client)
     return client
+
+
+def _renewable_sign_in(expires_in_minutes):
+    sign_in = _sign_in(expires_in_minutes)
+    claims = base64.urlsafe_b64encode(
+        json.dumps({"email": "user@example.com", "aud": "test-client.apps.googleusercontent.com"}).encode()
+    ).decode().rstrip("=")
+    sign_in["id_token"] = f"header.{claims}.signature"
+    sign_in["token"]["refresh_token"] = "test-refresh"
+    return sign_in
+
+
+def test_an_expired_sign_in_is_renewed_in_memory(monkeypatch):
+    client = _enable(
+        monkeypatch,
+        _renewable_sign_in(-5),
+        _Response(200, _models()),
+        secrets=["test-secret-a", "test-secret-b"],
+        token_responses={"test-secret-b": _Response(200, {"access_token": "renewed", "expires_in": 3599})},
+    )
+    observation = agy_cloud.fetch_cloud_quota("AntiGravity")
+    assert observation.confidence == CONFIDENCE_MEASURED
+    assert client.secrets_tried == ["test-secret-a", "test-secret-b"]
+    assert client.last_headers["Authorization"] == "Bearer renewed"
+
+    # The renewed token and the working secret are reused, not requested again.
+    client.secrets_tried.clear()
+    agy_cloud.fetch_cloud_quota("AntiGravity")
+    assert client.secrets_tried == []
+
+
+def test_a_revoked_sign_in_says_to_sign_in_again(monkeypatch):
+    _enable(
+        monkeypatch,
+        _renewable_sign_in(-5),
+        _Response(200, _models()),
+        secrets=["test-secret-a"],
+        token_responses={"test-secret-a": _Response(400, {"error": "invalid_grant"})},
+    )
+    observation = agy_cloud.fetch_cloud_quota("AntiGravity")
+    assert observation.confidence == CONFIDENCE_UNAVAILABLE
+    assert "Sign in to AntiGravity again" in observation.error
 
 
 def test_a_valid_sign_in_gives_a_measured_reading(monkeypatch):
@@ -114,7 +167,7 @@ def test_a_valid_sign_in_gives_a_measured_reading(monkeypatch):
     assert observation.plan.label == "user@example.com"
 
 
-def test_an_expired_sign_in_says_to_open_antigravity(monkeypatch):
+def test_an_expired_sign_in_without_renewal_says_to_open_antigravity(monkeypatch):
     client = _enable(monkeypatch, _sign_in(-5), _Response(200, _models()))
     observation = agy_cloud.fetch_cloud_quota("AntiGravity")
     assert observation.confidence == CONFIDENCE_UNAVAILABLE
