@@ -57,42 +57,132 @@ def save_settings(settings: dict) -> None:
 
 
 # --- Start with Windows --------------------------------------------------------
+#
+# Start with Windows is a Task Scheduler task with a sign-in trigger, not a Run
+# key value. Explorer skipped the Run value after an unexpected restart with
+# nothing in any log, while it still started the other Run entries. The task
+# is started by the Task Scheduler service itself, waits a few seconds for the
+# desktop, and retries if the app fails to start. Creating a sign-in task for
+# your own account needs no admin rights.
 
-def launch_command() -> str:
-    """The command the Run key starts at sign-in. The window stays hidden in
-    the tray, since nobody asked to see it yet."""
+TASK_NAME = "AgnView"
+SIGN_IN_DELAY = "PT15S"
+CREATE_NO_WINDOW = 0x08000000
+
+
+def launch_command() -> tuple[str, str]:
+    """The program and arguments that start AgnView at sign-in. The window
+    stays hidden in the tray, since nobody asked to see it yet."""
     if getattr(sys, "frozen", False):
-        return f'"{sys.executable}" --minimized'
+        return sys.executable, "--minimized"
     pythonw = Path(sys.executable).with_name("pythonw.exe")
     interpreter = pythonw if pythonw.exists() else Path(sys.executable)
-    return f'"{interpreter}" -m agent_relay.desktop --minimized'
+    return str(interpreter), "-m agent_relay.desktop --minimized"
+
+
+def current_user() -> str:
+    domain = os.environ.get("USERDOMAIN")
+    user = os.environ.get("USERNAME", "")
+    return f"{domain}\\{user}" if domain else user
+
+
+def task_xml(program: str, arguments: str, user: str) -> str:
+    from xml.sax.saxutils import escape
+
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Starts AgnView hidden in the tray at sign-in</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{escape(user)}</UserId>
+      <Delay>{SIGN_IN_DELAY}</Delay>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{escape(user)}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
+    <Enabled>true</Enabled>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{escape(program)}</Command>
+      <Arguments>{escape(arguments)}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"""
+
+
+def _schtasks(*args: str):
+    import subprocess
+
+    return subprocess.run(
+        ["schtasks", *args],
+        capture_output=True,
+        text=True,
+        creationflags=CREATE_NO_WINDOW,
+    )
 
 
 def autostart_registered() -> bool:
+    """True when the sign-in task exists and starts this install."""
+    result = _schtasks("/Query", "/TN", TASK_NAME, "/XML")
+    if result.returncode != 0:
+        return False
+    program, _arguments = launch_command()
+    from xml.sax.saxutils import escape
+
+    return escape(program).lower() in result.stdout.lower()
+
+
+def remove_run_values() -> None:
+    """Remove the Run key value from older AgnView versions. It shares the
+    name `agnview serve` registers, so this also stops the old browser-only
+    hub from starting at sign-in beside the desktop app."""
     import winreg
 
     try:
-        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY_PATH, 0, winreg.KEY_READ) as key:
-            value, _kind = winreg.QueryValueEx(key, APP_NAME)
-            return value == launch_command()
-    except OSError:
-        return False
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY_PATH, 0, winreg.KEY_SET_VALUE) as key:
+            winreg.DeleteValue(key, APP_NAME)
+    except FileNotFoundError:
+        pass
 
 
 def set_autostart(enabled: bool) -> None:
-    """Write or remove the Run value. It shares its name with the one
-    `agnview serve` registers, so the desktop app replaces the old
-    browser-only hub at sign-in instead of starting a second one."""
-    import winreg
+    """Create or remove the sign-in task."""
+    if enabled:
+        import tempfile
 
-    with winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY_PATH, 0, winreg.KEY_SET_VALUE) as key:
-        if enabled:
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, launch_command())
-        else:
-            try:
-                winreg.DeleteValue(key, APP_NAME)
-            except FileNotFoundError:
-                pass
+        program, arguments = launch_command()
+        xml = task_xml(program, arguments, current_user())
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "agnview-task.xml"
+            path.write_text(xml, encoding="utf-16")
+            result = _schtasks("/Create", "/TN", TASK_NAME, "/XML", str(path), "/F")
+        if result.returncode != 0:
+            raise OSError(result.stderr.strip() or result.stdout.strip() or "schtasks failed")
+    else:
+        result = _schtasks("/Delete", "/TN", TASK_NAME, "/F")
+        if result.returncode != 0 and autostart_registered():
+            raise OSError(result.stderr.strip() or "schtasks failed")
+
+    remove_run_values()
 
     from ..core import autostart
 
@@ -100,6 +190,17 @@ def set_autostart(enabled: bool) -> None:
     # its own registration back behind it.
     autostart.OPT_OUT_MARKER.parent.mkdir(parents=True, exist_ok=True)
     autostart.OPT_OUT_MARKER.write_text("")
+
+
+def run_value_present() -> bool:
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY_PATH, 0, winreg.KEY_READ) as key:
+            winreg.QueryValueEx(key, APP_NAME)
+            return True
+    except OSError:
+        return False
 
 
 # --- Single instance -----------------------------------------------------------
@@ -220,7 +321,7 @@ class DesktopApp:
         return False
 
     def toggle_autostart(self, _icon=None, _item=None) -> None:
-        enabled = not autostart_registered()
+        enabled = not self.settings.get("autostart", True)
         try:
             set_autostart(enabled)
         except OSError as exc:
@@ -243,7 +344,7 @@ class DesktopApp:
 
         menu = pystray.Menu(
             pystray.MenuItem("Open AgnView", lambda: self.show(), default=True),
-            pystray.MenuItem("Start with Windows", self.toggle_autostart, checked=lambda _item: autostart_registered()),
+            pystray.MenuItem("Start with Windows", self.toggle_autostart, checked=lambda _item: bool(self.settings.get("autostart", True))),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit AgnView", self.quit),
         )
@@ -311,8 +412,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Honour the saved choice at every start, so an install moved to a new
     # folder still starts from the right place.
     try:
-        if settings.get("autostart", True) != autostart_registered():
-            set_autostart(bool(settings.get("autostart", True)))
+        wanted = bool(settings.get("autostart", True))
+        if wanted != autostart_registered() or run_value_present():
+            set_autostart(wanted)
     except OSError:
         logger.exception("Could not update the Start with Windows registration")
 

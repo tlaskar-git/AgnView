@@ -35,10 +35,21 @@ def test_settings_round_trip(tmp_path, monkeypatch):
 def test_frozen_build_registers_itself_minimized(monkeypatch):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(sys, "executable", r"C:\Program Files\AgnView\AgnView.exe")
-    assert desktop.launch_command() == r'"C:\Program Files\AgnView\AgnView.exe" --minimized'
+    assert desktop.launch_command() == (r"C:\Program Files\AgnView\AgnView.exe", "--minimized")
 
 
 def test_source_install_registers_the_module_minimized(monkeypatch):
     monkeypatch.delattr(sys, "frozen", raising=False)
-    command = desktop.launch_command()
-    assert command.endswith("-m agent_relay.desktop --minimized")
+    _program, arguments = desktop.launch_command()
+    assert arguments == "-m agent_relay.desktop --minimized"
+
+
+def test_sign_in_task_starts_hidden_after_a_delay_and_retries():
+    xml = desktop.task_xml(r"C:\Apps\AgnView & Co\AgnView.exe", "--minimized", r"HOST\user")
+    assert "<LogonTrigger>" in xml
+    assert r"<UserId>HOST\user</UserId>" in xml
+    assert f"<Delay>{desktop.SIGN_IN_DELAY}</Delay>" in xml
+    assert "<RestartOnFailure>" in xml
+    assert "<RunLevel>LeastPrivilege</RunLevel>" in xml
+    assert r"<Command>C:\Apps\AgnView &amp; Co\AgnView.exe</Command>" in xml
+    assert "<Arguments>--minimized</Arguments>" in xml
