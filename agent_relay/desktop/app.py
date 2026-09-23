@@ -3,8 +3,9 @@ start at sign-in.
 
 The hub still serves its API on loopback, because paired phones and the agent
 CLIs talk to it. Nobody opens a browser any more: the window hosts the
-dashboard in WebView2. Closing the window, or Quit in the tray menu, stops the
-app and the hub. At sign-in it starts hidden in the tray.
+dashboard in WebView2. The close button minimises the window to the taskbar,
+and Quit AgnView in the tray menu stops the app and the hub. With Start with
+Windows on, it starts hidden in the tray at sign-in.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ DATA_DIR = Path.home() / ".agnview"
 SETTINGS_PATH = DATA_DIR / "desktop.json"
 LOG_PATH = DATA_DIR / "logs" / "desktop.log"
 DEFAULT_PORT = 8765
+DESKTOP_ENV = "AGNVIEW_DESKTOP"
 
 # One instance per signed-in user. A second launch signals the first to show
 # its window and then exits, so a double-click on the shortcut never starts a
@@ -41,7 +43,9 @@ logger = logging.getLogger("agnview.desktop")
 # --- Settings ------------------------------------------------------------------
 
 def load_settings() -> dict:
-    settings = {"port": DEFAULT_PORT, "autostart": True}
+    # Start with Windows is off until a person turns it on. It used to be on
+    # by default, so a first start registered a sign-in task nobody asked for.
+    settings = {"port": DEFAULT_PORT, "autostart": False}
     try:
         stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         if isinstance(stored, dict):
@@ -54,6 +58,21 @@ def load_settings() -> dict:
 def save_settings(settings: dict) -> None:
     SETTINGS_PATH.parent.mkdir(parents=True, exist_ok=True)
     SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+
+
+def autostart_enabled() -> bool:
+    """The saved Start with Windows choice. The tray menu and the dashboard
+    both read it from the settings file, so they can never disagree."""
+    return bool(load_settings().get("autostart", False))
+
+
+def change_autostart(enabled: bool) -> None:
+    """Turn Start with Windows on or off and save the choice. Raises OSError
+    when Task Scheduler refuses, and then saves nothing."""
+    set_autostart(enabled)
+    settings = load_settings()
+    settings["autostart"] = bool(enabled)
+    save_settings(settings)
 
 
 # --- Start with Windows --------------------------------------------------------
@@ -266,6 +285,9 @@ class Hub:
 
         os.environ["AGENT_RELAY_TOKEN"] = os.environ.get("AGENT_RELAY_TOKEN") or get_or_create_pairing_token()
         os.environ[BIND_MODE_ENV] = "loopback"
+        # Tells the dashboard's autostart switch to drive this app's Start with
+        # Windows setting, not the Run key the browser-only hub uses.
+        os.environ[DESKTOP_ENV] = "1"
 
         app = create_app(port=self.port)
         config = uvicorn.Config(
@@ -320,22 +342,21 @@ class DesktopApp:
         self.window.restore()
 
     def on_closing(self):
-        # Closing the window quits AgnView, from the title bar, the taskbar or
-        # Alt+F4 alike. Hiding it to the tray instead left people with an app
-        # they could not close. The sign-in task brings it back next time.
-        self.quitting = True
-        return True
+        # The close button minimises AgnView to the taskbar, so the hub keeps
+        # serving and the window is one click away. Quit AgnView in the tray
+        # menu is what stops it.
+        if self.quitting:
+            return True
+        self.window.minimize()
+        return False
 
     def toggle_autostart(self, _icon=None, _item=None) -> None:
-        enabled = not self.settings.get("autostart", True)
+        enabled = not autostart_enabled()
         try:
-            set_autostart(enabled)
+            change_autostart(enabled)
         except OSError as exc:
             logger.exception("Could not change the Start with Windows setting")
             message_box(f"Could not change the Start with Windows setting: {exc}")
-            return
-        self.settings["autostart"] = enabled
-        save_settings(self.settings)
 
     def quit(self, _icon=None, _item=None) -> None:
         """Quit from the tray menu. Destroying the window ends webview.start,
@@ -356,7 +377,7 @@ class DesktopApp:
 
         menu = pystray.Menu(
             pystray.MenuItem("Open AgnView", lambda: self.show(), default=True),
-            pystray.MenuItem("Start with Windows", self.toggle_autostart, checked=lambda _item: bool(self.settings.get("autostart", True))),
+            pystray.MenuItem("Start with Windows", self.toggle_autostart, checked=lambda _item: autostart_enabled()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit AgnView", self.quit),
         )
@@ -427,7 +448,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Honour the saved choice at every start, so an install moved to a new
     # folder still starts from the right place.
     try:
-        wanted = bool(settings.get("autostart", True))
+        wanted = bool(settings.get("autostart", False))
         if wanted != autostart_registered() or run_value_present():
             set_autostart(wanted)
     except OSError:
