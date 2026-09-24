@@ -143,9 +143,9 @@ The app needs the Microsoft Edge WebView2 runtime, which Windows 11 and current
 Windows Server include. It runs the hub on loopback and shows the dashboard in
 its window.
 
-- **The close button** closes AgnView and stops the hub, as in any Windows app.
-  The minimise button keeps it on the taskbar. **Quit AgnView** in the tray
-  menu also closes it.
+- **The close button** hides AgnView to its tray icon, next to the clock, and
+  the hub keeps running. Click the tray icon to open it again. To close it for
+  good, right-click the tray icon and choose **Quit AgnView**.
 - **Start with Windows** in the tray menu is off until you turn it on. It
   creates a Task Scheduler sign-in task for your account, which starts AgnView
   hidden in the tray 15 seconds after you sign in. The same switch is in the

@@ -8,6 +8,8 @@ import subprocess
 from pathlib import Path
 from typing import Tuple, Optional
 
+from .proc import no_window
+
 
 CERT_DIR = Path.home() / ".agnview" / "certs"
 CERT_FILE = CERT_DIR / "cert.pem"
@@ -61,7 +63,7 @@ def ensure_self_signed_cert() -> Tuple[Path, Path]:
         "-subj", "/CN=AgnView Hub/O=AgnView/C=UK"
     ]
 
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, **no_window())
     if result.returncode != 0:
         raise RuntimeError(f"Failed to generate self-signed certificate: {result.stderr}")
 

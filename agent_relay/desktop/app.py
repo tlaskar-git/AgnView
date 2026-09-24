@@ -3,9 +3,10 @@ start at sign-in.
 
 The hub still serves its API on loopback, because paired phones and the agent
 CLIs talk to it. Nobody opens a browser any more: the window hosts the
-dashboard in WebView2. The close button, or Quit AgnView in the tray menu,
-closes the app and stops the hub. The minimise button keeps it on the taskbar.
-With Start with Windows on, it starts hidden in the tray at sign-in.
+dashboard in WebView2. The close button hides the window to the tray icon and
+the hub keeps running. Clicking the tray icon opens it again, and Quit AgnView
+in the tray menu closes the app and stops the hub. With Start with Windows on,
+it starts hidden in the tray at sign-in.
 """
 
 from __future__ import annotations
@@ -352,6 +353,7 @@ class DesktopApp:
         self.window = None
         self.tray = None
         self.quitting = False
+        self.told_about_tray = False
 
     def show(self) -> None:
         if self.window is None:
@@ -360,11 +362,28 @@ class DesktopApp:
         self.window.restore()
 
     def on_closing(self):
-        # The close button closes AgnView, as in any Windows app, and the
-        # minimise button keeps it on the taskbar. Minimising on close left
-        # people with no way to close the window short of the tray menu.
-        self.quitting = True
-        return True
+        # The close button hides the window to the tray icon, and the hub keeps
+        # running. Clicking the tray icon brings it back, and Quit AgnView in
+        # the tray menu closes it for good. The first hide says so, because a
+        # window that vanishes looks like a closed app.
+        if self.quitting:
+            return True
+        self.window.hide()
+        if not self.told_about_tray:
+            self.told_about_tray = True
+            self.notify(
+                "AgnView is still running in the tray. Click its icon to open it, "
+                "or right-click it and choose Quit AgnView to close it."
+            )
+        return False
+
+    def notify(self, message: str) -> None:
+        if self.tray is None:
+            return
+        try:
+            self.tray.notify(message, APP_NAME)
+        except Exception:
+            logger.exception("Could not show the tray notification")
 
     def toggle_autostart(self, _icon=None, _item=None) -> None:
         enabled = not autostart_enabled()
