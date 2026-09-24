@@ -67,6 +67,10 @@ sign up for.
 | Python | 3.10 or newer |
 | Browser | any current Chrome, Edge, Firefox or Safari |
 
+The Windows desktop app is Windows only for now. On macOS and Linux, AgnView
+runs with `agnview serve` in a browser. [`docs/PLATFORM-STATUS.md`](docs/PLATFORM-STATUS.md)
+lists what works on each platform and what is still to build.
+
 ## Clients
 
 The AgnView hub in this repo covers Windows, macOS and Linux.
