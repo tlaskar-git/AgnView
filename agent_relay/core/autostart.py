@@ -32,6 +32,9 @@ LINUX_AUTOSTART_PATH = Path.home() / ".config" / "autostart" / "agnview.desktop"
 # presence stops `ensure_enabled_by_default` from turning autostart back on
 # behind their back on the next `agnview serve`.
 OPT_OUT_MARKER = Path.home() / ".agnview" / ".autostart_opt_out"
+# Written by the Windows desktop app. Its presence means the desktop app is
+# installed and owns starting at sign-in.
+DESKTOP_SETTINGS = Path.home() / ".agnview" / "desktop.json"
 
 
 def _resolve_command_parts(serve_args: Sequence[str] = ()) -> list[str]:
@@ -331,7 +334,10 @@ def ensure_enabled_by_default(serve_args: Sequence[str] = ()) -> Optional[str]:
     and None when it left everything alone, so the caller can print a one-off
     notice rather than one on every start.
     """
-    if OPT_OUT_MARKER.exists():
+    if OPT_OUT_MARKER.exists() or DESKTOP_SETTINGS.exists():
+        # The desktop app owns starting at sign-in on a machine where it is
+        # installed. A registration from `agnview serve` started a second,
+        # browser-only hub at sign-in that took the port first.
         return None
     try:
         if not status():

@@ -27,7 +27,12 @@ RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
 DATA_DIR = Path.home() / ".agnview"
 SETTINGS_PATH = DATA_DIR / "desktop.json"
 LOG_PATH = DATA_DIR / "logs" / "desktop.log"
-DEFAULT_PORT = 8765
+# The desktop app's own port, away from 8765, which `agnview serve` uses by
+# default. Sharing a port meant an old browser-only hub started at sign-in
+# took it first and the desktop app then refused to start.
+DEFAULT_PORT = 18845
+# When the saved port is taken, the next free one in this many is used.
+PORT_SEARCH_SPAN = 20
 DESKTOP_ENV = "AGNVIEW_DESKTOP"
 
 # One instance per signed-in user. A second launch signals the first to show
@@ -259,6 +264,19 @@ def message_box(text: str) -> None:
 
 # --- Hub -----------------------------------------------------------------------
 
+def choose_port(preferred: int) -> Optional[int]:
+    """The saved port, or the next free one after it.
+
+    A busy port used to stop the app with a message, so one stray process
+    kept AgnView from starting at all. The saved port is left as it is, so the
+    next start tries it again first.
+    """
+    for port in range(preferred, preferred + PORT_SEARCH_SPAN):
+        if not port_in_use(port):
+            return port
+    return None
+
+
 def port_in_use(port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.settimeout(0.5)
@@ -454,13 +472,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     except OSError:
         logger.exception("Could not update the Start with Windows registration")
 
-    port = int(settings["port"])
-    if port_in_use(port):
+    port = choose_port(int(settings["port"]))
+    if port is None:
         message_box(
-            f"Port {port} is already in use, so AgnView cannot start its hub.\n\n"
-            "Stop the other program, or close an older AgnView started with `agnview serve`, then start AgnView again."
+            f"Ports {settings['port']} to {int(settings['port']) + PORT_SEARCH_SPAN - 1} are all in use, "
+            "so AgnView cannot start its hub.\n\n"
+            "Close an older AgnView started with `agnview serve`, then start AgnView again."
         )
         return 1
+    if port != int(settings["port"]):
+        logger.warning("Port %s is in use, so this run serves on %s", settings["port"], port)
 
     hub = Hub(port)
     try:
