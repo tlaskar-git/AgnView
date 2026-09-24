@@ -85,3 +85,12 @@ def test_a_newer_codex_reply_is_still_read():
     line = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "Pong."}})
     assert parse_codex_stream_line(line).text == "Pong."
     assert parse_codex_output(line)[0] == "Pong."
+
+
+def test_child_processes_start_without_a_console_window_on_windows(monkeypatch):
+    from agent_relay.core import proc
+
+    monkeypatch.setattr(proc.sys, "platform", "win32")
+    assert proc.no_window() == {"creationflags": proc.CREATE_NO_WINDOW}
+    monkeypatch.setattr(proc.sys, "platform", "linux")
+    assert proc.no_window() == {}

@@ -7,6 +7,8 @@ import re
 from typing import Any, Dict, List, Optional
 import ipaddress
 
+from .proc import no_window
+
 
 def is_tailscale_cgnat_address(ip_str: str) -> bool:
     """Check if an IP string is within the Carrier-Grade NAT (CGNAT) range 100.64.0.0/10 used by Tailscale."""
@@ -76,7 +78,8 @@ def get_tailscale_ip() -> Optional[str]:
             ["tailscale", "ip", "-4"],
             capture_output=True,
             text=True,
-            timeout=2.0
+            timeout=2.0,
+            **no_window(),
         )
         if proc.returncode == 0:
             ip = proc.stdout.strip()
@@ -92,7 +95,8 @@ def get_tailscale_ip() -> Optional[str]:
                 ["ipconfig"],
                 capture_output=True,
                 text=True,
-                timeout=2.0
+                timeout=2.0,
+                **no_window(),
             )
             if proc.returncode == 0:
                 matches = re.findall(r"IPv4 Address[.\s]+:\s*(100\.\d{1,3}\.\d{1,3}\.\d{1,3})", proc.stdout)

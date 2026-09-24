@@ -87,11 +87,35 @@ def test_a_refused_change_saves_nothing(tmp_path, monkeypatch):
     assert desktop.autostart_enabled() is False
 
 
-def test_the_close_button_closes_the_app():
+def test_the_close_button_hides_to_the_tray_and_says_so_once():
+    class Window:
+        hidden = 0
+
+        def hide(self):
+            self.hidden += 1
+
+    class Tray:
+        def __init__(self):
+            self.messages = []
+
+        def notify(self, message, title):
+            self.messages.append(message)
+
     app = desktop.DesktopApp(hub=None, settings={}, start_hidden=False)
-    app.window = object()
+    app.window = Window()
+    app.tray = Tray()
+
+    assert app.on_closing() is False
+    assert app.on_closing() is False
+    assert app.window.hidden == 2
+    assert len(app.tray.messages) == 1
+    assert "Quit AgnView" in app.tray.messages[0]
+
+
+def test_quit_from_the_tray_closes_the_app():
+    app = desktop.DesktopApp(hub=None, settings={}, start_hidden=False)
+    app.quitting = True
     assert app.on_closing() is True
-    assert app.quitting is True
 
 
 def test_the_dashboard_switch_drives_the_desktop_setting(tmp_path, monkeypatch):

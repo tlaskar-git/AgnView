@@ -16,6 +16,7 @@ from typing import Optional, Dict, Callable, List, Tuple
 from datetime import datetime, timezone
 
 from .db import Database
+from .proc import no_window
 from .adapters import AdapterManager, AgentAdapter
 from .live_sessions import (
     LIVE_SESSION_IDLE_TIMEOUT_SECONDS,
@@ -875,6 +876,7 @@ class AgentRunner:
                     cwd=run_cwd or cwd,
                     env=env,
                     limit=CLI_STREAM_LINE_LIMIT_BYTES,
+                    **no_window(),
                 )
             except Exception:
                 logger.exception("Could not start a live %s process in %s", agent, run_cwd or cwd)
@@ -964,6 +966,7 @@ class AgentRunner:
                 cwd=run_cwd or cwd,
                 env=env,
                 limit=CLI_STREAM_LINE_LIMIT_BYTES,
+                **no_window(),
             )
             if process.stdin:
                 process.stdin.close()
@@ -1320,7 +1323,8 @@ class AgentRunner:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=cwd,
-                env={**os.environ}
+                env={**os.environ},
+                **no_window(),
             )
 
             async for line in process.stdout:
