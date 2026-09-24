@@ -18,9 +18,11 @@ from __future__ import annotations
 import logging
 import os
 import plistlib
+import signal
 import socket
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
@@ -100,6 +102,12 @@ def set_login_item(enabled: bool, path: Optional[Path] = None) -> None:
             pass
 
 
+def leftover_login_item(wanted: bool, path: Optional[Path] = None) -> bool:
+    """True when Start at login is off and a LaunchAgent is still there, which
+    an older copy left and which can start that older copy."""
+    return not wanted and (path or LAUNCH_AGENT_PATH).exists()
+
+
 def remove_serve_launch_agent() -> None:
     """Remove the LaunchAgent `agnview serve` registers, so the browser-only
     hub does not start at login beside the desktop app. The same as the
@@ -111,6 +119,83 @@ def remove_serve_launch_agent() -> None:
         autostart.MACOS_PLIST_PATH.unlink()
     except FileNotFoundError:
         pass
+
+
+# --- Newer copies take over ----------------------------------------------------------
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def older_copy_pids(bundle_id: str = BUNDLE_ID, me: Optional[int] = None, running_apps=None) -> List[int]:
+    """Processes, other than this one, that run AgnView's bundle.
+
+    Copies from before instance records existed are found this way, by bundle
+    identifier and never by window title. running_apps is for tests.
+    """
+    me = os.getpid() if me is None else me
+    if running_apps is None:
+        try:
+            import AppKit
+
+            running_apps = AppKit.NSRunningApplication.runningApplicationsWithBundleIdentifier_(bundle_id)
+        except Exception:
+            logger.info("Could not list running copies of %s", bundle_id)
+            return []
+    found = set()
+    for application in running_apps or []:
+        pid = int(application.processIdentifier())
+        if pid > 0 and pid != me:
+            found.add(pid)
+    return sorted(found)
+
+
+def end_process(
+    pid: int,
+    timeout: float = 10.0,
+    kill_after: float = 3.0,
+    alive: Callable[[int], bool] = pid_alive,
+    send: Callable[[int, int], None] = os.kill,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> bool:
+    """Close a running AgnView and wait for it to be gone, so its lock and
+    its menu bar icon are free before this copy starts. SIGTERM first, then
+    SIGKILL when it is still there after the timeout."""
+
+    def wait(seconds: float) -> bool:
+        deadline = clock() + seconds
+        while alive(pid):
+            if clock() >= deadline:
+                return False
+            sleep(0.1)
+        return True
+
+    if not alive(pid):
+        return True
+    try:
+        send(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return not alive(pid)
+    if wait(timeout):
+        return True
+    try:
+        send(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return not alive(pid)
+    return wait(kill_after)
 
 
 # --- Single instance -------------------------------------------------------------
@@ -130,9 +215,10 @@ class SingleInstance:
         self._lock_handle = None
         self._server: Optional[socket.socket] = None
 
-    def claim(self) -> bool:
-        """True for the first instance. A later one wakes the first and gets
-        False."""
+    def claim(self, wake: bool = True) -> bool:
+        """True for the first instance. A later one gets False, and wakes the
+        first unless wake is False, so a caller that may take over can decide
+        first."""
         import fcntl
 
         self.lock_path.parent.mkdir(parents=True, exist_ok=True)
@@ -141,7 +227,8 @@ class SingleInstance:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             handle.close()
-            self.wake_first()
+            if wake:
+                self.wake_first()
             return False
         self._lock_handle = handle
         return True

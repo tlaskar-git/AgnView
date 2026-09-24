@@ -400,6 +400,10 @@ def read_instance_record() -> Optional[dict]:
 
 
 def process_alive(pid: int) -> bool:
+    if sys.platform != "win32":
+        from .macos import pid_alive
+
+        return pid_alive(pid)
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     STILL_ACTIVE = 259
     kernel32 = ctypes.windll.kernel32
