@@ -39,7 +39,7 @@ jobs:
         run: ruff check .
 
       - name: Test
-        run: pytest tests/ -q
+        run: pytest tests/ -v --durations=10 --timeout=60
 
   gitleaks:
     name: secret scan (gitleaks)
