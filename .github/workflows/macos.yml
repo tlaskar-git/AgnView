@@ -96,20 +96,51 @@ jobs:
           MACOS_NOTARY_API_ISSUER: ${{ secrets.MACOS_NOTARY_API_ISSUER }}
         run: |
           set -euo pipefail
+          out="$RUNNER_TEMP/notary-submit.txt"
           if [ "$HAS_NOTARY_API_KEY" = "true" ]; then
             key="$RUNNER_TEMP/notary-key.p8"
             printf '%s' "$MACOS_NOTARY_API_KEY_P8_BASE64" | base64 --decode > "$key"
-            xcrun notarytool submit dist/AgnView-macos.dmg \
-              --key "$key" --key-id "$MACOS_NOTARY_API_KEY_ID" --issuer "$MACOS_NOTARY_API_ISSUER" \
-              --wait --timeout 45m
-            rm -f "$key"
+            auth=(--key "$key" --key-id "$MACOS_NOTARY_API_KEY_ID" --issuer "$MACOS_NOTARY_API_ISSUER")
+            echo "Notary auth method: App Store Connect API key"
           else
-            xcrun notarytool submit dist/AgnView-macos.dmg \
-              --apple-id "$MACOS_NOTARY_APPLE_ID" --password "$MACOS_NOTARY_PASSWORD" --team-id "$MACOS_NOTARY_TEAM_ID" \
-              --wait --timeout 45m
+            auth=(--apple-id "$MACOS_NOTARY_APPLE_ID" --password "$MACOS_NOTARY_PASSWORD" --team-id "$MACOS_NOTARY_TEAM_ID")
+            echo "Notary auth method: Apple ID and app-specific password"
           fi
+          if ! xcrun notarytool history "${auth[@]}" >/dev/null 2>"$out"; then
+            echo "::error title=Notary credentials rejected::notarytool could not authenticate. Check the MACOS_NOTARY_* secrets against docs/MACOS-SIGNING.md. Apple said: $(tr '\n' ' ' < "$out")"
+            rm -f "${key:-}"
+            exit 1
+          fi
+          xcrun notarytool submit dist/AgnView-macos.dmg "${auth[@]}" --wait --timeout 45m 2>&1 | tee "$out"
+          rm -f "${key:-}"
           xcrun stapler staple dist/AgnView-macos.dmg
           xcrun stapler validate dist/AgnView-macos.dmg
+
+      - name: Notarisation log on failure
+        if: failure() && env.HAS_SIGNING == 'true' && (env.HAS_NOTARY_APPLE_ID == 'true' || env.HAS_NOTARY_API_KEY == 'true')
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_API_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_API_KEY_P8_BASE64 }}
+          MACOS_NOTARY_API_KEY_ID: ${{ secrets.MACOS_NOTARY_API_KEY_ID }}
+          MACOS_NOTARY_API_ISSUER: ${{ secrets.MACOS_NOTARY_API_ISSUER }}
+        run: |
+          out="$RUNNER_TEMP/notary-submit.txt"
+          id="$(grep -Eo '^ *id: [0-9a-f-]{36}' "$out" 2>/dev/null | head -1 | awk '{print $2}' || true)"
+          if [ -z "$id" ]; then
+            echo "No submission id found, so the submission did not start. See the Notarise step output."
+            exit 0
+          fi
+          if [ "$HAS_NOTARY_API_KEY" = "true" ]; then
+            key="$RUNNER_TEMP/notary-key.p8"
+            printf '%s' "$MACOS_NOTARY_API_KEY_P8_BASE64" | base64 --decode > "$key"
+            auth=(--key "$key" --key-id "$MACOS_NOTARY_API_KEY_ID" --issuer "$MACOS_NOTARY_API_ISSUER")
+          else
+            auth=(--apple-id "$MACOS_NOTARY_APPLE_ID" --password "$MACOS_NOTARY_PASSWORD" --team-id "$MACOS_NOTARY_TEAM_ID")
+          fi
+          xcrun notarytool log "$id" "${auth[@]}" || true
+          rm -f "${key:-}"
 
       - name: Notarisation skipped
         if: env.HAS_SIGNING != 'true' || (env.HAS_NOTARY_APPLE_ID != 'true' && env.HAS_NOTARY_API_KEY != 'true')
