@@ -198,7 +198,7 @@ and a menu bar icon, so no browser is needed.
 **Download the app.** Download
 [`AgnView-macos.dmg`](https://github.com/tlaskar-git/AgnView/releases/latest/download/AgnView-macos.dmg)
 from the [latest release](https://github.com/tlaskar-git/AgnView/releases/latest)
-(from the first release after 0.1.7), open it and drag AgnView to
+(from the first release after 0.1.8, which is the first to carry it), open it and drag AgnView to
 Applications. Your accounts and settings live in `~/.agnview`, so an update
 keeps them.
 
