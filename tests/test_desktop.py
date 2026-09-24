@@ -9,14 +9,14 @@ from agent_relay.desktop import app as desktop
 
 def test_settings_default_when_missing(tmp_path, monkeypatch):
     monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "desktop.json")
-    assert desktop.load_settings() == {"port": desktop.DEFAULT_PORT, "autostart": False}
+    assert desktop.load_settings() == {"port": desktop.DEFAULT_PORT, "autostart": False, "lan": False}
 
 
 def test_settings_keep_known_keys_only(tmp_path, monkeypatch):
     path = tmp_path / "desktop.json"
     path.write_text(json.dumps({"port": 9100, "autostart": False, "other": 1}))
     monkeypatch.setattr(desktop, "SETTINGS_PATH", path)
-    assert desktop.load_settings() == {"port": 9100, "autostart": False}
+    assert desktop.load_settings() == {"port": 9100, "autostart": False, "lan": False}
 
 
 def test_settings_survive_a_corrupt_file(tmp_path, monkeypatch):
@@ -29,7 +29,7 @@ def test_settings_survive_a_corrupt_file(tmp_path, monkeypatch):
 def test_settings_round_trip(tmp_path, monkeypatch):
     monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "sub" / "desktop.json")
     desktop.save_settings({"port": 9200, "autostart": True})
-    assert desktop.load_settings() == {"port": 9200, "autostart": True}
+    assert desktop.load_settings() == {"port": 9200, "autostart": True, "lan": False}
 
 
 def test_frozen_build_registers_itself_minimized(monkeypatch):
@@ -69,7 +69,7 @@ def test_changing_start_with_windows_saves_the_choice(tmp_path, monkeypatch):
     desktop.change_autostart(True)
 
     assert calls == [True]
-    assert desktop.load_settings() == {"port": 9300, "autostart": True}
+    assert desktop.load_settings() == {"port": 9300, "autostart": True, "lan": False}
     assert desktop.autostart_enabled() is True
 
 
@@ -160,3 +160,45 @@ def test_agnview_serve_leaves_sign_in_to_the_desktop_app(tmp_path, monkeypatch):
     monkeypatch.setattr(autostart, "status", lambda: (_ for _ in ()).throw(AssertionError("checked")))
     monkeypatch.setattr(autostart, "enable", lambda args=(): (_ for _ in ()).throw(AssertionError("registered")))
     assert autostart.ensure_enabled_by_default(["--port", "8845"]) is None
+
+
+def test_phones_on_the_network_is_off_by_default(tmp_path, monkeypatch):
+    monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "desktop.json")
+    assert desktop.lan_enabled() is False
+    assert desktop.bind_host(False) == "127.0.0.1"
+    assert desktop.bind_host(True) == "0.0.0.0"
+
+
+def test_no_running_app_means_no_lan_change(monkeypatch):
+    monkeypatch.setattr(desktop, "_lan_change_handler", None)
+    assert desktop.request_lan_change(True) is False
+
+
+def test_the_pairing_screen_switch_asks_the_desktop_app(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from agent_relay.api.app import create_app
+
+    monkeypatch.setattr(desktop, "SETTINGS_PATH", tmp_path / "desktop.json")
+    monkeypatch.setenv(desktop.DESKTOP_ENV, "1")
+    asked = []
+    monkeypatch.setattr(desktop, "request_lan_change", lambda enabled: asked.append(enabled) or True)
+    client = TestClient(create_app(db_path=str(tmp_path / "hub.db")))
+
+    state = client.get("/api/system/lan").json()
+    assert state["available"] is True and state["enabled"] is False
+
+    answer = client.post("/api/system/lan", json={"enable": True}).json()
+    assert answer["restarting"] is True
+    assert asked == [True]
+
+
+def test_outside_the_desktop_app_the_switch_is_not_offered(tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from agent_relay.api.app import create_app
+
+    monkeypatch.delenv(desktop.DESKTOP_ENV, raising=False)
+    client = TestClient(create_app(db_path=str(tmp_path / "hub.db")))
+    assert client.get("/api/system/lan").json()["available"] is False
+    assert client.post("/api/system/lan", json={"enable": True}).status_code == 400

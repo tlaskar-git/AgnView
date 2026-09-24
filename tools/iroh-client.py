@@ -124,6 +124,9 @@ def lan_reachable(lan: Optional[str], timeout: float = LAN_CONNECT_TIMEOUT_SECON
     host, _, port = lan.rpartition(":")
     if not host or not port.isdigit():
         return False
+    if host in ("127.0.0.1", "localhost", "::1", "[::1]"):
+        # The hub listens on its own machine only, so there is no LAN rung.
+        return False
     try:
         with socket.create_connection((host, int(port)), timeout=timeout):
             return True
@@ -281,7 +284,10 @@ def main() -> int:
         if args.transport == "lan":
             log(f"the LAN address {lan} did not answer inside {LAN_CONNECT_TIMEOUT_SECONDS}s")
             return 4
-        log(f"the LAN rung did not answer inside {LAN_CONNECT_TIMEOUT_SECONDS}s, trying iroh")
+        if lan and lan.rpartition(":")[0] in ("127.0.0.1", "localhost", "::1", "[::1]"):
+            log("the hub listens on its own machine only, so there is no LAN rung, trying iroh")
+        else:
+            log(f"the LAN rung did not answer inside {LAN_CONNECT_TIMEOUT_SECONDS}s, trying iroh")
 
     if not ticket:
         log("this payload carries no iroh ticket, so only the LAN rung exists")

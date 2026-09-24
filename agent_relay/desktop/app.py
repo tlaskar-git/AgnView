@@ -51,11 +51,11 @@ logger = logging.getLogger("agnview.desktop")
 def load_settings() -> dict:
     # Start with Windows is off until a person turns it on. It used to be on
     # by default, so a first start registered a sign-in task nobody asked for.
-    settings = {"port": DEFAULT_PORT, "autostart": False}
+    settings = {"port": DEFAULT_PORT, "autostart": False, "lan": False}
     try:
         stored = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
         if isinstance(stored, dict):
-            settings.update({k: stored[k] for k in ("port", "autostart") if k in stored})
+            settings.update({k: stored[k] for k in ("port", "autostart", "lan") if k in stored})
     except (OSError, ValueError):
         pass
     return settings
@@ -70,6 +70,32 @@ def autostart_enabled() -> bool:
     """The saved Start with Windows choice. The tray menu and the dashboard
     both read it from the settings file, so they can never disagree."""
     return bool(load_settings().get("autostart", False))
+
+
+def lan_enabled() -> bool:
+    """The saved Allow phones on my network choice. Off by default, so the
+    hub listens on this machine only until a person turns it on."""
+    return bool(load_settings().get("lan", False))
+
+
+def bind_host(lan: bool) -> str:
+    return "0.0.0.0" if lan else "127.0.0.1"
+
+
+# Set by the running desktop app, so the dashboard can ask it to restart the
+# hub on the other address. The hub cannot restart itself from inside a
+# request it is serving.
+_lan_change_handler = None
+
+
+def request_lan_change(enabled: bool) -> bool:
+    """Ask the desktop app to switch the hub's address. False when no app is
+    running to do it."""
+    handler = _lan_change_handler
+    if handler is None:
+        return False
+    threading.Timer(0.5, handler, args=(bool(enabled),)).start()
+    return True
 
 
 def change_autostart(enabled: bool) -> None:
@@ -287,8 +313,9 @@ def port_in_use(port: int) -> bool:
 class Hub:
     """The FastAPI hub on loopback, run by uvicorn on a background thread."""
 
-    def __init__(self, port: int):
+    def __init__(self, port: int, host: str = "127.0.0.1"):
         self.port = port
+        self.host = host
         self.server = None
         self.thread: Optional[threading.Thread] = None
 
@@ -303,7 +330,9 @@ class Hub:
         from ..core.pairing import get_or_create_pairing_token
 
         os.environ["AGENT_RELAY_TOKEN"] = os.environ.get("AGENT_RELAY_TOKEN") or get_or_create_pairing_token()
-        os.environ[BIND_MODE_ENV] = "loopback"
+        # The QR code and the pairing screen read this to decide whether to
+        # offer the LAN address.
+        os.environ[BIND_MODE_ENV] = "lan" if self.host == "0.0.0.0" else "loopback"
         # Tells the dashboard's autostart switch to drive this app's Start with
         # Windows setting, not the Run key the browser-only hub uses.
         os.environ[DESKTOP_ENV] = "1"
@@ -311,7 +340,7 @@ class Hub:
         app = create_app(port=self.port)
         config = uvicorn.Config(
             app,
-            host="127.0.0.1",
+            host=self.host,
             port=self.port,
             log_config=None,
             log_level="info",
@@ -354,6 +383,7 @@ class DesktopApp:
         self.tray = None
         self.quitting = False
         self.told_about_tray = False
+        self._lan_lock = threading.Lock()
 
     def show(self) -> None:
         if self.window is None:
@@ -385,6 +415,36 @@ class DesktopApp:
         except Exception:
             logger.exception("Could not show the tray notification")
 
+    def toggle_lan(self, _icon=None, _item=None) -> None:
+        threading.Thread(target=self.set_lan, args=(not lan_enabled(),), daemon=True).start()
+
+    def set_lan(self, enabled: bool) -> None:
+        """Save the choice and restart the hub on the matching address.
+
+        Off: 127.0.0.1, this machine only. On: every interface, so a phone on
+        the same network reaches the hub directly. Windows asks once whether
+        to let AgnView through the firewall the first time it is turned on.
+        The window keeps its address, 127.0.0.1, either way.
+        """
+        with self._lan_lock:
+            settings = load_settings()
+            settings["lan"] = bool(enabled)
+            save_settings(settings)
+            host = bind_host(enabled)
+            if self.hub.host == host:
+                return
+            port = self.hub.port
+            self.hub.stop()
+            replacement = Hub(port, host)
+            try:
+                replacement.start()
+            except Exception as exc:
+                logger.exception("Hub failed to restart on %s", host)
+                message_box(f"AgnView could not restart its hub: {exc}\n\nLog: {LOG_PATH}")
+                return
+            self.hub = replacement
+            logger.info("Hub restarted on %s:%s", host, port)
+
     def toggle_autostart(self, _icon=None, _item=None) -> None:
         enabled = not autostart_enabled()
         try:
@@ -413,6 +473,7 @@ class DesktopApp:
         menu = pystray.Menu(
             pystray.MenuItem("Open AgnView", lambda: self.show(), default=True),
             pystray.MenuItem("Start with Windows", self.toggle_autostart, checked=lambda _item: autostart_enabled()),
+            pystray.MenuItem("Allow phones on my network", self.toggle_lan, checked=lambda _item: lan_enabled()),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit AgnView", self.quit),
         )
@@ -500,7 +561,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if port != int(settings["port"]):
         logger.warning("Port %s is in use, so this run serves on %s", settings["port"], port)
 
-    hub = Hub(port)
+    hub = Hub(port, bind_host(bool(settings.get("lan", False))))
     try:
         hub.start()
     except Exception as exc:
@@ -508,10 +569,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         message_box(f"AgnView could not start: {exc}\n\nLog: {LOG_PATH}")
         return 1
 
+    global _lan_change_handler
+    desktop_app = DesktopApp(hub, settings, start_hidden=args.minimized)
+    _lan_change_handler = desktop_app.set_lan
     try:
-        DesktopApp(hub, settings, start_hidden=args.minimized).run()
+        desktop_app.run()
     finally:
-        hub.stop()
+        _lan_change_handler = None
+        desktop_app.hub.stop()
         logger.info("AgnView closed")
         logging.shutdown()
         # Worker threads started by the hub, such as the iroh transport, must

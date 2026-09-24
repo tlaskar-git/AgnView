@@ -1776,6 +1776,17 @@
               <span id="mobile-transport-label">Loopback only</span>
             </span>
           </div>
+          <!-- Allow phones on my network: shown only when this hub can change it (the desktop app) -->
+          <div id="mobile-lan-row" class="hidden mb-2 p-2.5 bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg flex items-center justify-between gap-3">
+            <div>
+              <span class="text-xs font-semibold text-[var(--text-main)] block">Allow phones on my network</span>
+              <p id="mobile-lan-hint" class="text-[11px] text-[var(--text-secondary)]">Off: phones connect over iroh. On: phones on the same Wi-Fi connect directly. Windows asks once to allow it through the firewall.</p>
+            </div>
+            <label class="relative inline-flex items-center cursor-pointer shrink-0">
+              <input id="mobile-lan-toggle" type="checkbox" onchange="toggleLanSetting(this.checked)" class="sr-only peer" aria-label="Allow phones on my network">
+              <div class="w-9 h-5 bg-[var(--border-color)] peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[var(--color-action)]"></div>
+            </label>
+          </div>
           <div class="flex items-center gap-2">
             <input id="mobile-endpoint-input" type="text" readonly class="flex-1 bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-lg px-3 py-2 text-[var(--text-main)] font-mono text-xs select-all focus:outline-none focus:border-[var(--color-action)]">
             <button onclick="copyMobileEndpoint()" class="bg-[var(--bg-raised)] hover:bg-[var(--border-color)] border border-[var(--border-color)] text-[var(--text-main)] px-3 py-2 rounded-lg flex items-center gap-1.5 transition" aria-label="Copy Gateway URL">
@@ -6645,7 +6656,49 @@
       modal.classList.add('hidden');
     }
 
+    async function refreshLanSetting() {
+      try {
+        const res = await fetch('/api/system/lan');
+        if (!res.ok) return;
+        const data = await res.json();
+        const row = document.getElementById('mobile-lan-row');
+        const toggle = document.getElementById('mobile-lan-toggle');
+        if (row) row.classList.toggle('hidden', !data.available);
+        if (toggle) { toggle.checked = !!data.enabled; toggle.disabled = false; }
+      } catch (e) {}
+    }
+
+    async function toggleLanSetting(enabled) {
+      const toggle = document.getElementById('mobile-lan-toggle');
+      const hint = document.getElementById('mobile-lan-hint');
+      if (toggle) toggle.disabled = true;
+      if (hint) hint.textContent = 'Restarting the hub on the new address...';
+      try {
+        await fetch('/api/system/lan', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enable: enabled })
+        });
+      } catch (e) {}
+      // The hub restarts, so wait for it to answer again, then redraw the QR
+      // code for the new mode.
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise(r => setTimeout(r, 1000));
+        try {
+          const res = await fetch('/api/system/lan');
+          if (res.ok) {
+            const data = await res.json();
+            if (data.bind_mode === (enabled ? 'lan' : 'loopback')) break;
+          }
+        } catch (e) {}
+      }
+      if (hint) hint.textContent = 'Off: phones connect over iroh. On: phones on the same Wi-Fi connect directly. Windows asks once to allow it through the firewall.';
+      await refreshLanSetting();
+      await fetchPairingData();
+    }
+
     async function fetchPairingData() {
+      refreshLanSetting();
       try {
         const res = await fetch('/api/mobile/pairing');
         if (!res.ok) throw new Error("Failed to load pairing info");

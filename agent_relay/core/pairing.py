@@ -13,7 +13,7 @@ import qrcode
 import qrcode.image.svg
 
 from .certs import get_cert_fingerprint
-from .network import get_local_ip, is_rfc1918_address
+from .network import get_bind_mode, get_local_ip, is_rfc1918_address
 
 
 TOKEN_DIR = Path.home() / ".agnview"
@@ -146,7 +146,11 @@ def build_pairing_qr_uri(
     key = token or get_or_create_pairing_token()
     machine_name = socket.gethostname()
     lan_ip = get_local_ip()
-    if not is_rfc1918_address(lan_ip):
+    if not is_rfc1918_address(lan_ip) or get_bind_mode() == "loopback":
+        # A hub listening on loopback only cannot be reached at its LAN
+        # address. Offering it made a phone wait out the LAN rung's 800 ms
+        # before trying iroh. The field is required by the contract, so it
+        # carries 127.0.0.1, which a client treats as "skip the LAN rung".
         lan_ip = "127.0.0.1"
 
     try:

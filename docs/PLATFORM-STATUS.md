@@ -59,10 +59,11 @@ streams the console. Tested end to end against the Windows desktop app over
 iroh. `docs/PAIRING.md` and `docs/mobile-api-spec.json` are the contract a
 phone app must follow.
 
-Known gap: the Windows desktop app listens on loopback only, but the QR code
-still offers the LAN address, so a phone waits for the LAN rung to time out
-(0.8 seconds) before falling back to iroh. The fix is a setting to listen on
-the local network, with the QR code matching the mode that is on.
+The Windows desktop app has an Allow phones on my network setting, in the
+tray menu and on the pairing screen, off by default. Off, it listens on
+loopback and the QR code's `lan` field is `127.0.0.1:<port>`, which a client
+skips, so the phone goes straight to iroh. On, it listens on every interface
+and the QR code carries the LAN address. The macOS app needs the same setting.
 
 ## What to build next
 
@@ -75,10 +76,9 @@ the local network, with the QR code matching the mode that is on.
    macOS (most likely the Keychain) and add it to `agy_cloud.py` beside the
    Windows Credential Manager read. The rest of that module is platform
    neutral.
-3. **LAN listening setting** for the desktop apps, as described above.
-4. **iOS and iPadOS app**, pairing through the QR code and following
+3. **iOS and iPadOS app**, pairing through the QR code and following
    `docs/mobile-api-spec.json`.
-5. **Android app.**
+4. **Android app.**
 
 ## Rules for this repository
 
