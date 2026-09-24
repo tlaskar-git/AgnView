@@ -46,6 +46,9 @@ agnview://pair?v=1
 - k is 32 bytes from a CSPRNG. It never leaves the QR pixels and the
   two paired devices.
 - fp is the SHA-256 fingerprint (hex) of the hub self-signed HTTPS certificate.
+- lan is `127.0.0.1:<port>` when the hub accepts no connections from the local
+  network, which is the default. A client treats that value as "no LAN rung"
+  and goes straight to iroh. It is never a reachable address from a phone.
 
 Both values are generated on the hub at first run and stored at mode
 0600. A Regenerate action invalidates every paired device.
@@ -97,7 +100,7 @@ stops at the first that answers:
 
 | Order | Rung | Budget |
 |---|---|---|
-| 1 | `lan` - the `lan` field | 800 ms, then move on |
+| 1 | `lan` - the `lan` field | 800 ms, then move on. Skip it when the field is `127.0.0.1:<port>` |
 | 2 | `iroh-direct` - hole-punched peer to peer | iroh's own timeout |
 | 3 | `iroh-relay` - via a relay | iroh's own timeout |
 

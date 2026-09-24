@@ -154,6 +154,11 @@ its window.
   creates a Task Scheduler sign-in task for your account, which starts AgnView
   hidden in the tray 15 seconds after you sign in. The same switch is in the
   dashboard under Browser Sync & Autostart.
+- **Allow phones on my network**, in the tray menu and on the pairing screen,
+  is off by default. Off, AgnView listens on this PC only and phones connect
+  over iroh. On, it also listens on your local network, so a phone on the same
+  Wi-Fi connects directly, and Windows asks once to let it through the
+  firewall. The QR code always matches the mode that is on.
 - **Port.** The app serves on port 18845, away from the 8765 default of
   `agnview serve`, and moves to the next free port when that one is taken. Pass
   `--port` once to change it, and the app remembers it. Settings live in

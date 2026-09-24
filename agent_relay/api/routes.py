@@ -1385,6 +1385,34 @@ def _autostart_status() -> bool:
     return autostart.status()
 
 
+@router.get("/system/lan")
+def get_lan_setting():
+    """Whether phones on the local network can reach this hub, and whether
+    this hub can change that itself (only the desktop app can)."""
+    if _in_desktop_app():
+        from ..desktop.app import lan_enabled
+
+        return {"available": True, "enabled": lan_enabled(), "bind_mode": get_bind_mode()}
+    return {"available": False, "enabled": get_bind_mode() == "lan", "bind_mode": get_bind_mode()}
+
+
+@router.post("/system/lan")
+def set_lan_setting(req: Dict[str, bool]):
+    """Turn Allow phones on my network on or off in the desktop app. The hub
+    restarts on the new address a moment after this answers."""
+    if not _in_desktop_app():
+        raise HTTPException(
+            status_code=400,
+            detail="Only the desktop app can change this. Start the hub with agnview serve --listen-lan instead.",
+        )
+    from ..desktop.app import request_lan_change
+
+    enabled = bool(req.get("enable", False))
+    if not request_lan_change(enabled):
+        raise HTTPException(status_code=503, detail="The desktop app is not ready to restart the hub.")
+    return {"success": True, "enabled": enabled, "restarting": True}
+
+
 @router.get("/system/autostart")
 def get_autostart_status():
     """Report whether AgnView is registered to start at login.
@@ -1444,6 +1472,9 @@ def get_mobile_pairing_info(request: Request):
     port = engine.port
     endpoints = get_network_endpoints(port=port)
     token = request.app.state.auth_token or get_or_create_pairing_token()
+    if get_bind_mode() == "loopback":
+        # Listening on this machine only, so no address a phone could use.
+        endpoints = {k: v for k, v in endpoints.items() if k in ("local", "localhost")}
 
     primary_url = endpoints.get("lan") or endpoints.get("localhost") or f"http://127.0.0.1:{port}"
     payload = build_pairing_payload(

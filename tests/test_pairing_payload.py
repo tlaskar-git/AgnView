@@ -113,3 +113,23 @@ def test_the_pairing_route_emits_v2_once_a_ticket_exists(tmp_path):
     assert parsed["lan"] == parse_pairing_qr_uri(
         build_pairing_qr_uri(port=8765, token=parsed["token"])
     )["lan"]
+
+
+def test_a_loopback_hub_offers_no_lan_address(monkeypatch):
+    from agent_relay.core import pairing
+    from agent_relay.core.network import BIND_MODE_ENV
+
+    monkeypatch.setattr(pairing, "get_local_ip", lambda: "192.168.1.50")
+    monkeypatch.setenv(BIND_MODE_ENV, "loopback")
+    parsed = pairing.parse_pairing_qr_uri(pairing.build_pairing_qr_uri(port=18845, token="t"))
+    assert parsed["lan"] == "127.0.0.1:18845"
+
+
+def test_a_lan_hub_offers_its_lan_address(monkeypatch):
+    from agent_relay.core import pairing
+    from agent_relay.core.network import BIND_MODE_ENV
+
+    monkeypatch.setattr(pairing, "get_local_ip", lambda: "192.168.1.50")
+    monkeypatch.setenv(BIND_MODE_ENV, "lan")
+    parsed = pairing.parse_pairing_qr_uri(pairing.build_pairing_qr_uri(port=18845, token="t"))
+    assert parsed["lan"] == "192.168.1.50:18845"
