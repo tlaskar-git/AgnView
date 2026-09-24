@@ -36,7 +36,7 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
     app = FastAPI(
         title="AgnView API",
         description="Cross-Agent Coordination Hub & Live Console for Claude Code, Codex, AntiGravity, and Web LLMs",
-        version="0.1.6"
+        version="0.1.7"
     )
 
     # Enable CORS for external tools, mobile apps, and browser extensions

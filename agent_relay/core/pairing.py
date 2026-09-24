@@ -230,7 +230,7 @@ def build_pairing_payload(
 
     return {
         "app": "AgnView",
-        "version": "0.1.6",
+        "version": "0.1.7",
         "payload_version": PAIRING_PAYLOAD_VERSION if ticket else 1,
         "hostname": socket.gethostname(),
         "pair_id": pair_id,
