@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agnview"
-version = "0.1.3"
+version = "0.1.4"
 description = "One screen for the coding agents already running on your machine."
 authors = [{ name = "tlaskar-git" }]
 license = { text = "MIT" }
