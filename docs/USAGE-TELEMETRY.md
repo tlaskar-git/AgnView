@@ -10,7 +10,7 @@ provider's own usage panel once and posts the real numbers to
 | Provider | Real percentage without any pasted credential | Live on every refresh | One-off sync |
 |---|---|---|---|
 | ChatGPT / Codex | Yes, from `/backend-api/wham/usage` | Always | Not needed |
-| Claude | No | Yes, if a claude.ai session cookie is pasted into the account's credential (Authentication Method: Session Token) | Browser console on claude.ai, settings, usage |
+| Claude | Yes, from Anthropic's account usage API with the Claude Code sign-in, which AgnView asks Claude Code to renew before it expires | Always, while Claude Code is signed in. A pasted claude.ai session cookie also works (Authentication Method: Session Token) | Browser console on claude.ai, settings, usage |
 | Gemini (Antigravity) | Yes on Windows, from Google's quota service with Antigravity's own sign-in (see below) | Yes, while the stored sign-in is valid. Otherwise, while Antigravity is running (its debug port) | Antigravity's own DevTools console, advanced builds only |
 | DeepSeek | Balance only, from its account API | Always | Not needed |
 
