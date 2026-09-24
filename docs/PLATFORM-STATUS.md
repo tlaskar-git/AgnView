@@ -26,6 +26,12 @@ locally with PyInstaller, never on CI.
 - Start with Windows is a per-user Task Scheduler sign-in task, off by
   default, shared with the dashboard's autostart switch.
 - Port 18845 by default, moving to the next free port when that one is busy.
+- A newer copy takes over. The running copy records its process ID and
+  version in `~/.agnview/desktop-instance.json`. Starting a newer copy closes
+  an older running one and starts in its place. A copy from before records
+  existed is found by its window titled AgnView. A same or newer running copy
+  is brought forward instead. With Start with Windows off, a leftover sign-in
+  task is removed. The macOS app needs the same behaviour.
 - Every child process starts without a console window (`agent_relay/core/proc.py`).
 
 ## Usage tab sources

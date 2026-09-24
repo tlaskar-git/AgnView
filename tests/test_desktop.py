@@ -202,3 +202,39 @@ def test_outside_the_desktop_app_the_switch_is_not_offered(tmp_path, monkeypatch
     client = TestClient(create_app(db_path=str(tmp_path / "hub.db")))
     assert client.get("/api/system/lan").json()["available"] is False
     assert client.post("/api/system/lan", json={"enable": True}).status_code == 400
+
+
+def test_versions_compare_as_numbers():
+    assert desktop.version_tuple("0.1.10") > desktop.version_tuple("0.1.9")
+    assert desktop.version_tuple("0.2.0") > desktop.version_tuple("0.1.7")
+    assert desktop.version_tuple("0.1.7") == desktop.version_tuple("0.1.7")
+
+
+def test_a_newer_copy_takes_over_an_older_one():
+    assert desktop.should_take_over({"pid": 1, "version": "0.1.7"}, "0.1.8") is True
+
+
+def test_a_same_or_newer_running_copy_is_kept():
+    assert desktop.should_take_over({"pid": 1, "version": "0.1.8"}, "0.1.8") is False
+    assert desktop.should_take_over({"pid": 1, "version": "0.2.0"}, "0.1.8") is False
+
+
+def test_a_copy_without_a_record_is_older_by_definition():
+    # Every copy from before instance records existed.
+    assert desktop.should_take_over(None, "0.1.8") is True
+
+
+def test_a_record_for_a_dead_process_is_ignored(tmp_path, monkeypatch):
+    path = tmp_path / "desktop-instance.json"
+    path.write_text('{"pid": 12345, "version": "0.1.7"}')
+    monkeypatch.setattr(desktop, "INSTANCE_PATH", path)
+    monkeypatch.setattr(desktop, "process_alive", lambda pid: False)
+    assert desktop.read_instance_record() is None
+
+
+def test_a_record_for_a_live_process_is_read(tmp_path, monkeypatch):
+    path = tmp_path / "desktop-instance.json"
+    path.write_text('{"pid": 12345, "version": "0.1.7"}')
+    monkeypatch.setattr(desktop, "INSTANCE_PATH", path)
+    monkeypatch.setattr(desktop, "process_alive", lambda pid: True)
+    assert desktop.read_instance_record()["version"] == "0.1.7"

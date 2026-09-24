@@ -191,6 +191,11 @@ def _schtasks(*args: str):
     )
 
 
+def task_exists() -> bool:
+    """True when a sign-in task named AgnView exists, whatever it starts."""
+    return _schtasks("/Query", "/TN", TASK_NAME).returncode == 0
+
+
 def autostart_registered() -> bool:
     """True when the sign-in task exists and starts this install."""
     result = _schtasks("/Query", "/TN", TASK_NAME, "/XML")
@@ -257,18 +262,159 @@ def run_value_present() -> bool:
 # --- Single instance -----------------------------------------------------------
 
 def claim_single_instance() -> bool:
-    """Return True for the first instance. A later one wakes the first and
-    returns False."""
+    """Return True when this copy should run.
+
+    When no copy runs, this one does. When one runs, this one compares
+    versions. A running copy that is the same or newer is woken and this one
+    exits, as before. A running copy that is older is closed and this one
+    takes over. Without that, a person who installed a new version while the
+    old one sat in the tray kept getting the old one, because the new copy
+    handed over to it and exited.
+    """
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateMutexW(None, False, MUTEX_NAME)
     if kernel32.GetLastError() != ERROR_ALREADY_EXISTS:
         return True
+
+    running = read_instance_record()
+    if should_take_over(running, current_version()):
+        pids = [running["pid"]] if running else older_copy_pids()
+        if pids and all(end_process(pid) for pid in pids):
+            logger.info("Closed an older AgnView (%s) and took over", running or pids)
+            return True
+        logger.warning("An older AgnView is running and could not be closed")
+
     EVENT_MODIFY_STATE = 0x0002
     handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, SHOW_EVENT_NAME)
     if handle:
         kernel32.SetEvent(handle)
         kernel32.CloseHandle(handle)
     return False
+
+
+# --- Newer copies take over ------------------------------------------------------
+
+INSTANCE_PATH = DATA_DIR / "desktop-instance.json"
+
+
+def current_version() -> str:
+    from .. import __version__
+
+    return __version__
+
+
+def version_tuple(version: Optional[str]) -> tuple:
+    parts = []
+    for piece in (version or "").split("."):
+        digits = "".join(ch for ch in piece if ch.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
+def should_take_over(running: Optional[dict], mine: str) -> bool:
+    """True when the running copy is older than this one.
+
+    A copy that wrote no record is from before records existed, so it is
+    older by definition.
+    """
+    if not running:
+        return True
+    return version_tuple(running.get("version")) < version_tuple(mine)
+
+
+def write_instance_record(port: int) -> None:
+    try:
+        INSTANCE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        INSTANCE_PATH.write_text(
+            json.dumps({"pid": os.getpid(), "version": current_version(), "exe": sys.executable, "port": port}),
+            encoding="utf-8",
+        )
+    except OSError:
+        logger.exception("Could not record this AgnView instance")
+
+
+def clear_instance_record() -> None:
+    try:
+        data = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
+        if data.get("pid") == os.getpid():
+            INSTANCE_PATH.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+def read_instance_record() -> Optional[dict]:
+    """The running copy's record, or None when there is none or its process
+    is gone."""
+    try:
+        data = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("pid"), int):
+        return None
+    if data["pid"] == os.getpid() or not process_alive(data["pid"]):
+        return None
+    return data
+
+
+def process_alive(pid: int) -> bool:
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    STILL_ACTIVE = 259
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    try:
+        code = ctypes.c_ulong()
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def older_copy_pids() -> list:
+    """Processes, other than this one, that own a window titled AgnView.
+
+    Copies from before instance records existed are found this way. The
+    title is the app's own, and the dashboard in a browser carries a longer
+    one, so a browser tab is never matched.
+    """
+    from ctypes import wintypes as wt
+
+    user32 = ctypes.windll.user32
+    found = set()
+    me = os.getpid()
+
+    @ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
+    def visit(hwnd, _lparam):
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length == len(APP_NAME):
+            buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buffer, length + 1)
+            if buffer.value == APP_NAME:
+                pid = wt.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value and pid.value != me:
+                    found.add(pid.value)
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return sorted(found)
+
+
+def end_process(pid: int, timeout_ms: int = 10000) -> bool:
+    """Close a running AgnView and wait for it to be gone, so its port and
+    its tray icon are free before this copy starts."""
+    PROCESS_TERMINATE = 0x0001
+    SYNCHRONIZE = 0x00100000
+    WAIT_OBJECT_0 = 0
+    kernel32 = ctypes.windll.kernel32
+    handle = kernel32.OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, False, pid)
+    if not handle:
+        return not process_alive(pid)
+    try:
+        kernel32.TerminateProcess(handle, 0)
+        return kernel32.WaitForSingleObject(handle, timeout_ms) == WAIT_OBJECT_0
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def watch_for_show_requests(on_show) -> None:
@@ -545,7 +691,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # folder still starts from the right place.
     try:
         wanted = bool(settings.get("autostart", False))
-        if wanted != autostart_registered() or run_value_present():
+        # With Start with Windows off, a sign-in task left by an older copy,
+        # which may start that older copy, is removed too.
+        if wanted != autostart_registered() or run_value_present() or (not wanted and task_exists()):
             set_autostart(wanted)
     except OSError:
         logger.exception("Could not update the Start with Windows registration")
@@ -561,6 +709,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if port != int(settings["port"]):
         logger.warning("Port %s is in use, so this run serves on %s", settings["port"], port)
 
+    write_instance_record(port)
     hub = Hub(port, bind_host(bool(settings.get("lan", False))))
     try:
         hub.start()
@@ -576,6 +725,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         desktop_app.run()
     finally:
         _lan_change_handler = None
+        clear_instance_record()
         desktop_app.hub.stop()
         logger.info("AgnView closed")
         logging.shutdown()
