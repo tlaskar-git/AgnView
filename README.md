@@ -5,6 +5,8 @@
   <p>
     <a href="https://github.com/tlaskar-git/AgnView/releases/latest/download/AgnView-windows-x64.zip"><strong>Download for Windows</strong></a>
     &nbsp;·&nbsp;
+    <a href="https://github.com/tlaskar-git/AgnView/releases/latest/download/AgnView-macos.dmg"><strong>Download for macOS</strong></a>
+    &nbsp;·&nbsp;
     <a href="https://github.com/tlaskar-git/AgnView/releases/latest">Release notes</a>
     &nbsp;·&nbsp;
     <a href="https://pypi.org/project/agnview/">PyPI</a>
@@ -62,13 +64,13 @@ sign up for.
 | | |
 |---|---|
 | Windows | 10 and 11, as a desktop app or from the command line |
-| macOS | 12 Monterey and later, Intel and Apple silicon |
+| macOS | 12 Monterey and later. The desktop app on Apple silicon, the command line on Intel and Apple silicon |
 | Linux | any distribution with Python 3.10 or newer |
 | Python | 3.10 or newer |
 | Browser | any current Chrome, Edge, Firefox or Safari |
 
-The Windows desktop app is Windows only for now. On macOS and Linux, AgnView
-runs with `agnview serve` in a browser. [`docs/PLATFORM-STATUS.md`](docs/PLATFORM-STATUS.md)
+Windows and macOS have a desktop app. On Linux, AgnView runs with
+`agnview serve` in a browser. [`docs/PLATFORM-STATUS.md`](docs/PLATFORM-STATUS.md)
 lists what works on each platform and what is still to build.
 
 ## Clients
@@ -90,7 +92,11 @@ extract the `AgnView` folder to `%LOCALAPPDATA%\Programs\AgnView` and run
 `AgnView.exe`. No Python is needed. See [Windows desktop app](#windows-desktop-app)
 below for the other ways to install it.
 
-**On macOS and Linux, or to run the hub from a terminal,** install the Python
+**On macOS, use the desktop app.** [Download AgnView for macOS](https://github.com/tlaskar-git/AgnView/releases/latest/download/AgnView-macos.dmg),
+open `AgnView-macos.dmg` and drag AgnView to Applications. No Python is needed.
+See [macOS desktop app](#macos-desktop-app) below.
+
+**On Linux, or to run the hub from a terminal,** install the Python
 package. The quickest way is not to install at all. [uv](https://docs.astral.sh/uv/)
 fetches and runs AgnView in one command, with no clone and no virtualenv:
 
@@ -164,6 +170,48 @@ its window.
   `--port` once to change it, and the app remembers it. Settings live in
   `~/.agnview/desktop.json`.
 
+## macOS desktop app
+
+On a Mac with Apple silicon, AgnView runs as a desktop app with its own window
+and a menu bar icon, so no browser is needed.
+
+**Download the app.** Download
+[`AgnView-macos.dmg`](https://github.com/tlaskar-git/AgnView/releases/latest/download/AgnView-macos.dmg)
+from the [latest release](https://github.com/tlaskar-git/AgnView/releases/latest)
+(from the first release after 0.1.7), open it and drag AgnView to
+Applications. Your accounts and settings live in `~/.agnview`, so an update
+keeps them.
+
+Until the app is signed with a Developer ID and notarised by Apple, macOS
+blocks the first start. Right-click AgnView in Applications, choose Open, then
+Open again in the dialog. macOS remembers the choice. A signed and notarised
+build opens with a double-click. `docs/MACOS-SIGNING.md` covers the signing.
+
+**Install from PyPI** with Python 3.10 or later, or **build it** from a clone
+with `tools/build-macos.sh`, which writes `dist/AgnView.app` and
+`dist/AgnView-macos.dmg`:
+
+```bash
+pip install "agnview[desktop]"
+agnview-desktop
+```
+
+- **The close button** hides the window, and the hub keeps running. Click the
+  AgnView icon in the menu bar and choose **Open AgnView** to open it again,
+  and **Quit AgnView** to close it for good. Cmd+Q also quits.
+- **Start at login** in the menu bar menu is off until you turn it on. It adds
+  a LaunchAgent for your account, which starts AgnView hidden in the menu bar
+  when you log in. The same switch is in the dashboard under Browser Sync &
+  Autostart.
+- **Allow phones on my network**, in the menu bar menu and on the pairing
+  screen, works as on Windows. macOS asks once whether AgnView can accept
+  incoming connections.
+- **Port.** The same as on Windows: 18845, or the next free one.
+
+The Usage tab and the Console need the same tools as on Windows, below. The
+AntiGravity card reads AntiGravity's sign-in from the login Keychain, and
+macOS asks once whether to allow that.
+
 **What the Usage tab needs on the machine.** AgnView reads the installed apps'
 own sign-ins, not a browser's. Being signed in to chatgpt.com or claude.ai in a
 browser is not enough on its own.
@@ -214,9 +262,10 @@ starts leave it off. `agnview autostart enable` puts it back, and
 `agnview autostart status` shows whether it is currently registered. The
 switch in the dashboard settings does the same thing.
 
-On a machine with the Windows desktop app installed, `agnview serve` does not
-register itself at login. The desktop app's Start with Windows owns that, so a
-browser-only hub cannot start first and take the port.
+On a machine with the desktop app installed, `agnview serve` does not
+register itself at login. The desktop app's Start with Windows, or Start at
+login on macOS, owns that, so a browser-only hub cannot start first and take
+the port.
 
 ## Pair a phone
 

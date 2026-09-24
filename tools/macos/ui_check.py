@@ -5,6 +5,7 @@ cannot: the menu bar icon's menu and the close button.
     python tools/macos/ui_check.py close-menu       press Escape
     python tools/macos/ui_check.py close-window     click the window's close button
     python tools/macos/ui_check.py window-visible   exit 0 when the main window is on screen
+    python tools/macos/ui_check.py list             print every on-screen window at the top of the screen
 
 It posts mouse and key events with Quartz, which needs the runner's
 accessibility permission. Used by .github/workflows/macos.yml only.
@@ -111,6 +112,18 @@ def main(argv) -> int:
         return 0
     if command == "close-window":
         return close_window()
+    if command == "list":
+        options = Quartz.kCGWindowListOptionOnScreenOnly
+        for info in Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []:
+            bounds = info.get(Quartz.kCGWindowBounds) or {}
+            if float(bounds.get("Y", 999)) < 40 or info.get(Quartz.kCGWindowOwnerName) == OWNER:
+                print(
+                    info.get(Quartz.kCGWindowOwnerName),
+                    info.get(Quartz.kCGWindowNumber),
+                    info.get(Quartz.kCGWindowLayer),
+                    dict(bounds),
+                )
+        return 0
     if command == "window-visible":
         return 0 if wait_for(main_window, 15) else 1
     print(__doc__, file=sys.stderr)

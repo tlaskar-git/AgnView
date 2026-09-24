@@ -191,6 +191,7 @@ jobs:
         run: |
           set -euo pipefail
           py="$RUNNER_TEMP/venv-build/bin/python"
+          "$py" tools/macos/ui_check.py list || true
           menu="$("$py" tools/macos/ui_check.py open-menu)"
           sleep 1
           screencapture -x -o -l "$menu" screenshots/agnview-macos-menu.png
