@@ -382,6 +382,51 @@ def parse_claude_output(raw: str) -> Tuple[str, Optional[str]]:
     return text, session_id if isinstance(session_id, str) else None
 
 
+MISSING_AGENT_HELP = {
+    "claude_code": (
+        "Claude Code is not installed, or the claude command is not on PATH. Install it "
+        "with: npm install -g @anthropic-ai/claude-code, run claude once to sign in, "
+        "then restart AgnView."
+    ),
+    "codex": (
+        "The Codex CLI is not installed, or the codex command is not on PATH. The ChatGPT "
+        "and Codex desktop apps do not add it. Install it with: npm install -g "
+        "@openai/codex, run codex login once, then restart AgnView."
+    ),
+    "antigravity": (
+        "The AntiGravity CLI is not installed, or the agy command is not on PATH. The "
+        "AntiGravity desktop app does not add it. Install the AntiGravity CLI, run agy "
+        "once to sign in, then restart AgnView."
+    ),
+    "deepseek": (
+        "DeepSeek chat is not connected in AgnView yet. Its card on the Usage tab still "
+        "works."
+    ),
+    "custom": (
+        "No local model is connected. Add one as an adapter in ~/.agnview/agents.yaml, "
+        "then restart AgnView."
+    ),
+}
+
+
+def missing_agent_message(agent: str) -> str:
+    """What to tell a person whose message went to an agent that cannot run."""
+    return MISSING_AGENT_HELP.get(
+        agent,
+        f"The command for {agent} is not installed or not on PATH, so nothing ran. "
+        "Install it, then restart AgnView.",
+    )
+
+
+def _is_codex_reply(item) -> bool:
+    """Newer Codex CLIs label a reply type "agent_message". Older ones, such as
+    0.69, label it item_type "assistant_message". Both are read."""
+    if not isinstance(item, dict):
+        return False
+    kind = item.get("type") or item.get("item_type")
+    return kind in ("agent_message", "assistant_message")
+
+
 def parse_codex_output(raw: str) -> Tuple[str, Optional[str]]:
     """Extract the reply text and thread id from Codex JSONL event output."""
     raw = raw or ""
@@ -404,7 +449,7 @@ def parse_codex_output(raw: str) -> Tuple[str, Optional[str]]:
             if isinstance(thread_id, str):
                 session_id = thread_id
         item = event.get("item")
-        if isinstance(item, dict) and item.get("type") == "agent_message":
+        if _is_codex_reply(item):
             text = item.get("text")
             if isinstance(text, str) and text.strip():
                 messages.append(text)
@@ -970,6 +1015,21 @@ class AgentRunner:
                 elif display_text.strip():
                     await self._emit_chunk(agent, "agent_stdout", display_text, session_id)
 
+                if exit_code == 0 and not display_text.strip():
+                    # The CLI ran and said nothing AgnView could read. It used
+                    # to end there, with no reply and no error. Show the tail
+                    # of what it printed so the cause is visible.
+                    tail = "\n".join(line[:300] for line in collected[-5:])
+                    note = f"{agent} finished but returned no reply AgnView could read."
+                    if agent == "codex":
+                        note += (
+                            " An old Codex CLI can do this. Update it with: npm install -g "
+                            "@openai/codex@latest"
+                        )
+                    if tail:
+                        note += f"\nLast output:\n{tail}"
+                    await self._emit_chunk(agent, "agent_stderr", note, session_id)
+
                 if exit_code != 0:
                     stderr_out = await process.stderr.read()
                     err_msg = stderr_out.decode("utf-8", errors="replace").strip()
@@ -1115,13 +1175,14 @@ class AgentRunner:
 
     async def _run_deepseek(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using DeepSeek reasoning engine."""
-        model_tag = f" [{model}]" if model and model != "auto" else ""
-        effort_tag = f" ({effort})" if effort and effort != "default" else ""
-        await self._emit_chunk(
-            "deepseek", "agent_stdout",
-            f"[DeepSeek V3/R1{model_tag}{effort_tag}] Processing reasoning harness for: \"{prompt[:60]}...\"",
-            session_id
-        )
+        if self._is_testing:
+            model_tag = f" [{model}]" if model and model != "auto" else ""
+            effort_tag = f" ({effort})" if effort and effort != "default" else ""
+            await self._emit_chunk(
+                "deepseek", "agent_stdout",
+                f"[DeepSeek V3/R1{model_tag}{effort_tag}] Processing reasoning harness for: \"{prompt[:60]}...\"",
+                session_id
+            )
         await self._simulate_agent_execution("deepseek", prompt, session_id)
 
     async def _run_adapter(
@@ -1237,13 +1298,14 @@ class AgentRunner:
 
     async def _run_custom(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using custom local harness (Ollama / vLLM / LM Studio)."""
-        model_tag = f" [{model}]" if model and model != "auto" else ""
-        effort_tag = f" ({effort})" if effort and effort != "default" else ""
-        await self._emit_chunk(
-            "custom", "agent_stdout",
-            f"[Custom LLM Harness{model_tag}{effort_tag}] Dispatching to local inference worker for: \"{prompt[:60]}...\"",
-            session_id
-        )
+        if self._is_testing:
+            model_tag = f" [{model}]" if model and model != "auto" else ""
+            effort_tag = f" ({effort})" if effort and effort != "default" else ""
+            await self._emit_chunk(
+                "custom", "agent_stdout",
+                f"[Custom LLM Harness{model_tag}{effort_tag}] Dispatching to local inference worker for: \"{prompt[:60]}...\"",
+                session_id
+            )
         await self._simulate_agent_execution("custom", prompt, session_id)
 
 
@@ -1279,7 +1341,17 @@ class AgentRunner:
             await self._emit_finished("system", 1, f"Failed: {str(e)}", session_id)
 
     async def _simulate_agent_execution(self, agent: str, prompt: str, session_id: Optional[str]):
-        """Direct conversational response for agents running in test or offline simulation mode."""
+        """A canned reply for the test suite, and a plain error everywhere else.
+
+        Outside tests this used to answer too, with "I have processed your
+        request", whenever the agent's CLI was missing. That read as a real
+        reply from an agent that never ran. Now the console says what is
+        missing and how to add it.
+        """
+        if not self._is_testing:
+            await self._emit_chunk(agent, "agent_stderr", missing_agent_message(agent), session_id)
+            await self._emit_finished(agent, 127, "Not installed", session_id)
+            return
         response_text = f"I have processed your request for: \"{prompt}\". Actions and changes are verified in the local workspace."
         await asyncio.sleep(0.02)
         await self._emit_chunk(agent, "agent_stdout", response_text, session_id)
