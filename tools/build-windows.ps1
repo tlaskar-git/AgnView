@@ -63,9 +63,30 @@ Write-Host "Packaged $Zip"
 
 if ($Install) {
     $Target = Join-Path $env:LOCALAPPDATA "Programs\AgnView"
-    Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
-    if (Test-Path $Target) { Remove-Item -Recurse -Force $Target }
-    Copy-Item -Recurse (Join-Path $Root "dist\AgnView") $Target
+    $Source = Join-Path $Root "dist\AgnView"
+
+    # Stop the running copy and wait until it has exited, so its files are
+    # no longer locked.
+    $Running = Get-Process AgnView -ErrorAction SilentlyContinue
+    $Running | Stop-Process -Force
+    $Running | ForEach-Object { $_.WaitForExit(15000) | Out-Null }
+
+    # Delete the old install, retrying while Windows releases the files. A
+    # partial delete used to leave the folder behind, and copying into it
+    # then nested the new build one level down as AgnView\AgnView.
+    for ($Attempt = 1; (Test-Path $Target) -and $Attempt -le 10; $Attempt++) {
+        Remove-Item -Recurse -Force $Target -ErrorAction SilentlyContinue
+        if (Test-Path $Target) { Start-Sleep -Milliseconds 500 }
+    }
+    if (Test-Path $Target) { throw "Could not remove $Target. Close AgnView and try again." }
+
+    # Copy the folder's contents, never the folder itself, so the exe always
+    # lands directly in the target.
+    New-Item -ItemType Directory -Force $Target | Out-Null
+    Copy-Item -Recurse -Force (Join-Path $Source "*") $Target
+    if (-not (Test-Path (Join-Path $Target "AgnView.exe"))) {
+        throw "AgnView.exe is missing from $Target after the copy."
+    }
 
     $Shortcut = Join-Path $env:APPDATA "Microsoft\Windows\Start Menu\Programs\AgnView.lnk"
     $Shell = New-Object -ComObject WScript.Shell
