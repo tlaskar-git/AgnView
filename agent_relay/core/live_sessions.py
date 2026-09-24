@@ -221,7 +221,10 @@ def parse_codex_stream_line(line: str) -> StreamUpdate:
 
     if etype == "item.completed":
         item = data.get("item")
-        if isinstance(item, dict) and item.get("type") == "agent_message":
+        # Newer Codex CLIs label a reply type "agent_message". Older ones,
+        # such as 0.69, label it item_type "assistant_message".
+        kind = (item.get("type") or item.get("item_type")) if isinstance(item, dict) else None
+        if kind in ("agent_message", "assistant_message"):
             text = item.get("text")
             if isinstance(text, str) and text.strip():
                 return StreamUpdate(kind="delta", text=text)

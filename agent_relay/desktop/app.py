@@ -3,9 +3,9 @@ start at sign-in.
 
 The hub still serves its API on loopback, because paired phones and the agent
 CLIs talk to it. Nobody opens a browser any more: the window hosts the
-dashboard in WebView2. The close button minimises the window to the taskbar,
-and Quit AgnView in the tray menu stops the app and the hub. With Start with
-Windows on, it starts hidden in the tray at sign-in.
+dashboard in WebView2. The close button, or Quit AgnView in the tray menu,
+closes the app and stops the hub. The minimise button keeps it on the taskbar.
+With Start with Windows on, it starts hidden in the tray at sign-in.
 """
 
 from __future__ import annotations
@@ -360,13 +360,11 @@ class DesktopApp:
         self.window.restore()
 
     def on_closing(self):
-        # The close button minimises AgnView to the taskbar, so the hub keeps
-        # serving and the window is one click away. Quit AgnView in the tray
-        # menu is what stops it.
-        if self.quitting:
-            return True
-        self.window.minimize()
-        return False
+        # The close button closes AgnView, as in any Windows app, and the
+        # minimise button keeps it on the taskbar. Minimising on close left
+        # people with no way to close the window short of the tray menu.
+        self.quitting = True
+        return True
 
     def toggle_autostart(self, _icon=None, _item=None) -> None:
         enabled = not autostart_enabled()

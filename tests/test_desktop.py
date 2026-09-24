@@ -87,20 +87,11 @@ def test_a_refused_change_saves_nothing(tmp_path, monkeypatch):
     assert desktop.autostart_enabled() is False
 
 
-def test_the_close_button_minimises_instead_of_quitting():
-    class Window:
-        minimised = False
-
-        def minimize(self):
-            self.minimised = True
-
+def test_the_close_button_closes_the_app():
     app = desktop.DesktopApp(hub=None, settings={}, start_hidden=False)
-    app.window = Window()
-    assert app.on_closing() is False
-    assert app.window.minimised
-
-    app.quitting = True
+    app.window = object()
     assert app.on_closing() is True
+    assert app.quitting is True
 
 
 def test_the_dashboard_switch_drives_the_desktop_setting(tmp_path, monkeypatch):

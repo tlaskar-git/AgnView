@@ -143,8 +143,9 @@ The app needs the Microsoft Edge WebView2 runtime, which Windows 11 and current
 Windows Server include. It runs the hub on loopback and shows the dashboard in
 its window.
 
-- **Closing the window** minimises AgnView to the taskbar, and the hub keeps
-  running. **Quit AgnView** in the tray menu stops it.
+- **The close button** closes AgnView and stops the hub, as in any Windows app.
+  The minimise button keeps it on the taskbar. **Quit AgnView** in the tray
+  menu also closes it.
 - **Start with Windows** in the tray menu is off until you turn it on. It
   creates a Task Scheduler sign-in task for your account, which starts AgnView
   hidden in the tray 15 seconds after you sign in. The same switch is in the
@@ -164,6 +165,12 @@ browser is not enough on its own.
 | ChatGPT | Codex installed and signed in |
 | AntiGravity | AntiGravity installed and signed in once. It can stay closed after that |
 | Gemini | Nothing more. It reads through AntiGravity's sign-in |
+
+**What the Console needs.** Chatting with an agent in the Console runs that
+agent's command-line tool, which the desktop apps do not install. Claude Code
+needs `claude`, Codex needs the Codex CLI (`npm install -g @openai/codex`, then
+`codex login`), and AntiGravity needs the AntiGravity CLI, `agy`. When one is
+missing, the Console says so and names the install step.
 
 ## Start
 
