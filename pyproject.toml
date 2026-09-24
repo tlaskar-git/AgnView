@@ -50,6 +50,9 @@ desktop = [
     "pywebview==6.2.1; sys_platform == 'win32'",
     "pystray==0.19.5; sys_platform == 'win32'",
     "pillow==12.3.0; sys_platform == 'win32'",
+    # macOS: pywebview on WebKit. It brings PyObjC's AppKit, Quartz and
+    # WebKit, which the menu bar icon uses too. No pystray on macOS.
+    "pywebview==6.2.1; sys_platform == 'darwin'",
 ]
 
 [project.scripts]

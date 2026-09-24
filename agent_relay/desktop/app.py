@@ -7,6 +7,10 @@ dashboard in WebView2. The close button hides the window to the tray icon and
 the hub keeps running. Clicking the tray icon opens it again, and Quit AgnView
 in the tray menu closes the app and stops the hub. With Start with Windows on,
 it starts hidden in the tray at sign-in.
+
+On macOS, main() hands over to macos_app.py: the same shell with a menu bar
+icon in place of the tray and a LaunchAgent in place of the sign-in task. The
+settings, the hub and the dashboard switches below are shared by both.
 """
 
 from __future__ import annotations
@@ -96,6 +100,34 @@ def request_lan_change(enabled: bool) -> bool:
         return False
     threading.Timer(0.5, handler, args=(bool(enabled),)).start()
     return True
+
+
+def platform_text() -> dict:
+    """The words the dashboard shows for the desktop app's two switches, which
+    differ between Windows and macOS."""
+    if sys.platform == "darwin":
+        return {
+            "autostart_label": "Start at login",
+            "autostart_hint": (
+                "Starts AgnView in the background when you log in. The same setting "
+                "as Start at login in the menu bar icon's menu."
+            ),
+            "lan_hint": (
+                "Off: phones connect over iroh. On: phones on the same Wi-Fi connect "
+                "directly. macOS asks once whether AgnView can accept incoming connections."
+            ),
+        }
+    return {
+        "autostart_label": "Start with Windows",
+        "autostart_hint": (
+            "Starts AgnView in the background when you sign in. The same setting "
+            "as Start with Windows in the tray menu."
+        ),
+        "lan_hint": (
+            "Off: phones connect over iroh. On: phones on the same Wi-Fi connect "
+            "directly. Windows asks once to allow it through the firewall."
+        ),
+    }
 
 
 def change_autostart(enabled: bool) -> None:
@@ -216,7 +248,15 @@ def remove_run_values() -> None:
 
 
 def set_autostart(enabled: bool) -> None:
-    """Create or remove the sign-in task."""
+    """Create or remove the sign-in task. On macOS, the LaunchAgent."""
+    if sys.platform == "darwin":
+        from . import macos
+
+        macos.set_login_item(enabled)
+        macos.remove_serve_launch_agent()
+        _leave_sign_in_to_the_desktop_app()
+        return
+
     if enabled:
         import tempfile
 
@@ -234,7 +274,10 @@ def set_autostart(enabled: bool) -> None:
             raise OSError(result.stderr.strip() or "schtasks failed")
 
     remove_run_values()
+    _leave_sign_in_to_the_desktop_app()
 
+
+def _leave_sign_in_to_the_desktop_app() -> None:
     from ..core import autostart
 
     # The desktop app owns this choice now. Keep `agnview serve` from putting
@@ -285,6 +328,11 @@ def watch_for_show_requests(on_show) -> None:
 
 
 def message_box(text: str) -> None:
+    if sys.platform == "darwin":
+        from .macos_app import alert
+
+        alert(text)
+        return
     MB_ICONERROR = 0x10
     ctypes.windll.user32.MessageBoxW(None, text, APP_NAME, MB_ICONERROR)
 
@@ -522,13 +570,21 @@ def configure_logging() -> None:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    parser = argparse.ArgumentParser(prog="AgnView", description="AgnView desktop app for Windows")
+    parser = argparse.ArgumentParser(prog="AgnView", description="AgnView desktop app for Windows and macOS")
     parser.add_argument("--minimized", action="store_true", help="Start hidden in the tray (used at sign-in)")
     parser.add_argument("--port", type=int, help="Loopback port for the hub, saved for later starts")
-    args = parser.parse_args(argv)
+    # Finder passes -psn_0_<number> to apps it starts on older macOS releases.
+    args, unknown = parser.parse_known_args(argv)
+    if unknown and sys.platform != "darwin":
+        parser.error("unrecognized arguments: " + " ".join(unknown))
+
+    if sys.platform == "darwin":
+        from . import macos_app
+
+        return macos_app.main(args)
 
     if sys.platform != "win32":
-        print("The AgnView desktop app runs on Windows. Use `agnview serve` elsewhere.", file=sys.stderr)
+        print("The AgnView desktop app runs on Windows and macOS. Use `agnview serve` elsewhere.", file=sys.stderr)
         return 1
 
     configure_logging()

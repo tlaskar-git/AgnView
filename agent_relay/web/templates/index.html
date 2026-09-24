@@ -1975,8 +1975,8 @@
         <!-- Autostart switch -->
         <div class="p-3.5 bg-[var(--bg-raised)] border border-[var(--border-color)] rounded-xl flex items-center justify-between">
           <div>
-            <span class="text-xs font-semibold text-[var(--text-main)] block mb-0.5">Start with Windows</span>
-            <p class="text-[11px] text-[var(--text-secondary)]">Starts AgnView in the background when you sign in. The same setting as Start with Windows in the tray menu.</p>
+            <span id="autostart-label" class="text-xs font-semibold text-[var(--text-main)] block mb-0.5">Start with Windows</span>
+            <p id="autostart-hint" class="text-[11px] text-[var(--text-secondary)]">Starts AgnView in the background when you sign in. The same setting as Start with Windows in the tray menu.</p>
           </div>
           <label class="relative inline-flex items-center cursor-pointer ml-3">
             <input id="autostart-toggle" type="checkbox" onchange="toggleAutostartSetting(this.checked)" class="sr-only peer" aria-label="Start with Windows">
@@ -3388,6 +3388,17 @@
         // The API answers with "enabled". Reading "autostart" gave undefined,
         // so this toggle rendered off every time, whatever the real setting.
         if (toggle) toggle.checked = !!data.enabled;
+        // The desktop app names the switch for its platform: Start with
+        // Windows, or Start at login on macOS.
+        if (data.label) {
+          const label = document.getElementById('autostart-label');
+          if (label) label.textContent = data.label;
+          if (toggle) toggle.setAttribute('aria-label', data.label);
+        }
+        if (data.hint) {
+          const hint = document.getElementById('autostart-hint');
+          if (hint) hint.textContent = data.hint;
+        }
       } catch (e) {}
     }
 
@@ -6656,6 +6667,9 @@
       modal.classList.add('hidden');
     }
 
+    // Replaced by the desktop app's own wording, which names its platform.
+    let lanHintText = 'Off: phones connect over iroh. On: phones on the same Wi-Fi connect directly. Windows asks once to allow it through the firewall.';
+
     async function refreshLanSetting() {
       try {
         const res = await fetch('/api/system/lan');
@@ -6665,6 +6679,11 @@
         const toggle = document.getElementById('mobile-lan-toggle');
         if (row) row.classList.toggle('hidden', !data.available);
         if (toggle) { toggle.checked = !!data.enabled; toggle.disabled = false; }
+        if (data.hint) {
+          lanHintText = data.hint;
+          const hint = document.getElementById('mobile-lan-hint');
+          if (hint) hint.textContent = lanHintText;
+        }
       } catch (e) {}
     }
 
@@ -6692,7 +6711,7 @@
           }
         } catch (e) {}
       }
-      if (hint) hint.textContent = 'Off: phones connect over iroh. On: phones on the same Wi-Fi connect directly. Windows asks once to allow it through the firewall.';
+      if (hint) hint.textContent = lanHintText;
       await refreshLanSetting();
       await fetchPairingData();
     }

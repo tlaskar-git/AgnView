@@ -1390,9 +1390,14 @@ def get_lan_setting():
     """Whether phones on the local network can reach this hub, and whether
     this hub can change that itself (only the desktop app can)."""
     if _in_desktop_app():
-        from ..desktop.app import lan_enabled
+        from ..desktop.app import lan_enabled, platform_text
 
-        return {"available": True, "enabled": lan_enabled(), "bind_mode": get_bind_mode()}
+        return {
+            "available": True,
+            "enabled": lan_enabled(),
+            "bind_mode": get_bind_mode(),
+            "hint": platform_text()["lan_hint"],
+        }
     return {"available": False, "enabled": get_bind_mode() == "lan", "bind_mode": get_bind_mode()}
 
 
@@ -1426,7 +1431,16 @@ def get_autostart_status():
         # Inside the desktop app this switch and the tray menu's Start with
         # Windows are one setting. Reading the Run key here showed a second,
         # unrelated switch that looked on when the tray said off.
-        return {"enabled": _autostart_status(), "command": None, "os": os.name}
+        from ..desktop.app import platform_text
+
+        text = platform_text()
+        return {
+            "enabled": _autostart_status(),
+            "command": None,
+            "os": os.name,
+            "label": text["autostart_label"],
+            "hint": text["autostart_hint"],
+        }
     return {
         "enabled": autostart.status(),
         "command": autostart.registered_command(),
@@ -1444,14 +1458,15 @@ def toggle_autostart(req: Dict[str, bool]):
     """
     enable = req.get("enable", True)
     if _in_desktop_app():
-        from ..desktop.app import change_autostart
+        from ..desktop.app import change_autostart, platform_text
 
         try:
             change_autostart(bool(enable))
         except OSError as e:
             return {"success": False, "enabled": _autostart_status(), "message": str(e)}
         state = "on" if enable else "off"
-        return {"success": True, "enabled": _autostart_status(), "message": f"Start with Windows is {state}."}
+        label = platform_text()["autostart_label"]
+        return {"success": True, "enabled": _autostart_status(), "message": f"{label} is {state}."}
     try:
         if enable:
             message = autostart.enable_and_clear_opt_out()

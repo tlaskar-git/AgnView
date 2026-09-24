@@ -7,7 +7,12 @@ Unlike the panel read below it in the ladder, it needs neither the app window
 nor its model picker to be open.
 
 On Windows, AntiGravity keeps its sign-in in Windows Credential Manager under
-``gemini:antigravity``. AgnView reads it and never writes it. The access token
+``gemini:antigravity``. That name is the Go keyring library's service
+``gemini`` and account ``antigravity``, and on macOS the same library keeps it
+in the login Keychain as a generic password with that service and account.
+AgnView reads it with the ``security`` command and never writes it. macOS asks
+once whether to allow the read. When the person refuses, AgnView stops asking
+until the next start. The access token
 lasts about an hour, and AntiGravity renews it only while the app runs. When
 the stored one has expired, AgnView renews a copy in memory with the stored
 refresh token and AntiGravity's own sign-in client, whose secret it reads from
@@ -43,6 +48,17 @@ from ..models import (
 )
 
 CREDENTIAL_TARGET = "gemini:antigravity"
+# The same sign-in in the macOS Keychain: service and account.
+KEYCHAIN_SERVICE = "gemini"
+KEYCHAIN_ACCOUNT = "antigravity"
+# The prefixes the Go keyring library writes in front of an encoded secret.
+KEYCHAIN_BASE64_PREFIX = "go-keyring-base64:"
+KEYCHAIN_HEX_PREFIX = "go-keyring-encoded:"
+# The installed AntiGravity app on macOS, for its sign-in client secret.
+MACOS_APP_BUNDLES = (
+    "/Applications/Antigravity.app",
+    os.path.expanduser("~/Applications/Antigravity.app"),
+)
 # Set to 0 to stop AgnView reading AntiGravity's sign-in at all.
 ENABLE_ENV = "AGNVIEW_AGY_CLOUD"
 BASE_URL = "https://cloudcode-pa.googleapis.com/v1internal"
@@ -99,9 +115,73 @@ def _read_windows_credential(target: str) -> Optional[bytes]:
         advapi.CredFree(pointer)
 
 
+def decode_keychain_secret(raw: str) -> Optional[bytes]:
+    """The secret as ``security find-generic-password -w`` prints it.
+
+    The Go keyring library stores it base64 or hex encoded behind a prefix.
+    ``security`` itself prints a secret that is not plain text as hex.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    try:
+        if text.startswith(KEYCHAIN_BASE64_PREFIX):
+            return base64.b64decode(text[len(KEYCHAIN_BASE64_PREFIX):], validate=True)
+        if text.startswith(KEYCHAIN_HEX_PREFIX):
+            return bytes.fromhex(text[len(KEYCHAIN_HEX_PREFIX):])
+        if len(text) % 2 == 0 and all(c in "0123456789abcdefABCDEF" for c in text):
+            decoded = bytes.fromhex(text)
+            # Hex from security holds the raw secret, which may itself carry
+            # the keyring prefix.
+            as_text = decoded.decode("utf-8", errors="replace")
+            if as_text.startswith((KEYCHAIN_BASE64_PREFIX, KEYCHAIN_HEX_PREFIX)):
+                return decode_keychain_secret(as_text)
+            return decoded
+    except ValueError:
+        return None
+    return text.encode("utf-8")
+
+
+# Set when the person refuses the Keychain prompt, so it is not asked again
+# every few minutes. Cleared by a restart.
+_keychain_refused = False
+
+
+def _read_macos_keychain(service: str, account: Optional[str]) -> Optional[bytes]:
+    global _keychain_refused
+    if sys.platform != "darwin" or _keychain_refused:
+        return None
+    import subprocess
+
+    command = ["security", "find-generic-password", "-s", service]
+    if account:
+        command += ["-a", account]
+    command.append("-w")
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        # 128 is the answer when the person chose Deny in the Keychain prompt.
+        if result.returncode == 128 or "cancel" in (result.stderr or "").lower():
+            _keychain_refused = True
+        return None
+    return decode_keychain_secret(result.stdout)
+
+
+def _read_sign_in_blob() -> Optional[bytes]:
+    if sys.platform == "win32":
+        return _read_windows_credential(CREDENTIAL_TARGET)
+    if sys.platform == "darwin":
+        return _read_macos_keychain(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) or _read_macos_keychain(
+            CREDENTIAL_TARGET, None
+        )
+    return None
+
+
 def read_sign_in() -> Optional[dict]:
     """AntiGravity's stored sign-in, or None when there is none on this machine."""
-    blob = _read_windows_credential(CREDENTIAL_TARGET)
+    blob = _read_sign_in_blob()
     if not blob:
         return None
     try:
@@ -179,21 +259,53 @@ def installed_client_secrets() -> List[str]:
     """
     import re
 
+    found: List[str] = []
+    for path in language_server_paths():
+        try:
+            with open(path, "rb") as handle:
+                blob = handle.read()
+        except OSError:
+            continue
+        for match in re.finditer(rb"GOCSPX-[A-Za-z0-9_-]{28}", blob):
+            value = match.group(0).decode("ascii")
+            if value not in found:
+                found.append(value)
+        if found:
+            break
+    return found[:4]
+
+
+def language_server_paths() -> List[str]:
+    """Where the installed AntiGravity keeps its language server binary."""
+    if sys.platform == "darwin":
+        return macos_language_servers(MACOS_APP_BUNDLES)
     root = os.environ.get("LOCALAPPDATA")
     if not root:
         return []
-    path = os.path.join(root, "Programs", "antigravity", "resources", "bin", "language_server.exe")
-    try:
-        with open(path, "rb") as handle:
-            blob = handle.read()
-    except OSError:
-        return []
+    return [os.path.join(root, "Programs", "antigravity", "resources", "bin", "language_server.exe")]
+
+
+def macos_language_servers(bundles, max_depth: int = 6) -> List[str]:
+    """Language server binaries inside AntiGravity.app bundles.
+
+    The folder inside the bundle has moved between releases, so this looks
+    through Contents/Resources, a few levels deep, for a file whose name
+    starts with language_server.
+    """
     found: List[str] = []
-    for match in re.finditer(rb"GOCSPX-[A-Za-z0-9_-]{28}", blob):
-        value = match.group(0).decode("ascii")
-        if value not in found:
-            found.append(value)
-    return found[:4]
+    for bundle in bundles:
+        resources = os.path.join(bundle, "Contents", "Resources")
+        if not os.path.isdir(resources):
+            continue
+        base_depth = resources.rstrip(os.sep).count(os.sep)
+        for folder, subfolders, files in os.walk(resources):
+            if folder.count(os.sep) - base_depth >= max_depth:
+                subfolders[:] = []
+            subfolders.sort()
+            for name in sorted(files):
+                if name.startswith("language_server"):
+                    found.append(os.path.join(folder, name))
+    return found
 
 
 def renew_access_token(sign_in: dict) -> Tuple[Optional[str], Optional[str]]:

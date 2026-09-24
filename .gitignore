@@ -56,3 +56,4 @@ htmlcov/
 .env.local
 .env.*.local
 .venv-desktop/
+.venv-desktop-macos/

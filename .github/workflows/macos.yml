@@ -1,0 +1,252 @@
+name: macOS desktop app
+
+# Builds, tests and screenshots the AgnView macOS app on every change, and
+# attaches the disk image to the GitHub release on a v* tag. Signing and
+# notarisation run only when the secrets in docs/MACOS-SIGNING.md are set.
+# Without them the app is built unsigned and every other step still runs.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build, test and screenshot
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      HAS_SIGNING: ${{ secrets.MACOS_CERT_P12_BASE64 != '' && secrets.MACOS_CERT_PASSWORD != '' && secrets.MACOS_SIGNING_IDENTITY != '' }}
+      HAS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID != '' && secrets.MACOS_NOTARY_PASSWORD != '' && secrets.MACOS_NOTARY_TEAM_ID != '' }}
+      HAS_NOTARY_API_KEY: ${{ secrets.MACOS_NOTARY_API_KEY_P8_BASE64 != '' && secrets.MACOS_NOTARY_API_KEY_ID != '' && secrets.MACOS_NOTARY_API_ISSUER != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev,desktop]"
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest tests/ -q
+
+      - name: Import the signing certificate
+        if: env.HAS_SIGNING == 'true'
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/agnview-signing.keychain-db"
+          keychain_password="$(openssl rand -base64 32)"
+          echo "::add-mask::$keychain_password"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$MACOS_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/security >/dev/null
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          echo "Signing certificate imported into a temporary keychain"
+
+      - name: Signing skipped
+        if: env.HAS_SIGNING != 'true'
+        run: echo "::notice title=Unsigned build::The MACOS_CERT_* and MACOS_SIGNING_IDENTITY secrets are not set, so AgnView.app is signed ad hoc and not notarised. See docs/MACOS-SIGNING.md."
+
+      - name: Build AgnView.app
+        env:
+          PYTHON: python
+          AGNVIEW_BUILD_VENV: ${{ runner.temp }}/venv-build
+          MACOS_SIGNING_IDENTITY: ${{ env.HAS_SIGNING == 'true' && secrets.MACOS_SIGNING_IDENTITY || '' }}
+        run: bash tools/build-macos.sh app
+
+      - name: Build AgnView-macos.dmg
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ env.HAS_SIGNING == 'true' && secrets.MACOS_SIGNING_IDENTITY || '' }}
+        run: bash tools/build-macos.sh dmg
+
+      - name: Notarise and staple
+        if: env.HAS_SIGNING == 'true' && (env.HAS_NOTARY_APPLE_ID == 'true' || env.HAS_NOTARY_API_KEY == 'true')
+        env:
+          MACOS_NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          MACOS_NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+          MACOS_NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          MACOS_NOTARY_API_KEY_P8_BASE64: ${{ secrets.MACOS_NOTARY_API_KEY_P8_BASE64 }}
+          MACOS_NOTARY_API_KEY_ID: ${{ secrets.MACOS_NOTARY_API_KEY_ID }}
+          MACOS_NOTARY_API_ISSUER: ${{ secrets.MACOS_NOTARY_API_ISSUER }}
+        run: |
+          set -euo pipefail
+          if [ "$HAS_NOTARY_API_KEY" = "true" ]; then
+            key="$RUNNER_TEMP/notary-key.p8"
+            printf '%s' "$MACOS_NOTARY_API_KEY_P8_BASE64" | base64 --decode > "$key"
+            xcrun notarytool submit dist/AgnView-macos.dmg \
+              --key "$key" --key-id "$MACOS_NOTARY_API_KEY_ID" --issuer "$MACOS_NOTARY_API_ISSUER" \
+              --wait --timeout 45m
+            rm -f "$key"
+          else
+            xcrun notarytool submit dist/AgnView-macos.dmg \
+              --apple-id "$MACOS_NOTARY_APPLE_ID" --password "$MACOS_NOTARY_PASSWORD" --team-id "$MACOS_NOTARY_TEAM_ID" \
+              --wait --timeout 45m
+          fi
+          xcrun stapler staple dist/AgnView-macos.dmg
+          xcrun stapler validate dist/AgnView-macos.dmg
+
+      - name: Notarisation skipped
+        if: env.HAS_SIGNING != 'true' || (env.HAS_NOTARY_APPLE_ID != 'true' && env.HAS_NOTARY_API_KEY != 'true')
+        run: echo "::notice title=Not notarised::Notarisation needs the signing secrets and either the MACOS_NOTARY_APPLE_ID set or the MACOS_NOTARY_API_KEY set. See docs/MACOS-SIGNING.md."
+
+      - name: Verify signatures
+        if: env.HAS_SIGNING == 'true'
+        run: |
+          set -euo pipefail
+          codesign --verify --deep --strict --verbose=2 dist/AgnView.app
+          codesign --display --verbose=2 dist/AgnView.app 2>&1 | grep -E "^(Authority|TeamIdentifier|Runtime)" || true
+          if [ "$HAS_NOTARY_APPLE_ID" = "true" ] || [ "$HAS_NOTARY_API_KEY" = "true" ]; then
+            spctl --assess --type open --context context:primary-signature --verbose=2 dist/AgnView-macos.dmg
+            mount_dir="$(mktemp -d)"
+            hdiutil attach -nobrowse -readonly -mountpoint "$mount_dir" dist/AgnView-macos.dmg >/dev/null
+            spctl --assess --type execute --verbose=2 "$mount_dir/AgnView.app"
+            hdiutil detach "$mount_dir" >/dev/null
+          fi
+
+      - name: Launch the app
+        run: |
+          set -euo pipefail
+          # A throwaway home, so the app starts with no settings and no
+          # sign-ins, and the screenshots show nothing but a fresh AgnView.
+          profile="$RUNNER_TEMP/agnview-profile"
+          mkdir -p "$profile"
+          HOME="$profile" nohup dist/AgnView.app/Contents/MacOS/AgnView > "$RUNNER_TEMP/agnview-stdout.log" 2>&1 &
+          echo "APP_PID=$!" >> "$GITHUB_ENV"
+          echo "APP_PROFILE=$profile" >> "$GITHUB_ENV"
+          for attempt in $(seq 1 90); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18845/ || true)"
+            if [ "$code" != "000" ]; then
+              echo "The hub answered on 127.0.0.1:18845 with HTTP $code after $((attempt * 2)) seconds"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "The hub did not answer on 127.0.0.1:18845" >&2
+          cat "$profile/.agnview/logs/desktop.log" 2>/dev/null | tail -40 || true
+          tail -40 "$RUNNER_TEMP/agnview-stdout.log" || true
+          exit 1
+
+      - name: Check the app is a single instance
+        run: |
+          set -euo pipefail
+          HOME="$APP_PROFILE" dist/AgnView.app/Contents/MacOS/AgnView &
+          second=$!
+          for attempt in $(seq 1 30); do
+            if ! kill -0 "$second" 2>/dev/null; then
+              wait "$second" || true
+              echo "The second launch handed over to the first and exited"
+              kill -0 "$APP_PID"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "The second launch kept running" >&2
+          kill "$second" || true
+          exit 1
+
+      - name: Screenshot the window and the menu bar
+        run: |
+          set -euo pipefail
+          mkdir -p screenshots
+          read -r window width height < <("$RUNNER_TEMP/venv-build/bin/python" tools/macos/find_window.py AgnView 90)
+          echo "Window $window on a ${width}x${height} screen"
+          # Give the dashboard time to draw after the window appears.
+          sleep 10
+          screencapture -x -o -l "$window" screenshots/agnview-macos-window.png
+          screencapture -x -R "0,0,${width},40" screenshots/agnview-macos-menubar.png
+          ls -l screenshots
+          grep -E "Menu bar icon ready|Hub serving" "$APP_PROFILE/.agnview/logs/desktop.log"
+
+      - name: App log
+        if: always()
+        run: |
+          tail -60 "$APP_PROFILE/.agnview/logs/desktop.log" 2>/dev/null || true
+          tail -40 "$RUNNER_TEMP/agnview-stdout.log" 2>/dev/null || true
+
+      - name: Quit the app
+        if: always()
+        run: |
+          if [ -n "${APP_PID:-}" ] && kill -0 "$APP_PID" 2>/dev/null; then
+            kill "$APP_PID" || true
+          fi
+
+      - name: Upload the window screenshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agnview-macos-window
+          path: screenshots/agnview-macos-window.png
+          if-no-files-found: error
+
+      - name: Upload the menu bar screenshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: agnview-macos-menubar
+          path: screenshots/agnview-macos-menubar.png
+          if-no-files-found: error
+
+      - name: Upload the disk image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: AgnView-macos-dmg
+          path: dist/AgnView-macos.dmg
+          if-no-files-found: error
+
+      - name: Remove the signing keychain
+        if: always() && env.SIGNING_KEYCHAIN != ''
+        run: security delete-keychain "$SIGNING_KEYCHAIN" || true
+
+  release:
+    name: attach the disk image to the release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: AgnView-macos-dmg
+          path: dist
+
+      - name: Attach AgnView-macos.dmg
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            # The Windows zip is built locally and attached by hand, before or
+            # after this. Creating the release here never touches it.
+            gh release create "$TAG" --verify-tag --title "AgnView ${TAG#v}" --notes "AgnView ${TAG#v}"
+          fi
+          # --clobber replaces an older AgnView-macos.dmg only. Other assets,
+          # such as AgnView-windows-x64.zip, stay as they are.
+          gh release upload "$TAG" dist/AgnView-macos.dmg --clobber
