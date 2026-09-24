@@ -19,10 +19,18 @@ import Quartz
 OWNER = "AgnView"
 
 
-def windows(owner: str = OWNER):
+# Recent macOS hosts every app's menu bar icon in a Control Center window,
+# not in a window of the app's own.
+STATUS_OWNERS = (OWNER, "Control Center", "SystemUIServer")
+STATUS_LAYER = 25  # kCGStatusWindowLevel
+POPUP_MENU_LAYER = 101  # kCGPopUpMenuWindowLevel
+
+
+def windows(*owners: str):
+    owners = owners or (OWNER,)
     options = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
     for info in Quartz.CGWindowListCopyWindowInfo(options, Quartz.kCGNullWindowID) or []:
-        if info.get(Quartz.kCGWindowOwnerName) == owner:
+        if info.get(Quartz.kCGWindowOwnerName) in owners or "*" in owners:
             bounds = info.get(Quartz.kCGWindowBounds) or {}
             yield (
                 int(info[Quartz.kCGWindowNumber]),
@@ -40,13 +48,19 @@ def main_window():
 
 
 def status_item():
-    # The status item is a small window of AgnView's at the top of the screen,
-    # above the normal window layer.
-    for window in windows():
-        _number, layer, x, y, width, height = window
-        if layer > 0 and y < 40 and width < 80 and height < 40:
-            return window
-    return None
+    """AgnView's menu bar icon on a CI runner.
+
+    macOS adds a new menu bar icon to the left of the ones already there, and
+    a runner has no other app with a menu bar icon, so AgnView's is the
+    leftmost status window. On a desktop with other apps this guess is wrong,
+    which is why this script is for CI only.
+    """
+    found = [
+        window
+        for window in windows(*STATUS_OWNERS)
+        if window[1] == STATUS_LAYER and window[3] <= 2 and window[4] < 80 and window[5] <= 40
+    ]
+    return min(found, key=lambda w: w[2]) if found else None
 
 
 def click(x: float, y: float) -> None:
@@ -80,7 +94,7 @@ def open_menu() -> int:
         return 1
     _number, _layer, x, y, width, height = item
     click(x + width / 2, y + height / 2)
-    menu = wait_for(lambda: next((w for w in windows() if w[1] >= 100 and w[5] > 40), None), 5)
+    menu = wait_for(lambda: next((w for w in windows("*") if w[1] == POPUP_MENU_LAYER and w[5] > 40), None), 5)
     if menu is None:
         print("The menu did not open", file=sys.stderr)
         return 1
