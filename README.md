@@ -126,8 +126,9 @@ quits AgnView and stops the hub.
 The tray menu has a **Start with Windows** toggle. It is on by default. It
 creates a Task Scheduler sign-in task for your account, which starts AgnView
 hidden in the tray 15 seconds after you sign in. Open it from the tray icon or
-the Start menu. Settings live in `~/.agnview/desktop.json`. Pass `--port` once to
-change the port, and the app remembers it.
+the Start menu. Settings live in `~/.agnview/desktop.json`. The app serves on port 18845, and
+moves to the next free port when that one is taken. Pass `--port` once to
+change it, and the app remembers it.
 
 ## Start
 

@@ -69,22 +69,29 @@ def _read_codex_auth() -> tuple:
 def fetch_codex_auth(account: AccountLike) -> Optional[UsageObservation]:
     """Read the Codex five-hour and weekly windows ChatGPT reports."""
     cred = (account.credential or "").strip()
+    pasted = cred if (cred.startswith("eyJ") and len(cred) > 50) else None
     access_token, account_id = _read_codex_auth()
-    token = cred if (cred.startswith("eyJ") and len(cred) > 50) else access_token
-    if not token:
+    # Codex's own sign-in first, because Codex keeps it fresh. A token pasted
+    # into the account used to win, and once it expired the card was refused
+    # for good while Codex held a valid token on the same machine.
+    candidates = [t for t in (access_token, pasted) if t]
+    if not candidates:
         return None
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    }
-    if account_id:
-        headers["ChatGPT-Account-ID"] = account_id
-
+    res = None
     try:
         with httpx.Client(timeout=12.0) as client:
-            res = client.get(WHAM_URL, headers=headers)
+            for token in dict.fromkeys(candidates):
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                }
+                if account_id and token == access_token:
+                    headers["ChatGPT-Account-ID"] = account_id
+                res = client.get(WHAM_URL, headers=headers)
+                if res.status_code not in (401, 403):
+                    break
     except Exception as exc:
         return UsageObservation.unavailable(
             "codex_auth",
@@ -258,6 +265,10 @@ def fetch_api_key(account: AccountLike) -> Optional[UsageObservation]:
 
 def fetch_nothing(account: AccountLike) -> Optional[UsageObservation]:
     """Last rung, so the card says why rather than showing a blank."""
+    if CODEX_AUTH_PATH.exists():
+        # The Codex rung already said what went wrong. Adding "no sign-in was
+        # found" beside it contradicted it.
+        return None
     return UsageObservation.unavailable(
         "codex_auth",
         f"No Codex sign-in was found at {CODEX_AUTH_PATH} and this account "

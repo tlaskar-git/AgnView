@@ -54,6 +54,9 @@ FAKE_HOME = Path.home()
 # an app happened to be open. Point both at the throwaway home instead.
 os.environ["APPDATA"] = str(_FAKE_HOME / "AppData" / "Roaming")
 os.environ["XDG_CONFIG_HOME"] = str(_FAKE_HOME / ".config")
+# Discovery looks for an AntiGravity install under LOCALAPPDATA. Left pointing
+# at the real machine, a test would find the developer's own install.
+os.environ["LOCALAPPDATA"] = str(_FAKE_HOME / "AppData" / "Local")
 
 # A Claude card with an expired sign-in asks Claude Code to refresh it by
 # running a real prompt. A test must never do that, so it is off for the
