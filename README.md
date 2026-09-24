@@ -123,9 +123,26 @@ is needed. Pick one of three ways to install it.
 [`AgnView-windows-x64.zip`](https://github.com/tlaskar-git/AgnView/releases/latest/download/AgnView-windows-x64.zip) from the
 [latest release](https://github.com/tlaskar-git/AgnView/releases/latest), extract the `AgnView` folder to
 `%LOCALAPPDATA%\Programs\AgnView` and run `AgnView.exe`. Keep the whole folder
-together, because the exe needs the files beside it. To update, quit AgnView
-from the tray menu and replace the folder with the new one. Your accounts and
-settings live in `~/.agnview` and are kept.
+together, because the exe needs the files beside it.
+
+The zip holds one folder named `AgnView`. When you extract it, check that
+`AgnView.exe` sits directly in `%LOCALAPPDATA%\Programs\AgnView`, not in a
+second `AgnView` folder inside it. A nested copy is easy to miss, and the old
+`AgnView.exe` one level up keeps starting instead.
+
+**To update**, download the new zip, extract it the same way and start the new
+`AgnView.exe`. From 0.1.8 on, a newer copy closes an older running copy by
+itself and takes its place, so there is no need to quit the old one first. For
+an update from 0.1.7 or earlier, right-click the AgnView tray icon, choose
+**Quit AgnView**, then replace the folder. Your accounts and settings live in
+`~/.agnview` and are kept.
+
+**Check which version runs.** In PowerShell, with the port AgnView uses
+(18845 on a new install, or the port an older install saved):
+
+```powershell
+(Invoke-RestMethod http://127.0.0.1:18845/openapi.json).info.version
+```
 
 **Install from PyPI.** This needs Python 3.10 or later:
 
@@ -159,6 +176,9 @@ its window.
   over iroh. On, it also listens on your local network, so a phone on the same
   Wi-Fi connects directly, and Windows asks once to let it through the
   firewall. The QR code always matches the mode that is on.
+- **One copy at a time.** Starting AgnView while it already runs brings the
+  open window forward. Starting a newer version closes the older running copy
+  and takes over.
 - **Port.** The app serves on port 18845, away from the 8765 default of
   `agnview serve`, and moves to the next free port when that one is taken. Pass
   `--port` once to change it, and the app remembers it. Settings live in
