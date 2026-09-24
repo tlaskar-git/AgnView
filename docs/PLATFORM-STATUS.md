@@ -9,7 +9,7 @@ not Windows.
 | Platform | How it runs | Status |
 |---|---|---|
 | Windows | Desktop app (`AgnView.exe`), or `agnview serve` in a browser | Complete. Released as `AgnView-windows-x64.zip` on every GitHub release |
-| macOS | `agnview serve` in a browser | Works. No desktop app yet |
+| macOS | Desktop app (`AgnView.app`), or `agnview serve` in a browser | Desktop app built and tested on every change by `.github/workflows/macos.yml`, and attached to each GitHub release from the next `v*` tag on as `AgnView-macos.dmg`. Signed ad hoc until the signing secrets are set |
 | Linux | `agnview serve` in a browser | Works. No desktop app |
 | iOS and iPadOS | Companion app that pairs with a hub | Not built. Design and spec only, in a separate repository |
 | Android | Companion app | Not started |
@@ -34,6 +34,36 @@ locally with PyInstaller, never on CI.
   task is removed. The macOS app needs the same behaviour.
 - Every child process starts without a console window (`agent_relay/core/proc.py`).
 
+## macOS desktop app
+
+Code: `agent_relay/desktop/macos_app.py` (window and menu bar icon) and
+`agent_relay/desktop/macos.py` (Start at login and single instance, no GUI).
+The settings, the hub, the port and Allow phones on my network are the shared
+code in `agent_relay/desktop/app.py`. Design: `docs/adr/ADR-MACOS-DESKTOP.md`.
+Build: `tools/build-macos.sh` on a Mac, or `.github/workflows/macos.yml` on
+every pull request, push to `main` and `v*` tag.
+
+- A pywebview window on WebKit over the hub on loopback, and a menu bar icon
+  with Open AgnView, Start at login, Allow phones on my network and Quit
+  AgnView. The icon is a native NSStatusItem in pywebview's own Cocoa run
+  loop. pystray is not used on macOS.
+- The close button hides the window, and the menu bar icon brings it back.
+  The Dock icon shows while the window is open and goes with it. Cmd+Q, Quit
+  in the Dock and Quit AgnView in the menu stop the app and the hub.
+- Start at login is a LaunchAgent, `~/Library/LaunchAgents/com.agnview.desktop.plist`,
+  off by default, shared with the dashboard's autostart switch.
+- Port 18845 by default, moving to the next free port when that one is busy.
+- One instance per user: a lock file and a Unix socket in `~/.agnview`. A
+  second launch brings the open window forward and exits.
+- Agent chats run headless. Nothing opens Terminal.
+- CI launches the built app on a macOS runner, waits for the hub on
+  127.0.0.1:18845, checks a second launch hands over, and uploads screenshots
+  of the window and the menu bar with the disk image.
+- Signing and notarisation run in CI once the secrets in
+  `docs/MACOS-SIGNING.md` exist. Until then `AgnView-macos.dmg` is signed ad
+  hoc, and a Mac opens it only with right-click, Open.
+- The CI build is for Apple silicon. Intel Macs use `agnview serve`.
+
 ## Usage tab sources
 
 Every card needs no setup. Discovery (`agent_relay/core/usage/discover.py`)
@@ -44,7 +74,7 @@ a card the person deletes stays deleted.
 |---|---|---|---|---|
 | Claude | Anthropic account usage API with the Claude Code sign-in. AgnView asks Claude Code to renew it before it expires | `~/.claude/.credentials.json` | Keychain, `Claude Code-credentials` | `~/.claude/.credentials.json` |
 | ChatGPT | ChatGPT usage API with the Codex sign-in, `~/.codex/auth.json` | Yes | Yes | Yes |
-| AntiGravity and Gemini | Google's quota service with AntiGravity's own sign-in, renewed in memory (`adapters/agy_cloud.py`) | Windows Credential Manager, `gemini:antigravity` | **Not built.** Falls back to reading the app's model picker while AntiGravity is open | Not built. Same fallback |
+| AntiGravity and Gemini | Google's quota service with AntiGravity's own sign-in, renewed in memory (`adapters/agy_cloud.py`) | Windows Credential Manager, `gemini:antigravity` | Keychain, service `gemini`, account `antigravity`, read with `security`. macOS asks once to allow the read. Untested against a real AntiGravity sign-in on a Mac | Not built. Falls back to reading the app's model picker while AntiGravity is open |
 
 A card keeps its last real reading, with its age, when a read fails, until
 that window resets (`agent_relay/core/usage/service.py`).
@@ -69,19 +99,17 @@ The Windows desktop app has an Allow phones on my network setting, in the
 tray menu and on the pairing screen, off by default. Off, it listens on
 loopback and the QR code's `lan` field is `127.0.0.1:<port>`, which a client
 skips, so the phone goes straight to iroh. On, it listens on every interface
-and the QR code carries the LAN address. The macOS app needs the same setting.
+and the QR code carries the LAN address. The macOS app has the same setting,
+in its menu bar menu and on the pairing screen.
 
 ## What to build next
 
-1. **macOS desktop app.** The Windows app is a thin shell around the hub, so
-   the same structure applies: a window, a menu bar icon in place of the tray,
-   a LaunchAgent for start at sign-in, a `.app` bundle built locally, and a
-   signed, notarised build for distribution. `agent_relay/desktop/app.py`
-   exits on anything but Windows today.
-2. **AntiGravity quota on macOS.** Find where AntiGravity keeps its sign-in on
-   macOS (most likely the Keychain) and add it to `agy_cloud.py` beside the
-   Windows Credential Manager read. The rest of that module is platform
-   neutral.
+1. **Sign and notarise the macOS app.** Add the secrets in
+   `docs/MACOS-SIGNING.md`. The workflow then signs, notarises and staples
+   with no code change.
+2. **Confirm the macOS app on a real Mac**: the menu bar menu, Start at login
+   across a log out and in, Allow phones on my network with a phone, and the
+   AntiGravity card with a real AntiGravity sign-in.
 3. **iOS and iPadOS app**, pairing through the QR code and following
    `docs/mobile-api-spec.json`.
 4. **Android app.**
@@ -96,3 +124,5 @@ and the QR code carries the LAN address. The macOS app needs the same setting.
   plus a gitleaks secret scan, on every push.
 - A `v*` tag publishes to PyPI through `.github/workflows/release.yml`. The
   Windows zip is built locally and attached to the GitHub release.
+  `.github/workflows/macos.yml` attaches `AgnView-macos.dmg` to the same
+  release, and creates the release first when it does not exist yet.

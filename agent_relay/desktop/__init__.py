@@ -1,1 +1,1 @@
-"""The AgnView desktop app for Windows."""
+"""The AgnView desktop app for Windows and macOS."""
