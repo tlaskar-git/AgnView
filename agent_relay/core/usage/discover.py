@@ -14,7 +14,10 @@ here", never "how much quota is left", because the adapter answers that and a
 guess here would be exactly the kind of invented figure this rebuild removed.
 """
 
-from typing import Dict, List, Optional
+import json
+import os
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional
 
 # The adapter modules are held, not their path constants. Each adapter resolves
 # its credential location as a module-level constant, so importing the constant
@@ -52,9 +55,33 @@ def _chatgpt() -> Optional[Dict[str, str]]:
     }
 
 
+def _antigravity_installed() -> Optional[Path]:
+    """Where AntiGravity is installed or has left its data, or None.
+
+    Its log only exists once the app has run a session, so a machine where
+    AntiGravity was installed and signed in, but never used for a chat, was
+    not detected at all.
+    """
+    candidates = [Path.home() / ".gemini" / "antigravity"]
+    local = os.environ.get("LOCALAPPDATA")
+    if local:
+        candidates.insert(0, Path(local) / "Programs" / "antigravity")
+    return next((path for path in candidates if path.exists()), None)
+
+
 def _gemini() -> Optional[Dict[str, str]]:
     if not _google.CREDS_PATH.exists():
-        return None
+        # The Gemini figures now come from AntiGravity's sign-in, so a machine
+        # with AntiGravity and no Gemini CLI still has a Gemini card to show.
+        installed = _antigravity_installed()
+        if installed is None:
+            return None
+        return {
+            "provider": "gemini",
+            "name": "Gemini",
+            "plan_name": "Gemini",
+            "detected_from": str(installed),
+        }
     email = _google.active_google_account()
     return {
         "provider": "gemini",
@@ -67,7 +94,7 @@ def _gemini() -> Optional[Dict[str, str]]:
 def _antigravity() -> Optional[Dict[str, str]]:
     log = next(
         (path for path in (_agy.CLI_LOG, _agy.DESKTOP_LOG) if path.exists()), None
-    )
+    ) or _antigravity_installed()
     if log is None:
         return None
     return {
@@ -100,11 +127,51 @@ def discover_local_accounts() -> List[Dict[str, str]]:
     return found
 
 
-def missing_providers(existing_providers) -> List[Dict[str, str]]:
+def missing_providers(existing_providers, skip: Iterable[str] = ()) -> List[Dict[str, str]]:
     """Discovered tools that have no account yet.
 
     Used both to seed a fresh install and to pick up a tool installed later,
-    without ever duplicating an account the operator already has.
+    without ever duplicating an account the operator already has. ``skip``
+    names providers the operator removed on purpose.
     """
     have = {(p or "").strip().lower() for p in existing_providers}
+    have |= {(p or "").strip().lower() for p in skip}
     return [found for found in discover_local_accounts() if found["provider"] not in have]
+
+
+# ---------------------------------------------------------------------------
+# Providers removed on purpose
+# ---------------------------------------------------------------------------
+#
+# Discovery runs at every start and every few minutes, so a tool signed in
+# after the first start still gets its card. A card the operator deleted must
+# not come back behind their back, so deleting the last account of a provider
+# records it here, and adding one by hand clears it again.
+
+DISMISSED_PATH = Path.home() / ".agnview" / "usage_dismissed.json"
+
+
+def dismissed_providers() -> List[str]:
+    try:
+        data = json.loads(DISMISSED_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [p for p in data if isinstance(p, str)] if isinstance(data, list) else []
+
+
+def _save_dismissed(providers: Iterable[str]) -> None:
+    DISMISSED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    DISMISSED_PATH.write_text(json.dumps(sorted(set(providers))), encoding="utf-8")
+
+
+def dismiss_provider(provider: str) -> None:
+    key = (provider or "").strip().lower()
+    if key:
+        _save_dismissed(set(dismissed_providers()) | {key})
+
+
+def undismiss_provider(provider: str) -> None:
+    key = (provider or "").strip().lower()
+    current = set(dismissed_providers())
+    if key in current:
+        _save_dismissed(current - {key})

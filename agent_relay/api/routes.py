@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import re
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -37,7 +38,12 @@ from ..core.usage import (
     parse_instant,
     provider_options,
 )
-from ..core.usage.discover import missing_providers
+from ..core.usage.discover import (
+    dismiss_provider,
+    dismissed_providers,
+    missing_providers,
+    undismiss_provider,
+)
 from ..core.pairing import (
     build_pairing_payload, generate_qr_svg, get_or_create_pairing_token,
     regenerate_pairing_token
@@ -377,10 +383,42 @@ async def test_notification(request: Request, channel: Optional[str] = Query(def
 
 # ----------------- Subscription Usage & Quotas (Claude, ChatGPT, Gemini) -----------------
 
+_DISCOVERY_INTERVAL_SECONDS = 600
+_last_discovery = 0.0
+
+
+def _discover_new_tools(db, provider: Optional[str]) -> None:
+    """Add a card for a tool signed in since the hub started, at most every
+    ten minutes. A provider the operator removed is skipped."""
+    global _last_discovery
+    if provider:
+        return
+    now = time.monotonic()
+    if _last_discovery and now - _last_discovery < _DISCOVERY_INTERVAL_SECONDS:
+        return
+    _last_discovery = now
+    try:
+        have = [account.get("provider") for account in db.list_usage_accounts()]
+        for found in missing_providers(have, skip=dismissed_providers()):
+            db.save_usage_account(
+                UsageAccount(
+                    id=f"{found['provider']}-{uuid.uuid4().hex[:6]}",
+                    provider=found["provider"],
+                    name=found["name"],
+                    auth_type="session_token",
+                    credential="",
+                    plan_name=found.get("plan_name") or "Unknown",
+                ).model_dump()
+            )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Usage: discovery failed: %s", exc)
+
+
 @router.get("/usage/accounts", response_model=List[Dict[str, Any]])
 def list_usage_accounts(request: Request, provider: Optional[str] = None):
     """List all tracked subscription accounts with masked credentials."""
     db = request.app.state.db
+    _discover_new_tools(db, provider)
     raw_accounts = db.list_usage_accounts(provider=provider)
     masked_list = []
     for raw in raw_accounts:
@@ -409,6 +447,7 @@ def list_usage_accounts(request: Request, provider: Optional[str] = None):
 def add_usage_account(req: CreateUsageAccountRequest, request: Request):
     """Add a new subscription account and perform initial live quota fetch."""
     db = request.app.state.db
+    undismiss_provider(req.provider)
     account_id = req.id or f"{req.provider.lower()}-{uuid.uuid4().hex[:6]}"
     cred = req.get_credential()
 
@@ -614,7 +653,9 @@ def discover_usage_accounts(request: Request):
     have = [account.get("provider") for account in existing]
 
     added: List[Dict[str, Any]] = []
+    # Asked for by the operator, so providers removed earlier are offered too.
     for found in missing_providers(have):
+        undismiss_provider(found["provider"])
         account = UsageAccount(
             id=f"{found['provider']}-{uuid.uuid4().hex[:6]}",
             provider=found["provider"],
@@ -834,9 +875,14 @@ def detect_local_token(
 def delete_usage_account(account_id: str, request: Request):
     """Remove a tracked subscription account."""
     db = request.app.state.db
+    raw = db.get_usage_account(account_id)
     deleted = db.delete_usage_account(account_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"Account '{account_id}' not found.")
+    provider = (raw or {}).get("provider")
+    if provider and not db.list_usage_accounts(provider=provider):
+        # Removed on purpose, so discovery must not add it back.
+        dismiss_provider(provider)
     return {"message": f"Account '{account_id}' removed.", "deleted": True, "id": account_id}
 
 

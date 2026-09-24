@@ -152,13 +152,14 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
             from ..core.usage.discover import missing_providers
             from ..core.models import UsageAccount
 
+            from ..core.usage.discover import dismissed_providers
+
             existing = db.list_usage_accounts()
-            if existing:
-                # An established install is left alone. Discovery for a tool
-                # installed later runs from the dashboard, not behind the
-                # operator's back.
-                return
-            for found in missing_providers([]):
+            # Every start, not only the first: a tool signed in after the first
+            # start used to need Add Account by hand. A provider the operator
+            # removed on purpose is skipped.
+            have = [account.get("provider") for account in existing]
+            for found in missing_providers(have, skip=dismissed_providers()):
                 account = UsageAccount(
                     id=f"{found['provider']}-{uuid.uuid4().hex[:6]}",
                     provider=found["provider"],
