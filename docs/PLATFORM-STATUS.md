@@ -31,7 +31,10 @@ locally with PyInstaller, never on CI.
   an older running one and starts in its place. A copy from before records
   existed is found by its window titled AgnView. A same or newer running copy
   is brought forward instead. With Start with Windows off, a leftover sign-in
-  task is removed. The macOS app needs the same behaviour.
+  task is removed. The macOS app does the same: it uses the same record, finds
+  a copy without one by its bundle identifier, closes it with SIGTERM (SIGKILL
+  after a timeout), and removes a leftover LaunchAgent when Start at login is
+  off. Unit tests cover this. It is not yet checked on a real Mac.
 - Every child process starts without a console window (`agent_relay/core/proc.py`).
 
 ## macOS desktop app

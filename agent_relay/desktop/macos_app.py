@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -229,6 +230,7 @@ class MacDesktopApp(desktop.DesktopApp):
             return
         self._shut_down = True
         desktop._lan_change_handler = None
+        desktop.clear_instance_record()
         try:
             self.hub.stop()
         except Exception:
@@ -325,16 +327,48 @@ def sync_login_item(settings: dict) -> None:
     from ..core import autostart
 
     wanted = bool(settings.get("autostart", False))
-    stale = not wanted and macos.LAUNCH_AGENT_PATH.exists()
+    stale = macos.leftover_login_item(wanted)
     if wanted != macos.login_item_registered() or stale or autostart.MACOS_PLIST_PATH.exists():
         desktop.set_autostart(wanted)
+
+
+def take_over_older_copy(running: Optional[dict], mine: str, find_pids=None, end=None) -> bool:
+    """Close an older running copy. True when it is gone.
+
+    The record names the copy. Without one, the copy is found by its bundle
+    identifier. A same or newer copy, or one that will not close, gives False.
+    """
+    if not desktop.should_take_over(running, mine):
+        return False
+    find_pids = find_pids or macos.older_copy_pids
+    end = end or macos.end_process
+    pids = [running["pid"]] if running else find_pids()
+    if pids and all(end(pid) for pid in pids):
+        logger.info("Closed an older AgnView (%s) and took over", running or pids)
+        return True
+    logger.warning("An older AgnView is running and could not be closed")
+    return False
+
+
+def claim_single_instance(instance: macos.SingleInstance, attempts: int = 20) -> bool:
+    """True when this copy should run. A running older copy is closed and
+    replaced. A running same or newer copy is woken and this copy exits."""
+    if instance.claim(wake=False):
+        return True
+    if take_over_older_copy(desktop.read_instance_record(), desktop.current_version()):
+        for _ in range(attempts):
+            if instance.claim(wake=False):
+                return True
+            time.sleep(0.25)
+    instance.wake_first()
+    return False
 
 
 def main(args) -> int:
     desktop.configure_logging()
 
     instance = macos.SingleInstance()
-    if not instance.claim():
+    if not claim_single_instance(instance):
         logger.info("AgnView is already running, so this launch showed its window")
         return 0
 
@@ -359,6 +393,7 @@ def main(args) -> int:
     if port != int(settings["port"]):
         logger.warning("Port %s is in use, so this run serves on %s", settings["port"], port)
 
+    desktop.write_instance_record(port)
     hub = desktop.Hub(port, desktop.bind_host(bool(settings.get("lan", False))))
     try:
         hub.start()

@@ -255,3 +255,115 @@ def test_shutting_down_twice_stops_the_hub_once():
 
 def test_the_menu_bar_icon_ships_with_the_package():
     assert macos_app.menu_bar_icon_path().exists()
+
+
+# --- Newer copies take over -------------------------------------------------------
+
+class _App:
+    def __init__(self, pid):
+        self._pid = pid
+
+    def processIdentifier(self):
+        return self._pid
+
+
+def test_a_running_older_copy_is_taken_over():
+    ended = []
+    result = macos_app.take_over_older_copy(
+        {"pid": 4242, "version": "0.1.7"}, "0.1.8", find_pids=lambda: [], end=lambda pid: ended.append(pid) or True
+    )
+    assert result is True
+    assert ended == [4242]
+
+
+def test_a_same_or_newer_copy_is_left_running():
+    def refuse(pid):
+        raise AssertionError("must not end a same or newer copy")
+
+    assert macos_app.take_over_older_copy({"pid": 1, "version": "0.1.8"}, "0.1.8", end=refuse) is False
+    assert macos_app.take_over_older_copy({"pid": 1, "version": "0.2.0"}, "0.1.8", end=refuse) is False
+
+
+def test_a_copy_without_a_record_is_found_by_bundle_and_taken_over():
+    ended = []
+    result = macos_app.take_over_older_copy(
+        None, "0.1.8", find_pids=lambda: [11, 12], end=lambda pid: ended.append(pid) or True
+    )
+    assert result is True
+    assert ended == [11, 12]
+
+
+def test_no_record_and_no_process_found_means_no_take_over():
+    assert macos_app.take_over_older_copy(None, "0.1.8", find_pids=lambda: [], end=lambda pid: True) is False
+
+
+def test_a_copy_that_will_not_close_is_not_taken_over():
+    assert macos_app.take_over_older_copy(
+        {"pid": 7, "version": "0.1.0"}, "0.1.8", end=lambda pid: False
+    ) is False
+
+
+def test_older_copies_are_found_by_bundle_without_this_process():
+    apps = [_App(100), _App(200), _App(300), _App(0)]
+    assert macos.older_copy_pids(me=200, running_apps=apps) == [100, 300]
+    assert macos.older_copy_pids(me=1, running_apps=[]) == []
+
+
+def _ender(alive_until_kill):
+    state = {"now": 0.0, "alive": True, "sent": []}
+
+    def send(pid, sig):
+        state["sent"].append(sig)
+        # One signal ends it, or only the second one does.
+        if not alive_until_kill or len(state["sent"]) == 2:
+            state["alive"] = False
+
+    def sleep(seconds):
+        state["now"] += seconds
+
+    return state, dict(alive=lambda pid: state["alive"], send=send, sleep=sleep, clock=lambda: state["now"])
+
+
+def test_end_process_sends_sigterm_and_stops_when_it_exits():
+    import signal
+
+    state, hooks = _ender(alive_until_kill=False)
+    assert macos.end_process(5, **hooks) is True
+    assert state["sent"] == [signal.SIGTERM]
+
+
+def test_end_process_falls_back_to_sigkill_after_the_timeout():
+    import signal
+
+    state, hooks = _ender(alive_until_kill=True)
+    assert macos.end_process(5, timeout=1.0, **hooks) is True
+    assert state["sent"][0] == signal.SIGTERM
+    assert len(state["sent"]) == 2
+
+
+def test_end_process_reports_a_process_that_never_goes():
+    state, hooks = _ender(alive_until_kill=True)
+    hooks["send"] = lambda pid, sig: None
+    assert macos.end_process(5, timeout=1.0, kill_after=1.0, **hooks) is False
+
+
+def test_end_process_on_a_gone_process_is_done():
+    assert macos.end_process(5, alive=lambda pid: False, send=lambda pid, sig: 1 / 0) is True
+
+
+def test_a_leftover_launch_agent_is_removed_when_start_at_login_is_off(tmp_path):
+    plist = tmp_path / "Library" / "LaunchAgents" / "com.example.test.plist"
+    plist.parent.mkdir(parents=True)
+    plist.write_bytes(macos.launch_agent_plist(["/opt/old/AgnView", "--minimized"]))
+    assert macos.leftover_login_item(False, plist) is True
+    assert macos.leftover_login_item(True, plist) is False
+    macos.set_login_item(False, plist)
+    assert not plist.exists()
+    assert macos.leftover_login_item(False, plist) is False
+
+
+def test_pid_alive_sees_this_process_and_not_a_missing_one():
+    import os
+
+    assert macos.pid_alive(os.getpid()) is True
+    assert macos.pid_alive(2**22 + 12345) is False
