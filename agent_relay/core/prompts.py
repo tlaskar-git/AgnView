@@ -1,6 +1,48 @@
 """Prompt generation and web context exporter for Claude.ai, ChatGPT.com, and Gemini (gemini.google.com)."""
 
+import json
+from typing import List, Optional
+
 from .models import Task, Job
+
+
+def append_files_context(prompt: str, files: Optional[List[str]]) -> str:
+    """Add the "[Context Files: ...]" line every agent prompt carries.
+
+    Console dispatch and the task prompt both call this, so a file is named to
+    an agent the same way wherever it comes from.
+
+    Entries are separated by a comma and a space and the line ends at a
+    bracket, so an entry that holds a comma, a bracket, a double quote or a
+    control character is written as a JSON string. That keeps a file name from
+    ending the line early or from passing for two entries. A plain path, a
+    Windows path with backslashes included, is written as it is.
+    """
+    if not files:
+        return prompt
+    return f"{prompt}\n[Context Files: {', '.join(_file_entry(f) for f in files)}]"
+
+
+_NEEDS_QUOTING = frozenset(',[]"')
+
+
+def _file_entry(path: str) -> str:
+    if any(ch in _NEEDS_QUOTING or ord(ch) < 32 or ord(ch) == 127 for ch in path):
+        return json.dumps(path, ensure_ascii=False)
+    return path
+
+
+def task_options_section(task: Task) -> str:
+    """The requested model, effort and files of a task, or an empty string."""
+    lines = []
+    if task.model:
+        lines.append(f"- Requested model: `{task.model}`")
+    if task.effort:
+        lines.append(f"- Requested effort: `{task.effort}`")
+    if not lines and not task.files:
+        return ""
+    text = "\n### Run Options\n" + "\n".join(lines)
+    return append_files_context(text, task.files).rstrip() + "\n"
 
 
 def format_web_prompt_for_agent(
@@ -73,7 +115,7 @@ This job is being coordinated across multiple AI agents (Codex, AntiGravity, Cla
 
 ## 3. Your Assigned Task: `{task.id}` ({task.title})
 {task.description or "Complete the assigned objective using the upstream artifacts provided above."}
-
+{task_options_section(task)}
 ---
 
 ## 4. How to Report Your Work Back to the Team

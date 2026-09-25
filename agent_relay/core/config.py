@@ -29,6 +29,18 @@ CONFIG_PATH_ENV = "AGNVIEW_CONFIG"
 
 ALLOWED_RELAY_SCHEMES = ("http", "https")
 
+# The upload settings that are plain positive whole numbers.
+UPLOAD_LIMIT_KEYS = (
+    "uploads_max_file_bytes",
+    "uploads_max_total_bytes",
+    "uploads_min_free_bytes",
+    "uploads_max_per_peer",
+    "uploads_max_concurrent",
+    "uploads_idle_expiry_seconds",
+    "uploads_retention_days",
+    "uploads_max_files",
+)
+
 DEFAULT_CONFIG_TEMPLATE = """# AgnView hub configuration.
 
 # relay_url: leave empty to use the relays bundled with iroh. They need no
@@ -50,6 +62,34 @@ iroh_api_enabled: true
 # means any existing folder. Set a list, for example ["/home/me/work"], to keep
 # phone dispatches inside those folders. The LAN is not affected.
 iroh_dispatch_roots: []
+
+# Phone uploads. A paired phone can send files to the hub so it can attach them
+# to a prompt or a pipeline task. Files are stored in uploads_dir, never in a
+# project folder, and are never run by the hub.
+# uploads_enabled: set to false to refuse every upload, on the LAN and on iroh.
+uploads_enabled: true
+
+# iroh_uploads_enabled: set to false to accept uploads on the LAN only. With
+# true, anyone who holds the pairing key can write files, up to the limits
+# below, onto this computer from anywhere.
+iroh_uploads_enabled: true
+
+# uploads_dir: where uploads are stored. Empty means an "uploads" folder beside
+# the hub database.
+uploads_dir: ""
+
+# Limits, in bytes unless stated. A value of 0 or below is refused.
+uploads_max_file_bytes: 2147483648
+uploads_max_total_bytes: 10737418240
+uploads_min_free_bytes: 2147483648
+uploads_max_per_peer: 2
+uploads_max_concurrent: 4
+uploads_idle_expiry_seconds: 3600
+uploads_retention_days: 14
+
+# uploads_max_files: the most uploads kept at once, finished and unfinished. Each
+# also counts for at least 4096 bytes against uploads_max_total_bytes.
+uploads_max_files: 500
 """
 
 
@@ -65,6 +105,17 @@ class HubConfig:
     iroh_enabled: bool = True
     iroh_api_enabled: bool = True
     iroh_dispatch_roots: List[str] = field(default_factory=list)
+    uploads_enabled: bool = True
+    iroh_uploads_enabled: bool = True
+    uploads_dir: str = ""
+    uploads_max_file_bytes: int = 2 * 1024**3
+    uploads_max_total_bytes: int = 10 * 1024**3
+    uploads_min_free_bytes: int = 2 * 1024**3
+    uploads_max_per_peer: int = 2
+    uploads_max_concurrent: int = 4
+    uploads_idle_expiry_seconds: int = 3600
+    uploads_retention_days: int = 14
+    uploads_max_files: int = 500
     path: Optional[Path] = None
     errors: List[str] = field(default_factory=list)
 
@@ -79,6 +130,17 @@ class HubConfig:
             "iroh_enabled": self.iroh_enabled,
             "iroh_api_enabled": self.iroh_api_enabled,
             "iroh_dispatch_roots": list(self.iroh_dispatch_roots),
+            "uploads_enabled": self.uploads_enabled,
+            "iroh_uploads_enabled": self.iroh_uploads_enabled,
+            "uploads_dir": self.uploads_dir,
+            "uploads_max_file_bytes": self.uploads_max_file_bytes,
+            "uploads_max_total_bytes": self.uploads_max_total_bytes,
+            "uploads_min_free_bytes": self.uploads_min_free_bytes,
+            "uploads_max_per_peer": self.uploads_max_per_peer,
+            "uploads_max_concurrent": self.uploads_max_concurrent,
+            "uploads_idle_expiry_seconds": self.uploads_idle_expiry_seconds,
+            "uploads_retention_days": self.uploads_retention_days,
+            "uploads_max_files": self.uploads_max_files,
             "errors": list(self.errors),
         }
 
@@ -194,5 +256,34 @@ def load_config(path: Optional[Path] = None) -> HubConfig:
         message = f"{config_path}: iroh_dispatch_roots must be a list of folder paths, got {roots!r}"
         logger.error("AgnView configuration error: %s", message)
         config.errors.append(message)
+
+    for key in ("uploads_enabled", "iroh_uploads_enabled"):
+        flag = raw.get(key, True)
+        if isinstance(flag, bool):
+            setattr(config, key, flag)
+        else:
+            message = f"{config_path}: {key} must be true or false, got {flag!r}"
+            logger.error("AgnView configuration error: %s", message)
+            config.errors.append(message)
+
+    uploads_dir = raw.get("uploads_dir", "")
+    if uploads_dir is None:
+        uploads_dir = ""
+    if isinstance(uploads_dir, str) and chr(0) not in uploads_dir:
+        config.uploads_dir = uploads_dir.strip()
+    else:
+        message = f"{config_path}: uploads_dir must be a folder path, got {uploads_dir!r}"
+        logger.error("AgnView configuration error: %s", message)
+        config.errors.append(message)
+
+    for key in UPLOAD_LIMIT_KEYS:
+        value = raw.get(key, getattr(config, key))
+        # bool is an int in Python, and "true" is never a byte count.
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            setattr(config, key, value)
+        else:
+            message = f"{config_path}: {key} must be a whole number above zero, got {value!r}"
+            logger.error("AgnView configuration error: %s", message)
+            config.errors.append(message)
 
     return config

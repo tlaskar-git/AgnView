@@ -20,9 +20,10 @@
     }
   ],
   "x-agnview-iroh": {
-    "description": "Away from the LAN, the same calls travel over iroh in API mode. Full protocol in docs/PAIRING.md section 5. Each request is one JSON object plus newline on its own bidirectional stream: {token, op: 'api', method, path, body}. The hub answers with a hello frame and then one {type: 'response', status, body} frame, where status and body are exactly what the HTTP route returns, or one {type: 'error', detail} frame.",
+    "description": "Away from the LAN, the same calls travel over iroh in API mode. Full protocol in docs/PAIRING.md section 5. Each request is one JSON object plus newline on its own bidirectional stream: {token, op: 'api', method, path, body}. The hub answers with a hello frame and then one {type: 'response', status, body} frame, where status and body are exactly what the HTTP route returns, or one {type: 'error', detail} frame. Uploads add one more op, upload_chunk: one JSON line {token, op: 'upload_chunk', upload_id, offset, length}, then exactly length raw bytes (1 to 1048576), then the client finishes its send side. The hub answers with a hello frame and then one {type: 'response', status, body: {upload_id, received, size, state, name}} frame, or an error frame. The other upload calls use op api.",
     "alpn": "agnview/console/1",
-    "hello_capabilities": ["console", "api"],
+    "hello_capabilities": ["console", "api", "uploads"],
+    "hello_capabilities_note": "uploads is listed only when uploads over iroh are enabled (uploads_enabled and iroh_uploads_enabled in config.yaml).",
     "allowlist": [
       "GET /api/mobile/status",
       "GET /api/usage/accounts",
@@ -32,7 +33,13 @@
       "GET /api/console/logs?agent&limit&session_id&after_id",
       "POST /api/console/dispatch",
       "POST /api/tasks/{id}/request-revision",
-      "POST /api/tasks/{id}/fail"
+      "POST /api/tasks/{id}/fail",
+      "POST /api/jobs",
+      "DELETE /api/jobs/{id}",
+      "POST /api/uploads",
+      "GET /api/uploads/{upload_id}",
+      "POST /api/uploads/{upload_id}/finish",
+      "DELETE /api/uploads/{upload_id}"
     ],
     "error_codes": ["unauthorised", "forbidden_path", "bad_request", "too_large", "timeout", "rate_limited", "upstream_error"],
     "limits": {
@@ -41,7 +48,9 @@
       "timeout_seconds": 30,
       "streams_per_connection": 8,
       "api_calls_per_connection": 4,
-      "api_calls_per_hub": 16
+      "api_calls_per_hub": 16,
+      "upload_chunk_bytes": 1048576,
+      "upload_body_timeout_seconds": 60
     }
   },
   "security": [
@@ -137,7 +146,34 @@
             "type": "array",
             "items": { "type": "string" }
           },
-          "output_summary": { "type": "string", "nullable": true }
+          "output_summary": { "type": "string", "nullable": true },
+          "model": { "type": "string", "nullable": true, "description": "Advisory: delivered to the agent that claims the task, not enforced by the hub. Must be on the assigned agent's list in GET /api/system/capabilities, or auto." },
+          "effort": { "type": "string", "nullable": true, "description": "Advisory: delivered to the agent that claims the task, not enforced by the hub. Must be on the assigned agent's list in GET /api/system/capabilities, or default." },
+          "files": { "type": "array", "nullable": true, "maxItems": 32, "items": { "type": "string", "maxLength": 1024 }, "description": "Files for the agent to read. Over iroh each must be an upload path from /api/uploads or a file under an iroh_dispatch_roots folder, else 422 forbidden_file." }
+        }
+      },
+      "TaskSpec": {
+        "type": "object",
+        "required": ["id", "title", "assigned_agent"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "assigned_agent": { "type": "string" },
+          "dependencies": { "type": "array", "items": { "type": "string" } },
+          "model": { "type": "string", "nullable": true, "description": "Advisory: delivered to the agent that claims the task, not enforced by the hub. Must be on the assigned agent's list in GET /api/system/capabilities, or auto." },
+          "effort": { "type": "string", "nullable": true, "description": "Advisory: delivered to the agent that claims the task, not enforced by the hub. Must be on the assigned agent's list in GET /api/system/capabilities, or default." },
+          "files": { "type": "array", "nullable": true, "maxItems": 32, "items": { "type": "string", "maxLength": 1024 }, "description": "Files for the agent to read. Over iroh each must be an upload path from /api/uploads or a file under an iroh_dispatch_roots folder, else 422 forbidden_file." }
+        }
+      },
+      "UploadStatus": {
+        "type": "object",
+        "properties": {
+          "upload_id": { "type": "string" },
+          "received": { "type": "integer" },
+          "size": { "type": "integer" },
+          "state": { "type": "string", "enum": ["receiving", "finished"] },
+          "name": { "type": "string" }
         }
       },
       "UsageAccount": {
@@ -256,10 +292,29 @@
       },
       "post": {
         "summary": "Create and launch a new multi-agent pipeline",
-        "responses": {
-          "201": {
-            "description": "Job created"
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["title", "tasks"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "title": { "type": "string" },
+                  "description": { "type": "string" },
+                  "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/TaskSpec" } }
+                }
+              }
+            }
           }
+        },
+        "responses": {
+          "200": {
+            "description": "Job created. Each task carries model, effort and files, null when not set. Over iroh the whole request, key included, must fit in 64 KiB, else the error frame too_large."
+          },
+          "400": { "description": "The job is malformed" },
+          "422": { "description": "A task asks for a model or effort its agent does not offer, or (over iroh) a file it may not name (forbidden_file) or a job or task id that could not be addressed again (invalid_job_id, invalid_task_id)" },
+          "409": { "description": "Over iroh only: a job id or task id already exists (duplicate_id). Nothing is saved. The LAN replaces a job with the same id." }
         }
       }
     },
@@ -303,6 +358,135 @@
               }
             }
           }
+        }
+      }
+    },
+    "/api/jobs/{job_id}": {
+      "get": {
+        "summary": "One pipeline with its tasks",
+        "responses": {
+          "200": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Job" } } } },
+          "404": { "description": "Job not found" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a pipeline. Allowed over iroh.",
+        "responses": {
+          "200": { "description": "Job deleted" },
+          "404": { "description": "Job not found" }
+        }
+      }
+    },
+    "/api/uploads": {
+      "post": {
+        "summary": "Start an upload. The name is reduced to a safe base name and returned as name.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name", "size"],
+                "properties": {
+                  "name": { "type": "string" },
+                  "size": { "type": "integer", "minimum": 1, "description": "Whole file size in bytes. Above max_size answers 413." },
+                  "mime": { "type": "string", "description": "Optional, kept as a label only." }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Upload started",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "upload_id": { "type": "string", "description": "32 lowercase hex characters" },
+                    "chunk_size": { "type": "integer", "description": "The most bytes one chunk may carry, 1048576" },
+                    "max_size": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "size": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          },
+          "403": { "description": "uploads_disabled" },
+          "413": { "description": "too_large" },
+          "422": { "description": "invalid_name, for example a Windows device name" },
+          "429": { "description": "too_many_uploads or rate_limited" },
+          "507": { "description": "quota_exceeded, insufficient_storage or too_many_files (uploads_max_files, default 500)" }
+        }
+      }
+    },
+    "/api/uploads/{upload_id}": {
+      "get": {
+        "summary": "Where an upload stands, so a client can resume",
+        "responses": {
+          "200": {
+            "description": "upload_id, received, size, state (receiving or finished), name",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UploadStatus" } } }
+          },
+          "404": { "description": "not_found" }
+        }
+      },
+      "put": {
+        "summary": "LAN only. Send one chunk as raw bytes at ?offset=N. Over iroh use the upload_chunk op.",
+        "parameters": [{ "name": "offset", "in": "query", "required": true, "schema": { "type": "integer", "minimum": 0 } }],
+        "responses": {
+          "200": {
+            "description": "Chunk stored. A re-send of the last chunk is answered 200 and stored once.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/UploadStatus" } } }
+          },
+          "409": { "description": "offset_mismatch (body carries received), not_receiving" },
+          "413": { "description": "too_large or beyond_declared_size" },
+          "507": { "description": "insufficient_storage" }
+        }
+      },
+      "delete": {
+        "summary": "Cancel an upload and delete what was stored",
+        "responses": {
+          "200": { "description": "cancelled" },
+          "404": { "description": "not_found" }
+        }
+      }
+    },
+    "/api/uploads/{upload_id}/finish": {
+      "post": {
+        "summary": "Finish an upload. Returns the absolute path an agent can read and that dispatch and task files accept.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": { "sha256": { "type": "string", "description": "Optional hex digest to check the stored bytes against" } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "upload_id, path, name, size, sha256",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "upload_id": { "type": "string" },
+                    "path": { "type": "string" },
+                    "name": { "type": "string" },
+                    "size": { "type": "integer" },
+                    "sha256": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "409": { "description": "incomplete: received is less than size" },
+          "422": { "description": "checksum_mismatch. The bytes are discarded and the upload restarts at offset 0 (body carries received: 0). Send the file again and finish with the right sha256 or none." },
+          "500": { "description": "storage_error. The record could not be saved. The upload stays open, try again." }
         }
       }
     },
