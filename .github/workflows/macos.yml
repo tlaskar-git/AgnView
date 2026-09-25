@@ -265,6 +265,13 @@ jobs:
             kill "$APP_PID" || true
           fi
 
+      # The launches above run the binary from a shell. This one goes through
+      # LaunchServices with the minimal PATH, as Finder, the Dock and a login
+      # item do, then checks the app finds agent CLIs in ~/.local/bin.
+      - name: Finder-style launch finds agent CLIs
+        timeout-minutes: 5
+        run: bash tools/macos/finder_launch_check.sh "$PWD/dist/AgnView.app"
+
       - name: Upload the window screenshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:

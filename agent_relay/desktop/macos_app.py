@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -368,6 +369,12 @@ def claim_single_instance(instance: macos.SingleInstance, attempts: int = 20) ->
 
 def main(args) -> int:
     desktop.configure_logging()
+    logger.info(
+        "AgnView %s starting, pid %s, frozen %s",
+        desktop.current_version(),
+        os.getpid(),
+        bool(getattr(sys, "frozen", False)),
+    )
 
     # Finder, the Dock and the LaunchAgent give a minimal PATH. Repair it
     # before the hub starts so every chat process finds the agent CLIs.

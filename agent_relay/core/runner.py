@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 
 from .db import Database
 from .proc import no_window
-from .cli_path import searched_note
+from .cli_path import child_env, searched_note, which_any
 from .adapters import AdapterManager, AgentAdapter
 from .live_sessions import (
     LIVE_SESSION_IDLE_TIMEOUT_SECONDS,
@@ -780,7 +780,7 @@ class AgentRunner:
                         env["DEEPSEEK_API_KEY"] = cred
         except Exception:
             pass
-        return env
+        return child_env(env)
 
     def _session_agent_keys(self, target: str) -> List[str]:
         """Map a dispatch target onto the agent keys its sessions are stored under."""
@@ -1059,8 +1059,31 @@ class AgentRunner:
                 await self._emit_chunk(agent, "agent_stderr", "Execution timed out.", session_id)
                 await self._emit_finished(agent, 1, "Timeout", session_id)
 
-        except FileNotFoundError:
-            await self._simulate_agent_execution(agent, fallback_prompt, session_id)
+        except FileNotFoundError as exc:
+            # The OS gives the same error for a missing program and for a
+            # missing working directory. Only the first means "not installed".
+            folder = run_cwd or cwd
+            if folder and not os.path.isdir(folder):
+                logger.warning("The working folder for %s does not exist: %s", agent, folder)
+                await self._emit_chunk(
+                    agent,
+                    "agent_stderr",
+                    f"The working folder does not exist: {folder}. Choose a folder that exists.",
+                    session_id,
+                )
+                await self._emit_finished(agent, 1, "Error", session_id)
+            elif proc_args and os.path.isabs(str(proc_args[0])) and os.path.exists(str(proc_args[0])):
+                logger.warning("Could not start %s (%s): %s", agent, proc_args[0], exc)
+                await self._emit_chunk(
+                    agent,
+                    "agent_stderr",
+                    f"{agent} was found but could not start: {exc}. If it is an npm command, "
+                    "the node program it needs is not on the PATH.",
+                    session_id,
+                )
+                await self._emit_finished(agent, 1, "Error", session_id)
+            else:
+                await self._simulate_agent_execution(agent, fallback_prompt, session_id)
         except Exception as e:
             await self._emit_chunk(agent, "agent_stderr", f"Execution error: {str(e)}", session_id)
             await self._emit_finished(agent, 1, "Error", session_id)
@@ -1071,7 +1094,7 @@ class AgentRunner:
 
     async def _run_claude_code(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using local Claude Code CLI with streaming and timeout protection."""
-        claude_bin = shutil.which("claude.cmd") or shutil.which("claude.exe") or shutil.which("claude")
+        claude_bin = which_any("claude.cmd", "claude.exe", "claude")
         if self._is_testing or not claude_bin:
             await self._simulate_agent_execution("claude_code", prompt, session_id)
             return
@@ -1111,7 +1134,7 @@ class AgentRunner:
 
     async def _run_codex(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using local Codex CLI with direct stdin closure."""
-        codex_bin = shutil.which("codex.cmd") or shutil.which("codex.exe") or shutil.which("codex")
+        codex_bin = which_any("codex.cmd", "codex.exe", "codex")
         if self._is_testing or not codex_bin:
             await self._simulate_agent_execution("codex", prompt, session_id)
             return
@@ -1138,8 +1161,8 @@ class AgentRunner:
 
     async def _run_antigravity(self, prompt: str, cwd: str, session_id: Optional[str], model: Optional[str] = None, effort: Optional[str] = None):
         """Execute prompt using local AntiGravity (agy) or Gemini CLI."""
-        agy_bin = shutil.which("agy.exe") or shutil.which("agy.cmd") or shutil.which("agy")
-        gemini_bin = shutil.which("gemini.cmd") or shutil.which("gemini.exe") or shutil.which("gemini")
+        agy_bin = which_any("agy.exe", "agy.cmd", "agy")
+        gemini_bin = which_any("gemini.cmd", "gemini.exe", "gemini")
 
         if self._is_testing or (not agy_bin and not gemini_bin):
             await self._simulate_agent_execution("antigravity", prompt, session_id)
@@ -1237,7 +1260,7 @@ class AgentRunner:
 
         # Locate executable
         bin_name = resolved_cmd[0]
-        full_bin = shutil.which(bin_name)
+        full_bin = which_any(bin_name)
         if os.name == "nt" and not full_bin:
             for ext in (".cmd", ".exe", ".bat", ".ps1"):
                 full_bin = shutil.which(bin_name + ext)
