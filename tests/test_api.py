@@ -167,7 +167,7 @@ def test_mobile_pairing_reports_actual_port(tmp_path):
     port, because the serve path lost the port before it reached create_app)."""
     db_file = str(tmp_path / "port_test.db")
     app = create_app(db_path=db_file, port=8845)
-    client = TestClient(app)
+    client = TestClient(app, base_url="http://127.0.0.1:8845", client=("127.0.0.1", 50000))
 
     resp = client.get("/api/mobile/pairing")
     assert resp.status_code == 200

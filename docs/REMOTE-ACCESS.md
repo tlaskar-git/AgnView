@@ -34,7 +34,7 @@ curl http://127.0.0.1:8765/api/transport
 
 `resolved_transport` is one of `lan`, `iroh-direct`, `iroh-relay` or `offline`. Turn iroh off entirely with `AGNVIEW_IROH=0`, or with `iroh_enabled: false` in `~/.agnview/config.yaml`.
 
-Over iroh a paired phone gets the live console and the parts of the mobile API it needs: status, Usage, Pipelines, Sessions and prompt dispatch. Every call passes the same pairing key check and rate limit as on the LAN, and only an allowlist of routes answers. `docs/PAIRING.md` section 5 has the protocol. Keep iroh on but serve only the console with `AGNVIEW_IROH_API=0`, or with `iroh_api_enabled: false` in `~/.agnview/config.yaml`.
+Over iroh a paired phone gets the live console and the parts of the mobile API it needs: status, Usage, Pipelines, Sessions and prompt dispatch. Every call passes the same pairing key check and rate limit as on the LAN, and only an allowlist of routes answers. `docs/PAIRING.md` section 5 has the protocol. Anyone who holds the pairing key can run the enabled agents on this computer, which amounts to remote code execution. Keep the key private and regenerate it if it leaks. To confine phone dispatches to certain folders, set `iroh_dispatch_roots` in `~/.agnview/config.yaml`. Keep iroh on but serve only the console with `AGNVIEW_IROH_API=0`, or with `iroh_api_enabled: false` in `~/.agnview/config.yaml`.
 
 ---
 

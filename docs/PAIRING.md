@@ -225,10 +225,26 @@ and it ends the request. An error before `hello` also closes the connection.
 - The key is compared in constant time (`secrets.compare_digest`) and is
   never logged. The hub logs the method, the route template, the status or
   error code and the duration of each API call, and nothing else.
-- Failed keys count against the same limiter the LAN uses: 10 failures in 60
-  s and further attempts get `rate_limited` until the window passes, whatever
-  key they carry. All iroh clients share one budget, because an iroh node
-  id costs nothing to make.
+- Anyone who holds the pairing key can run the enabled agents on this
+  computer, which amounts to remote code execution. Keep the key private and
+  regenerate it if it leaks.
+- A dispatch over iroh reaches only the named built-in agents and the enabled
+  adapters. Any other `agent` gets status 422 with detail `unknown_agent`, and
+  the generic shell runner is never reached. `working_directory` must be an
+  existing local folder: a UNC path (`\\host\share`), a device path (`\\?\` or
+  `\\.\`) and a NUL character are refused with 422 and detail
+  `invalid_working_directory`. Set `iroh_dispatch_roots` in
+  `~/.agnview/config.yaml` to a list of folders to confine phone dispatches to
+  them. It is empty by default, which allows any existing folder. The LAN is
+  not affected.
+- The key is checked first, so a valid key is never refused. Wrong keys are
+  counted per peer under the peer's iroh endpoint id, in the limiter the LAN
+  uses: 10 wrong keys in 60 s from one peer and that peer's further wrong keys
+  get `rate_limited` until the window passes. A second cap of 60 wrong keys in
+  60 s across all peers covers the fact that a peer id costs nothing to make.
+  Neither counts a valid key, and neither touches the LAN's own counters.
+- `limit` on the logs route is a whole number from 1 to 1000, `after_id` is a
+  whole number, and the console stream backlog is capped at 1000 rows.
 - A connection may hold 8 streams at once. At most 4 API calls run per
   connection and 16 across the hub. A call over either limit gets
   `rate_limited` at once rather than waiting. The console stream is not

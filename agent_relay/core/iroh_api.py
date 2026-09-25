@@ -68,12 +68,21 @@ ERROR_RATE_LIMITED = "rate_limited"
 ERROR_UPSTREAM = "upstream_error"
 
 _SEGMENT = r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}"
-_PATH_CHARS = re.compile(r"^[A-Za-z0-9/._-]+$")
-_QUERY_CHARS = re.compile(r"^[A-Za-z0-9._~=&@:-]*$")
+_PATH_CHARS = re.compile(r"[A-Za-z0-9/._-]+")
+_QUERY_CHARS = re.compile(r"[A-Za-z0-9._~=&@:-]*")
+
+# The largest page a phone may ask for, and the widest id it may pass. Both are
+# plain unsigned integers, so "1e3", "-1", " 5" and "5\n" are all refused.
+MAX_PAGE_SIZE = 1000
+_MAX_ID_DIGITS = 18
+_DIGITS = re.compile(r"[0-9]+")
+
+# Every match below uses fullmatch, never "$": "$" also matches before a
+# trailing newline, which would let "/api/jobs\n" through.
 
 
 def _compile(template: str) -> "re.Pattern[str]":
-    return re.compile("^" + re.escape(template).replace(re.escape("{id}"), _SEGMENT) + "$")
+    return re.compile(re.escape(template).replace(re.escape("{id}"), _SEGMENT))
 
 
 _COMPILED_ALLOWLIST = tuple(
@@ -114,13 +123,13 @@ def match_allowlist(method: Any, target: Any) -> Tuple[str, str, str]:
     path, sep, query = target.partition("?")
     if not path.startswith("/api/") or "//" in path or ".." in path:
         raise ApiError(ERROR_FORBIDDEN_PATH)
-    if not _PATH_CHARS.match(path):
+    if not _PATH_CHARS.fullmatch(path):
         # Rules out "%" (encoded slashes and dots), "\\", ":" (a scheme), "#"
         # and whitespace in one check.
         raise ApiError(ERROR_FORBIDDEN_PATH)
 
     for allowed_method, template, query_allowed, pattern in _COMPILED_ALLOWLIST:
-        if allowed_method != method or not pattern.match(path):
+        if allowed_method != method or not pattern.fullmatch(path):
             continue
         if sep and not query_allowed:
             raise ApiError(ERROR_FORBIDDEN_PATH)
@@ -131,14 +140,22 @@ def match_allowlist(method: Any, target: Any) -> Tuple[str, str, str]:
 
 
 def _query_is_allowed(query: str) -> bool:
-    if not _QUERY_CHARS.match(query):
+    if not _QUERY_CHARS.fullmatch(query):
         return False
     seen = set()
     for pair in query.split("&"):
-        key, _, _ = pair.partition("=")
+        key, _, value = pair.partition("=")
         if key not in ALLOWED_QUERY_KEYS or key in seen:
             return False
         seen.add(key)
+        if key == "limit":
+            if not _DIGITS.fullmatch(value) or len(value) > _MAX_ID_DIGITS:
+                return False
+            if not 1 <= int(value) <= MAX_PAGE_SIZE:
+                return False
+        elif key == "after_id":
+            if not _DIGITS.fullmatch(value) or len(value) > _MAX_ID_DIGITS:
+                return False
     return True
 
 

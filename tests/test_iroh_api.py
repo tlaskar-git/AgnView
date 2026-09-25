@@ -32,9 +32,12 @@ def _fake_token() -> str:
 
 @pytest.fixture(autouse=True)
 def clean_rate_limit():
-    reset_auth_rate_limit(IROH_RATE_LIMIT_KEY)
+    keys = (IROH_RATE_LIMIT_KEY, f"{IROH_RATE_LIMIT_KEY}:unknown")
+    for key in keys:
+        reset_auth_rate_limit(key)
     yield
-    reset_auth_rate_limit(IROH_RATE_LIMIT_KEY)
+    for key in keys:
+        reset_auth_rate_limit(key)
 
 
 # ----------------- In-memory streams -----------------
@@ -403,18 +406,18 @@ def test_failed_keys_share_the_lan_rate_limit():
         frames, _, _ = _serve(transport, _api(_fake_token()))
         assert frames == [{"type": "error", "detail": "unauthorised"}]
 
-    # The next attempt is refused before the key is looked at, even a right one.
+    # The next wrong key is throttled. A right key is checked first and is
+    # never refused, in either mode.
+    frames, _, _ = _serve(transport, _api(_fake_token()))
+    assert frames == [{"type": "error", "detail": "rate_limited"}]
     frames, _, _ = _serve(transport, _api(token))
-    assert frames == [{"type": "error", "detail": "rate_limited"}]
-    frames, _, _ = _serve(transport, {"token": token})
-    assert frames == [{"type": "error", "detail": "rate_limited"}]
+    assert frames[-1]["type"] == "response"
 
 
 def test_the_limiter_is_the_one_the_lan_uses():
     for _ in range(10):
-        record_failed_auth(IROH_RATE_LIMIT_KEY)
-    token = _fake_token()
-    frames, _, _ = _serve(_transport(token), _api(token))
+        record_failed_auth(f"{IROH_RATE_LIMIT_KEY}:unknown")
+    frames, _, _ = _serve(_transport(_fake_token()), _api(_fake_token()))
     assert frames == [{"type": "error", "detail": "rate_limited"}]
 
 

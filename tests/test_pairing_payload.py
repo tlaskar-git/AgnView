@@ -93,7 +93,7 @@ def test_the_payload_dict_reports_its_version_and_ticket():
 
 def test_the_pairing_route_emits_v1_when_iroh_is_not_up(tmp_path):
     app = create_app(db_path=str(tmp_path / "pairing.db"))
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000)) as client:
         data = client.get("/api/mobile/pairing").json()
     assert data["deep_link"].startswith("agnview://pair?v=1")
     assert parse_pairing_qr_uri(data["deep_link"])["iroh_ticket"] is None
@@ -102,7 +102,7 @@ def test_the_pairing_route_emits_v1_when_iroh_is_not_up(tmp_path):
 def test_the_pairing_route_emits_v2_once_a_ticket_exists(tmp_path):
     ticket = "endpointacwgqblgarrzdzfrjteo2hx4goxnri4j6nm26eyb63moftlpz54beaq"
     app = create_app(db_path=str(tmp_path / "pairing_iroh.db"))
-    with TestClient(app) as client:
+    with TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000)) as client:
         app.state.iroh._ticket = ticket
         data = client.get("/api/mobile/pairing").json()
 

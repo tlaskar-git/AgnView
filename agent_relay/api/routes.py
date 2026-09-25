@@ -57,6 +57,7 @@ from ..core import autostart, cli_path
 from ..core.cli_path import which_any
 from ..core.config import ConfigError, DEFAULT_CONFIG_TEMPLATE, get_config_path, validate_relay_url
 from ..core.iroh_transport import IrohTransport
+from ..core import dispatch_guard
 
 router = APIRouter(prefix="/api")
 
@@ -944,6 +945,21 @@ async def dispatch_console_command(payload: ConsoleDispatchPayload, request: Req
     """Dispatch prompt/command directly to local Claude Code, Codex, or AntiGravity."""
     engine = get_engine(request)
 
+    # A dispatch from a phone on iroh reaches only the named agents and the
+    # enabled adapters, in a real local folder. It never reaches the generic
+    # shell runner. The LAN keeps its behaviour.
+    working_directory = payload.working_directory
+    if dispatch_guard.is_iroh_request(request):
+        try:
+            dispatch_guard.check_agent(payload.agent, engine.runner.adapter_manager)
+            config = getattr(request.app.state, "config", None)
+            working_directory = dispatch_guard.check_working_directory(
+                payload.working_directory,
+                getattr(config, "iroh_dispatch_roots", []) or [],
+            )
+        except dispatch_guard.DispatchRefused as refused:
+            raise HTTPException(status_code=422, detail=refused.detail)
+
     # session_id groups messages in the UI. The client sends back the id it
     # already holds for this target, so a follow-up message stays in the same
     # thread. A fresh id is minted only for a genuinely new conversation: the
@@ -959,7 +975,7 @@ async def dispatch_console_command(payload: ConsoleDispatchPayload, request: Req
         engine.runner.dispatch(
             agent=payload.agent,
             prompt=payload.prompt,
-            cwd=payload.working_directory,
+            cwd=working_directory,
             session_id=session_id,
             model=payload.model,
             effort=payload.effort,
@@ -1021,7 +1037,7 @@ def list_live_sessions(request: Request):
 def get_console_logs(
     request: Request,
     agent: Optional[str] = Query("all", description="Filter by agent role or 'all'"),
-    limit: int = Query(250, description="Max lines to retrieve"),
+    limit: int = Query(250, ge=1, le=1000, description="Max lines to retrieve"),
     session_id: Optional[str] = Query(None, description="Optional session filter"),
     after_id: Optional[int] = Query(None, description="Return only entries newer than this row id")
 ):

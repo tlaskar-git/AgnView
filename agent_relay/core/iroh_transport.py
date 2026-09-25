@@ -24,8 +24,9 @@ import os
 import secrets
 import socket
 import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
 from . import iroh_api
 from .network import Transport, resolve_iroh_path_transport
@@ -64,11 +65,18 @@ MAX_STREAMS_PER_CONNECTION = 8
 # that carried it is closed.
 FLUSH_BEFORE_CLOSE_SECONDS = 2.0
 
-# Failed pairing-key attempts over iroh count against this one key in the same
-# limiter the LAN uses. It is the client address the in-process API request
-# carries too, so the LAN middleware and this transport share one budget. An
-# iroh node id costs nothing to make, so it cannot be the key.
+# The client address the in-process API request carries. The hub's own auth
+# middleware counts a wrong key from it under this name.
 IROH_RATE_LIMIT_KEY = iroh_api.IROH_CLIENT_ADDRESS[0]
+
+# Wrong pairing keys are counted per peer, in the limiter the LAN uses, under
+# "iroh:" plus the peer's endpoint id. A valid key is checked first and is never
+# refused. A peer id costs nothing to make, so a second cap counts wrong keys
+# across all peers. It throttles only wrong keys, so it cannot lock out a
+# valid one.
+IROH_PEER_KEY_PREFIX = IROH_RATE_LIMIT_KEY + ":"
+IROH_GLOBAL_INVALID_LIMIT = 60
+IROH_GLOBAL_WINDOW_SECONDS = 60.0
 
 
 class _RequestTooLarge(Exception):
@@ -147,6 +155,8 @@ class IrohTransport(Transport):
         self._asgi_app = asgi_app
         self._api_enabled = api_enabled
         self._api_slots = iroh_api.ApiSlots(iroh_api.MAX_API_CALLS_TOTAL)
+        # When each recent invalid key arrived, across every peer.
+        self._invalid_attempts: Deque[float] = deque()
 
         self._state = "disabled" if not enabled else "starting"
         self._error = disabled_reason if not enabled else ""
@@ -376,18 +386,22 @@ class IrohTransport(Transport):
                 return
 
             op = request.get("op")
-            # Failed attempts share the limiter the LAN uses, in both modes, so
-            # neither is a way around it.
-            if not check_auth_rate_limit(IROH_RATE_LIMIT_KEY):
-                await self._write_error(send, iroh_api.ERROR_RATE_LIMITED)
-                return
-            # API mode can dispatch prompts, so it always needs a pairing key,
-            # even on a hub that runs without one.
+            # The key is checked first, in constant time. A valid key always
+            # proceeds, so no amount of wrong guesses from anyone can lock the
+            # owner out. Only invalid attempts are counted and throttled: per
+            # peer, and across all peers with a separate cap. API mode can
+            # dispatch prompts, so it always needs a pairing key, even on a
+            # hub that runs without one.
+            peer_key = self._peer_limit_key(conn)
             if not self._authorised(request.get("token"), require_token=op is not None):
-                record_failed_auth(IROH_RATE_LIMIT_KEY)
+                if not check_auth_rate_limit(peer_key) or not self._global_invalid_allowed():
+                    await self._write_error(send, iroh_api.ERROR_RATE_LIMITED)
+                    return
+                record_failed_auth(peer_key)
+                self._record_global_invalid()
                 await self._write_error(send, iroh_api.ERROR_UNAUTHORISED)
                 return
-            reset_auth_rate_limit(IROH_RATE_LIMIT_KEY)
+            reset_auth_rate_limit(peer_key)
 
             if op is None:
                 await self._stream_console(conn, send, request)
@@ -484,6 +498,25 @@ class IrohTransport(Transport):
         except Exception:
             return None
 
+    @staticmethod
+    def _peer_limit_key(conn: Any) -> str:
+        """The limiter key for the peer on this connection."""
+        try:
+            text = str(conn.remote_id()).strip()
+        except Exception:
+            text = ""
+        return f"{IROH_PEER_KEY_PREFIX}{text or 'unknown'}"
+
+    def _global_invalid_allowed(self) -> bool:
+        now = time.monotonic()
+        recent = self._invalid_attempts
+        while recent and now - recent[0] >= IROH_GLOBAL_WINDOW_SECONDS:
+            recent.popleft()
+        return len(recent) < IROH_GLOBAL_INVALID_LIMIT
+
+    def _record_global_invalid(self) -> None:
+        self._invalid_attempts.append(time.monotonic())
+
     def _expected_token(self) -> Optional[str]:
         if self._token_provider is None:
             return None
@@ -510,7 +543,7 @@ class IrohTransport(Transport):
 
     async def _stream_console(self, conn: Any, send: Any, request: Dict[str, Any]) -> None:
         agent = request.get("agent") or "all"
-        backlog = int(request.get("backlog") or 200)
+        backlog = min(max(int(request.get("backlog") or 200), 0), iroh_api.MAX_PAGE_SIZE)
         after_id = request.get("after_id")
         after_id = int(after_id) if after_id is not None else None
 

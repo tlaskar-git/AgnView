@@ -122,7 +122,11 @@ def test_regenerating_over_the_api_leaves_the_real_home_alone(tmp_path):
 
     before = digest()
 
-    client = TestClient(create_app(db_path=str(tmp_path / "regen.db"), port=8765))
+    client = TestClient(
+        create_app(db_path=str(tmp_path / "regen.db"), port=8765),
+        base_url="http://127.0.0.1:8765",
+        client=("127.0.0.1", 50000),
+    )
     response = client.post("/api/mobile/pairing/regenerate")
     assert response.status_code == 200
 
