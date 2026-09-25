@@ -108,8 +108,8 @@ def test_an_effort_is_checked_against_the_agents_own_list():
         validate_task_options("t", "antigravity", None, sorted(only_claude)[0])
 
 
-def test_the_capabilities_route_serves_the_same_lists():
-    caps = TestClient(create_app(db_path=os.devnull + ".unused.db")).get("/api/system/capabilities").json()
+def test_the_capabilities_route_serves_the_same_lists(tmp_path):
+    caps = TestClient(_app(tmp_path)).get("/api/system/capabilities").json()
     assert caps["models"] == MODELS
     assert caps["efforts_by_provider"] == EFFORTS_BY_PROVIDER
 
@@ -179,7 +179,7 @@ def test_the_mcp_claim_reply_carries_them(tmp_path):
 # ----------------- Files over iroh -----------------
 
 def _uploads_root(tmp_path):
-    root = tmp_path / "uploads"
+    root = tmp_path / "phone-uploads"
     root.mkdir()
     return root
 

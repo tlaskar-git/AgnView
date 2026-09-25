@@ -26,9 +26,10 @@ import socket
 import time
 from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 from . import iroh_api
+from .uploads import UploadError
 from .network import Transport, resolve_iroh_path_transport
 from .pairing import check_auth_rate_limit, record_failed_auth, reset_auth_rate_limit
 
@@ -81,6 +82,17 @@ IROH_GLOBAL_WINDOW_SECONDS = 60.0
 
 class _RequestTooLarge(Exception):
     pass
+
+
+def _is_upload_line(line: bytes) -> bool:
+    """True when this first line is an upload chunk request."""
+    if b"upload_chunk" not in line:
+        return False
+    try:
+        value = json.loads(line.decode("utf-8"))
+    except Exception:
+        return False
+    return isinstance(value, dict) and value.get("op") == iroh_api.UPLOAD_CHUNK_OP
 
 
 def _set_posix_permissions_0600(file_path: Path) -> None:
@@ -145,8 +157,11 @@ class IrohTransport(Transport):
         secret_key_path: Optional[Path] = None,
         asgi_app: Any = None,
         api_enabled: bool = True,
+        uploads: Any = None,
     ):
         self._db = db
+        # The UploadManager, or None when uploads over iroh are off.
+        self._uploads = uploads
         self._token_provider = token_provider
         self._relay_url = (relay_url or "").strip()
         self._enabled = enabled
@@ -256,6 +271,8 @@ class IrohTransport(Transport):
     def capabilities(self) -> List[str]:
         """What a client can ask for on this hub, as sent in the hello frame."""
         if self._api_enabled and self._asgi_app is not None:
+            if self._uploads is not None:
+                return ["console", "api", "uploads"]
             return ["console", "api"]
         return ["console"]
 
@@ -370,7 +387,7 @@ class IrohTransport(Transport):
         keep_connection = False
         try:
             try:
-                raw = await asyncio.wait_for(
+                raw, body_prefix = await asyncio.wait_for(
                     self._read_request(recv), timeout=REQUEST_READ_TIMEOUT_SECONDS
                 )
             except _RequestTooLarge:
@@ -408,7 +425,10 @@ class IrohTransport(Transport):
                 return
 
             keep_connection = True
-            await self._serve_api(send, request, slots)
+            if body_prefix is not None:
+                await self._serve_upload_chunk(recv, send, request, body_prefix, slots)
+            else:
+                await self._serve_api(send, request, slots, peer=peer_key)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -418,7 +438,53 @@ class IrohTransport(Transport):
             if not keep_connection:
                 self._close_connection(conn)
 
-    async def _serve_api(self, send: Any, request: Dict[str, Any], slots: "iroh_api.ApiSlots") -> None:
+    async def _serve_upload_chunk(
+        self, recv: Any, send: Any, request: Dict[str, Any], prefix: bytes, slots: "iroh_api.ApiSlots"
+    ) -> None:
+        """Answer one upload chunk: hello, then one response or error frame.
+
+        The request line is followed by exactly `length` raw bytes and then the
+        end of the client's stream. Nothing is stored until all of them have
+        arrived, so a peer that stalls or drops changes nothing.
+        """
+        await self._write_frame(send, self._hello_frame())
+
+        started = time.monotonic()
+        upload_id, length, outcome = "-", 0, ""
+        try:
+            if "uploads" not in self.capabilities:
+                raise iroh_api.ApiError(iroh_api.ERROR_FORBIDDEN_PATH)
+            upload_id, offset, length = iroh_api.parse_upload_chunk_request(request)
+            with iroh_api.claim(slots, self._api_slots):
+                try:
+                    data = await asyncio.wait_for(
+                        self._read_upload_body(recv, length, prefix),
+                        timeout=iroh_api.UPLOAD_BODY_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    raise iroh_api.ApiError(iroh_api.ERROR_TIMEOUT)
+                loop = asyncio.get_running_loop()
+                try:
+                    result = await loop.run_in_executor(None, self._uploads.write_chunk, upload_id, offset, data)
+                    frame = {"type": "response", "status": 200, "body": result}
+                except UploadError as exc:
+                    frame = {"type": "response", "status": exc.status, "body": exc.body()}
+            outcome = str(frame["status"])
+        except iroh_api.ApiError as exc:
+            frame = {"type": "error", "detail": exc.code}
+            outcome = exc.code
+
+        # The upload id, the length and the outcome. Never the bytes, the name
+        # or the key.
+        logger.info(
+            "iroh upload_chunk %s %d bytes -> %s in %.0f ms",
+            upload_id, length, outcome, (time.monotonic() - started) * 1000,
+        )
+        await self._write_frame(send, frame)
+
+    async def _serve_api(
+        self, send: Any, request: Dict[str, Any], slots: "iroh_api.ApiSlots", peer: Optional[str] = None
+    ) -> None:
         """Answer one API request: hello, then one response or error frame."""
         await self._write_frame(send, self._hello_frame())
 
@@ -431,9 +497,11 @@ class IrohTransport(Transport):
                 raise iroh_api.ApiError(iroh_api.ERROR_FORBIDDEN_PATH)
             api_request = iroh_api.parse_api_request(request)
             method, template = api_request.method, api_request.template
+            if template.startswith(iroh_api.UPLOADS_PREFIX) and "uploads" not in self.capabilities:
+                raise iroh_api.ApiError(iroh_api.ERROR_FORBIDDEN_PATH)
             with iroh_api.claim(slots, self._api_slots):
                 frame = await iroh_api.forward_to_app(
-                    self._asgi_app, api_request, token=self._expected_token()
+                    self._asgi_app, api_request, token=self._expected_token(), peer=peer
                 )
             outcome = str(frame["status"])
         except iroh_api.ApiError as exc:
@@ -449,20 +517,53 @@ class IrohTransport(Transport):
         await self._write_frame(send, frame)
 
     @staticmethod
-    async def _read_request(recv: Any) -> bytes:
-        """Read the request up to the client's end of stream, within the size cap."""
+    async def _read_request(recv: Any) -> Tuple[bytes, Optional[bytes]]:
+        """Read the request up to the client's end of stream, within the size cap.
+
+        Returns (request, None) for every request except an upload chunk. An
+        upload chunk is one request line and then raw bytes, so its line ends
+        at the first newline. That case returns (line, bytes already read past
+        the newline), and the caller reads the rest once the key checks out.
+        """
         data = bytearray()
         while True:
             chunk = await recv.read(MAX_REQUEST_BYTES + 1 - len(data))
             if not chunk:
-                return bytes(data)
+                return bytes(data), None
             data.extend(chunk)
+            newline = data.find(b"\n")
+            if newline != -1 and newline <= MAX_REQUEST_BYTES and _is_upload_line(bytes(data[:newline])):
+                return bytes(data[:newline]), bytes(data[newline + 1:])
             if len(data) > MAX_REQUEST_BYTES:
                 try:
                     await recv.stop(0)
                 except Exception:
                     pass
                 raise _RequestTooLarge()
+
+    @staticmethod
+    async def _read_upload_body(recv: Any, length: int, prefix: bytes) -> bytes:
+        """Read exactly `length` bytes, then the end of the client's stream.
+
+        Raises ApiError(bad_request) for a body that is shorter or longer than
+        the line said, and asyncio.TimeoutError from the caller's timeout for a
+        peer that stalls. Nothing is kept until every byte has arrived.
+        """
+        if len(prefix) > length:
+            raise iroh_api.ApiError(iroh_api.ERROR_BAD_REQUEST)
+        data = bytearray(prefix)
+        while len(data) < length:
+            chunk = await recv.read(length - len(data))
+            if not chunk:
+                raise iroh_api.ApiError(iroh_api.ERROR_BAD_REQUEST)
+            data.extend(chunk)
+        if await recv.read(1):
+            try:
+                await recv.stop(0)
+            except Exception:
+                pass
+            raise iroh_api.ApiError(iroh_api.ERROR_BAD_REQUEST)
+        return bytes(data)
 
     async def _write_error(self, send: Any, detail: str) -> None:
         await self._write_frame(send, {"type": "error", "detail": detail})

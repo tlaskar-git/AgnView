@@ -11,10 +11,12 @@ from fastapi.responses import FileResponse, JSONResponse
 
 from .local_only import PAIRING_PREFIX, pairing_request_allowed, refuse_pairing_request
 from .routes import router as api_router
+from .upload_routes import router as upload_router
 from ..core.engine import RelayEngine
 from ..core.db import Database
 from ..core.config import load_config
 from ..core.iroh_transport import IrohTransport
+from ..core.uploads import UploadLimits, UploadManager, resolve_uploads_dir
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,16 @@ IROH_ENV = "AGNVIEW_IROH"
 # LAN. The Allow phones on my network switch does not govern it: that switch
 # only picks the LAN address, and iroh never depended on it.
 IROH_API_ENV = "AGNVIEW_IROH_API"
+
+
+# Set AGNVIEW_UPLOADS=0 to refuse every phone upload, or AGNVIEW_IROH_UPLOADS=0
+# to accept them on the LAN only. Both default to on and both need the matching
+# switch in config.yaml to be on too.
+UPLOADS_ENV = "AGNVIEW_UPLOADS"
+IROH_UPLOADS_ENV = "AGNVIEW_IROH_UPLOADS"
+
+# How often finished and abandoned uploads are cleared away.
+UPLOAD_CLEANUP_SECONDS = 300.0
 
 
 def _env_switch(name: str) -> bool:
@@ -142,6 +154,24 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
     else:
         iroh_enabled, disabled_reason = True, ""
 
+    # Phone uploads. A configuration the hub cannot act on turns them off,
+    # because a write path is never left on by guesswork.
+    upload_manager = None
+    if _env_switch(UPLOADS_ENV) and config.uploads_enabled and config.is_valid:
+        try:
+            upload_manager = UploadManager(
+                resolve_uploads_dir(config.uploads_dir, db.db_path),
+                UploadLimits.from_config(config),
+            )
+        except OSError as exc:
+            logger.warning("uploads are off: the uploads folder is not usable: %s", exc)
+    iroh_uploads_enabled = (
+        upload_manager is not None and _env_switch(IROH_UPLOADS_ENV) and config.iroh_uploads_enabled
+    )
+    app.state.uploads = upload_manager
+    app.state.uploads_dir = str(upload_manager.root) if upload_manager is not None else None
+    app.state.iroh_uploads_enabled = iroh_uploads_enabled
+
     iroh_transport = IrohTransport(
         db=db,
         token_provider=lambda: app.state.auth_token,
@@ -150,6 +180,7 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
         disabled_reason=disabled_reason,
         asgi_app=app,
         api_enabled=_iroh_api_enabled_from_env() and config.iroh_api_enabled,
+        uploads=upload_manager if iroh_uploads_enabled else None,
     )
     app.state.iroh = iroh_transport
 
@@ -205,6 +236,28 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
         # dashboard.
         iroh_transport.start()
 
+    cleanup_tasks = []
+
+    @app.on_event("startup")
+    async def _start_upload_cleanup():
+        if upload_manager is None:
+            return
+
+        async def loop_forever():
+            while True:
+                try:
+                    await asyncio.to_thread(upload_manager.cleanup)
+                except Exception as exc:
+                    logger.warning("upload cleanup failed: %s", exc)
+                await asyncio.sleep(UPLOAD_CLEANUP_SECONDS)
+
+        cleanup_tasks.append(asyncio.ensure_future(loop_forever()))
+
+    @app.on_event("shutdown")
+    async def _stop_upload_cleanup():
+        for task in cleanup_tasks:
+            task.cancel()
+
     @app.on_event("shutdown")
     async def _stop_iroh_transport():
         await iroh_transport.stop()
@@ -216,6 +269,7 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
         await engine.runner.shutdown_live_sessions()
 
     app.include_router(api_router)
+    app.include_router(upload_router)
 
     # Web Dashboard Static UI & Assets
     web_dir = Path(__file__).parent.parent / "web"

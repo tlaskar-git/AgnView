@@ -255,7 +255,7 @@ def test_the_allowlist_is_one_constant_and_serves_real_routes(tmp_path):
     served = app.openapi()["paths"]
     for method, template, _query in iroh_api.API_ALLOWLIST:
         openapi_path = template
-        for name in ("{job_id}", "{task_id}"):
+        for name in ("{job_id}", "{task_id}", "{upload_id}"):
             candidate = template.replace("{id}", name)
             if candidate in served:
                 openapi_path = candidate
@@ -552,8 +552,8 @@ def test_a_malformed_request_keeps_its_old_detail():
 
 def test_the_hub_wires_its_own_app_into_the_transport(tmp_path):
     app = create_app(db_path=str(tmp_path / "hub.db"), auth_token=_fake_token())
-    assert app.state.iroh.capabilities == ["console", "api"]
-    assert app.state.iroh.status()["capabilities"] == ["console", "api"]
+    assert app.state.iroh.capabilities == ["console", "api", "uploads"]
+    assert app.state.iroh.status()["capabilities"] == ["console", "api", "uploads"]
 
 
 def test_the_api_switch_turns_the_mode_off(tmp_path, monkeypatch):
