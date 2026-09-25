@@ -8,7 +8,6 @@ name: Windows desktop app
 on:
   push:
     tags: ["v*"]
-    branches: [bot/windows-release-build] # TEMPORARY dry run, removed before merge
   workflow_dispatch:
     inputs:
       tag:
@@ -34,7 +33,6 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       EVENT_NAME: ${{ github.event_name }}
-      REF_TYPE: ${{ github.ref_type }}
       REF_NAME: ${{ github.ref_name }}
       INPUT_TAG: ${{ inputs.tag }}
     steps:
@@ -43,27 +41,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          dry_run=false
           if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             tag="$INPUT_TAG"
-          elif [ "$REF_TYPE" = "tag" ]; then
-            tag="$REF_NAME"
           else
-            tag="none"
-            dry_run=true
+            tag="$REF_NAME"
           fi
-          if [ "$dry_run" = "false" ]; then
-            if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'; then
-              echo "The tag is not a version tag like v0.1.11." >&2
-              exit 1
-            fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'; then
+            echo "The tag is not a version tag like v0.1.11." >&2
+            exit 1
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          echo "dry_run=$dry_run" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ steps.tag.outputs.dry_run == 'true' && github.sha || format('refs/tags/{0}', steps.tag.outputs.tag) }}
+          ref: ${{ format('refs/tags/{0}', steps.tag.outputs.tag) }}
           persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -138,7 +129,6 @@ jobs:
       # Creates the release only when the macOS or PyPI workflow has not yet.
       # Uploads only this workflow's file, so other assets stay untouched.
       - name: Attach AgnView-windows-x64.zip
-        if: steps.tag.outputs.dry_run != 'true'
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.tag }}
