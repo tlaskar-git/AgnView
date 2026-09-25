@@ -87,7 +87,7 @@ jobs:
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
           try {
-            $names = $archive.Entries | ForEach-Object { $_.FullName -replace '\', '/' }
+            $names = $archive.Entries | ForEach-Object { $_.FullName.Replace([string][char]92, '/') }
           } finally { $archive.Dispose() }
           Write-Host ("Entries: {0}" -f $names.Count)
           $names | Select-Object -First 15 | ForEach-Object { Write-Host "  $_" }
