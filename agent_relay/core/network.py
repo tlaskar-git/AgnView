@@ -4,10 +4,36 @@ import os
 import socket
 import subprocess
 import re
+import threading
 from typing import Any, Dict, List, Optional
 import ipaddress
 
 from .proc import no_window
+
+
+HOSTNAME_LOOKUP_TIMEOUT_SECONDS = 2.0
+
+
+def resolve_with_timeout(func, *args, timeout: Optional[float] = None, default=None):
+    """Run a blocking name lookup and give up after the timeout.
+
+    Resolving the machine's own hostname can block for minutes on a host with
+    no working resolver, for example a macOS CI runner. The lookup runs in a
+    daemon thread, so a lookup that never returns costs one idle thread and
+    never holds up the caller. The default is returned on a timeout or error.
+    """
+    box: Dict[str, Any] = {}
+
+    def work() -> None:
+        try:
+            box["value"] = func(*args)
+        except Exception:
+            pass
+
+    thread = threading.Thread(target=work, name="agnview-name-lookup", daemon=True)
+    thread.start()
+    thread.join(HOSTNAME_LOOKUP_TIMEOUT_SECONDS if timeout is None else timeout)
+    return box.get("value", default)
 
 
 def is_tailscale_cgnat_address(ip_str: str) -> bool:
@@ -58,14 +84,11 @@ def get_local_ip() -> str:
         s.close()
 
     # Second, enumerate local interface addresses to find an RFC1918 address
-    try:
-        for item in socket.getaddrinfo(socket.gethostname(), None):
-            if item[0] == socket.AF_INET:
-                ip = item[4][0]
-                if is_rfc1918_address(ip):
-                    return ip
-    except Exception:
-        pass
+    for item in resolve_with_timeout(socket.getaddrinfo, socket.gethostname(), None, default=[]):
+        if item[0] == socket.AF_INET:
+            ip = item[4][0]
+            if is_rfc1918_address(ip):
+                return ip
 
     return "127.0.0.1"
 
@@ -123,12 +146,9 @@ def get_network_endpoints(port: int = 8765) -> Dict[str, Optional[str]]:
         endpoints["lan"] = f"http://{lan_ip}:{port}"
 
     # Only include hostname if it resolves to loopback or RFC1918
-    try:
-        host_ip = socket.gethostbyname(hostname)
-        if is_allowed_address(host_ip):
-            endpoints["hostname"] = f"http://{hostname.lower()}:{port}"
-    except Exception:
-        pass
+    host_ip = resolve_with_timeout(socket.gethostbyname, hostname)
+    if host_ip and is_allowed_address(host_ip):
+        endpoints["hostname"] = f"http://{hostname.lower()}:{port}"
 
     if tailscale_ip:
         endpoints["tailscale"] = f"http://{tailscale_ip}:{port}"
