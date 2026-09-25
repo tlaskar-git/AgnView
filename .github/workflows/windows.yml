@@ -118,6 +118,54 @@ jobs:
             Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
           }
 
+      # A person updates by starting the new AgnView.exe while the previous
+      # release runs. The new copy must close the old one and answer on the
+      # same port, and it must keep running. A failure inside the window used
+      # to leave no trace, so this also fails when the new copy exits early.
+      - name: Smoke test an update over a running older release
+        shell: pwsh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $current = [version]$expected
+          $previous = gh release list --limit 30 --json tagName --jq '.[].tagName' |
+            Where-Object { $_ -match '^v(\d+\.\d+\.\d+)$' -and [version]$Matches[1] -lt $current -and [version]$Matches[1] -ge [version]"0.1.8" } |
+            Sort-Object { [version]($_.TrimStart("v")) } -Descending | Select-Object -First 1
+          if (-not $previous) { Write-Host "No earlier release with the handoff to test against."; exit 0 }
+          $oldVersion = $previous.TrimStart("v")
+          Write-Host "Updating from $oldVersion to $expected."
+          $old = Join-Path $env:RUNNER_TEMP "old"
+          gh release download $previous -p AgnView-windows-x64.zip -D $old
+          Expand-Archive -Path (Join-Path $old "AgnView-windows-x64.zip") -DestinationPath (Join-Path $old "x")
+          $new = Join-Path $env:RUNNER_TEMP "update"
+          Expand-Archive -Path dist/AgnView-windows-x64.zip -DestinationPath $new
+          $port = 18845
+          function Answer { try { (Invoke-RestMethod "http://127.0.0.1:$port/openapi.json" -TimeoutSec 3).info.version } catch { $null } }
+          function Tail { $log = Join-Path $env:USERPROFILE ".agnview/logs/desktop.log"; if (Test-Path $log) { Get-Content $log -Tail 40 } }
+          try {
+            $oldProc = Start-Process (Join-Path $old "x/AgnView/AgnView.exe") -ArgumentList "--minimized" -PassThru
+            for ($i = 0; $i -lt 60 -and (Answer) -ne $oldVersion; $i++) { Start-Sleep -Seconds 1 }
+            if ((Answer) -ne $oldVersion) { Tail; throw "The older release $oldVersion did not start." }
+            Write-Host "Older release answers with $oldVersion."
+            $proc = Start-Process (Join-Path $new "AgnView/AgnView.exe") -PassThru
+            $version = $null
+            for ($i = 0; $i -lt 60 -and $version -ne $expected; $i++) {
+              Start-Sleep -Seconds 1
+              if ($proc.HasExited) { Tail; throw "The new copy exited with code $($proc.ExitCode) instead of taking over." }
+              $version = Answer
+            }
+            if ($version -ne $expected) { Tail; throw "After the update the port answers with '$version', expected $expected." }
+            if (-not $oldProc.HasExited) { throw "The older release is still running after the update." }
+            Start-Sleep -Seconds 15
+            if ($proc.HasExited) { Tail; throw "The new copy exited with code $($proc.ExitCode) after it started." }
+            if ((Answer) -ne $expected) { Tail; throw "The hub stopped answering after the update." }
+            Write-Host "The update took over from $oldVersion and $expected keeps running."
+          } finally {
+            Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
+
       - name: Checksum
         id: sum
         shell: pwsh

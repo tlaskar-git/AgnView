@@ -326,7 +326,13 @@ def claim_single_instance() -> bool:
             logger.info("Closed an older AgnView (%s) and took over", running or pids)
             return True
         logger.warning("An older AgnView is running and could not be closed")
+        message_box(
+            "An older AgnView is still running and could not be closed.\n\n"
+            "Right-click its tray icon, choose Quit AgnView, then start AgnView again."
+        )
+        return False
 
+    logger.info("AgnView %s is already running, so this copy handed over to it and exited", (running or {}).get("version", "?"))
     EVENT_MODIFY_STATE = 0x0002
     handle = kernel32.OpenEventW(EVENT_MODIFY_STATE, False, SHOW_EVENT_NAME)
     if handle:
@@ -719,6 +725,25 @@ def configure_logging() -> None:
         sys.stderr = sys.stderr or stream
 
 
+def run_window(desktop_app) -> int:
+    """Run the window until the app quits and return the exit code.
+
+    An error from the window or the tray used to vanish: main() ends with
+    os._exit, which discards an exception in flight, and a windowed exe has no
+    console. The hub then started, stopped a moment later and the app left
+    no trace. The error is logged and shown instead.
+    """
+    try:
+        desktop_app.run()
+    except Exception as exc:
+        logger.exception("The AgnView window stopped")
+        message_box(f"AgnView could not open its window: {exc}\n\nLog: {LOG_PATH}")
+        return 1
+    if not desktop_app.quitting:
+        logger.warning("The window ended without Quit AgnView being chosen")
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(prog="AgnView", description="AgnView desktop app for Windows and macOS")
     parser.add_argument("--minimized", action="store_true", help="Start hidden in the tray (used at sign-in)")
@@ -781,8 +806,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     global _lan_change_handler
     desktop_app = DesktopApp(hub, settings, start_hidden=args.minimized)
     _lan_change_handler = desktop_app.set_lan
+    code = 1
     try:
-        desktop_app.run()
+        code = run_window(desktop_app)
     finally:
         _lan_change_handler = None
         clear_instance_record()
@@ -791,4 +817,4 @@ def main(argv: Optional[list[str]] = None) -> int:
         logging.shutdown()
         # Worker threads started by the hub, such as the iroh transport, must
         # not keep a closed app alive in the background.
-        os._exit(0)
+        os._exit(code)
