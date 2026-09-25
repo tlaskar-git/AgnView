@@ -120,8 +120,13 @@ jobs:
 
       # A person updates by starting the new AgnView.exe while the previous
       # release runs. The new copy must close the old one and answer on the
-      # same port, and it must keep running. A failure inside the window used
-      # to leave no trace, so this also fails when the new copy exits early.
+      # same port, and it must keep running.
+      #
+      # The port is not fixed. The step before this one starts the app with a
+      # random port, and the app saves that port for later starts, so the older
+      # release binds the saved port and not 18845. This step therefore reads
+      # the port from the record each copy writes (desktop-instance.json) and
+      # checks that the version in the record matches the version that answers.
       - name: Smoke test an update over a running older release
         shell: pwsh
         env:
@@ -129,9 +134,11 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $expected = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          $current = [version]$expected
-          $previous = gh release list --limit 30 --json tagName --jq '.[].tagName' |
-            Where-Object { $_ -match '^v(\d+\.\d+\.\d+)$' -and [version]$Matches[1] -lt $current -and [version]$Matches[1] -ge [version]"0.1.8" } |
+          $building = [version]$env:TAG.TrimStart("v")
+          # The older release is the newest plain release with a lower version
+          # than the tag being built. Versions are compared as numbers.
+          $previous = gh release list --limit 50 --json tagName --jq '.[].tagName' |
+            Where-Object { $_ -match '^v(\d+\.\d+\.\d+)$' -and [version]$Matches[1] -lt $building -and [version]$Matches[1] -ge [version]"0.1.8" } |
             Sort-Object { [version]($_.TrimStart("v")) } -Descending | Select-Object -First 1
           if (-not $previous) { Write-Host "No earlier release with the handoff to test against."; exit 0 }
           $oldVersion = $previous.TrimStart("v")
@@ -141,26 +148,80 @@ jobs:
           Expand-Archive -Path (Join-Path $old "AgnView-windows-x64.zip") -DestinationPath (Join-Path $old "x")
           $new = Join-Path $env:RUNNER_TEMP "update"
           Expand-Archive -Path dist/AgnView-windows-x64.zip -DestinationPath $new
-          $port = 18845
-          function Answer { try { (Invoke-RestMethod "http://127.0.0.1:$port/openapi.json" -TimeoutSec 3).info.version } catch { $null } }
-          function Tail { $log = Join-Path $env:USERPROFILE ".agnview/logs/desktop.log"; if (Test-Path $log) { Get-Content $log -Tail 40 } }
-          try {
-            $oldProc = Start-Process (Join-Path $old "x/AgnView/AgnView.exe") -ArgumentList "--minimized" -PassThru
-            for ($i = 0; $i -lt 60 -and (Answer) -ne $oldVersion; $i++) { Start-Sleep -Seconds 1 }
-            if ((Answer) -ne $oldVersion) { Tail; throw "The older release $oldVersion did not start." }
-            Write-Host "Older release answers with $oldVersion."
-            $proc = Start-Process (Join-Path $new "AgnView/AgnView.exe") -PassThru
-            $version = $null
-            for ($i = 0; $i -lt 60 -and $version -ne $expected; $i++) {
-              Start-Sleep -Seconds 1
-              if ($proc.HasExited) { Tail; throw "The new copy exited with code $($proc.ExitCode) instead of taking over." }
-              $version = Answer
+
+          $data = Join-Path $env:USERPROFILE ".agnview"
+          $recordPath = Join-Path $data "desktop-instance.json"
+          $logPath = Join-Path $data "logs/desktop.log"
+          function Read-Json($path) { try { Get-Content $path -Raw | ConvertFrom-Json } catch { $null } }
+          function Get-Answer($port) {
+            if (-not $port) { return $null }
+            try { (Invoke-RestMethod "http://127.0.0.1:$port/openapi.json" -TimeoutSec 3).info.version } catch { $null }
+          }
+          function Fail($message) {
+            Write-Host "::group::Diagnostics"
+            Write-Host "Running copies of the app:"
+            Get-Process AgnView -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("  pid {0}, started {1}, {2}" -f $_.Id, $_.StartTime, $_.Path) }
+            $ids = @(Get-Process AgnView -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
+            if ($ids.Count) {
+              try {
+                Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { $ids -contains $_.OwningProcess } |
+                  ForEach-Object { Write-Host ("  listening on {0}:{1} (pid {2})" -f $_.LocalAddress, $_.LocalPort, $_.OwningProcess) }
+              } catch { Write-Host "  listening ports are not available: $($_.Exception.Message)" }
             }
-            if ($version -ne $expected) { Tail; throw "After the update the port answers with '$version', expected $expected." }
-            if (-not $oldProc.HasExited) { throw "The older release is still running after the update." }
+            Write-Host "Instance record:"
+            if (Test-Path $recordPath) { Get-Content $recordPath -Raw | Write-Host } else { Write-Host "  none" }
+            Write-Host "Saved settings:"
+            $settingsPath = Join-Path $data "desktop.json"
+            if (Test-Path $settingsPath) { Get-Content $settingsPath -Raw | Write-Host } else { Write-Host "  none" }
+            Write-Host "Last lines of desktop.log:"
+            if (Test-Path $logPath) { Get-Content $logPath -Tail 40 | Write-Host } else { Write-Host "  none" }
+            Write-Host "::endgroup::"
+            throw $message
+          }
+
+          try {
+            # Start from a clean record and log. The saved settings stay, as
+            # they do on a real machine.
+            Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
+            Remove-Item $recordPath, $logPath -Force -ErrorAction SilentlyContinue
+
+            # Start the older release the way a double-click does, with no arguments.
+            $oldProc = Start-Process (Join-Path $old "x/AgnView/AgnView.exe") -PassThru
+            $port = $null
+            $answer = $null
+            for ($i = 0; $i -lt 90 -and $answer -ne $oldVersion; $i++) {
+              Start-Sleep -Seconds 1
+              if ($oldProc.HasExited) { Fail "The older release $oldVersion exited with code $($oldProc.ExitCode) before it answered." }
+              $record = Read-Json $recordPath
+              if ($record -and $record.version -eq $oldVersion -and $record.port) {
+                $port = [int]$record.port
+                $answer = Get-Answer $port
+              }
+            }
+            if ($answer -ne $oldVersion) { Fail "The older release $oldVersion did not answer with its version on port '$port' (last answer '$answer')." }
+            Write-Host "Older release $oldVersion (pid $($oldProc.Id)) answers on port $port."
+
+            # Start the new build the same way. It must close the old copy and
+            # answer on the same port with the new version.
+            $proc = Start-Process (Join-Path $new "AgnView/AgnView.exe") -PassThru
+            $answer = $null
+            for ($i = 0; $i -lt 90 -and $answer -ne $expected; $i++) {
+              Start-Sleep -Seconds 1
+              if ($proc.HasExited) { Fail "The new copy exited with code $($proc.ExitCode) instead of taking over." }
+              $answer = Get-Answer $port
+            }
+            if ($answer -ne $expected) { Fail "After the update port $port answers with '$answer', expected $expected." }
+            $record = Read-Json $recordPath
+            if (-not $record -or $record.version -ne $expected -or $record.pid -ne $proc.Id) {
+              Fail "The instance record does not name the new copy (pid $($proc.Id), version $expected)."
+            }
+            for ($i = 0; $i -lt 30 -and -not $oldProc.HasExited; $i++) { Start-Sleep -Seconds 1 }
+            if (-not $oldProc.HasExited) { Fail "The older release (pid $($oldProc.Id)) is still running after the update." }
+            Write-Host "New copy $expected (pid $($proc.Id)) answers on port $port and the older copy is gone."
+
             Start-Sleep -Seconds 15
-            if ($proc.HasExited) { Tail; throw "The new copy exited with code $($proc.ExitCode) after it started." }
-            if ((Answer) -ne $expected) { Tail; throw "The hub stopped answering after the update." }
+            if ($proc.HasExited) { Fail "The new copy exited with code $($proc.ExitCode) after it started." }
+            if ((Get-Answer $port) -ne $expected) { Fail "The hub stopped answering after the update." }
             Write-Host "The update took over from $oldVersion and $expected keeps running."
           } finally {
             Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
