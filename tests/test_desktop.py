@@ -2,7 +2,9 @@
 registers a command that starts it hidden in the tray at sign-in."""
 
 import json
+import logging
 import sys
+import types
 
 from agent_relay.desktop import app as desktop
 
@@ -238,3 +240,64 @@ def test_a_record_for_a_live_process_is_read(tmp_path, monkeypatch):
     monkeypatch.setattr(desktop, "INSTANCE_PATH", path)
     monkeypatch.setattr(desktop, "process_alive", lambda pid: True)
     assert desktop.read_instance_record()["version"] == "0.1.7"
+
+
+# --- A failure must leave a trace ---------------------------------------------------
+
+def test_a_window_error_is_logged_and_shown_not_swallowed(monkeypatch, caplog):
+    # main() ends with os._exit, which discards an exception in flight. Before
+    # the fix, a window or tray error ended the app with code 0, no message and
+    # no log line, so a double-click seemed to do nothing.
+    shown = []
+    monkeypatch.setattr(desktop, "message_box", shown.append)
+
+    class Broken:
+        quitting = False
+
+        def run(self):
+            raise RuntimeError("the window library failed to load")
+
+    with caplog.at_level(logging.ERROR, logger="agnview.desktop"):
+        assert desktop.run_window(Broken()) == 1
+    assert "the window library failed to load" in shown[0]
+    assert "The AgnView window stopped" in caplog.text
+
+
+def test_a_normal_quit_exits_with_zero(monkeypatch):
+    shown = []
+    monkeypatch.setattr(desktop, "message_box", shown.append)
+
+    class Quits:
+        quitting = True
+
+        def run(self):
+            pass
+
+    assert desktop.run_window(Quits()) == 0
+    assert shown == []
+
+
+def test_an_older_copy_that_will_not_close_is_reported_not_ignored(monkeypatch):
+    class Kernel:
+        signalled = False
+
+        def CreateMutexW(self, *args):
+            return 1
+
+        def GetLastError(self):
+            return desktop.ERROR_ALREADY_EXISTS
+
+        def OpenEventW(self, *args):
+            self.signalled = True
+            return 0
+
+    kernel = Kernel()
+    shown = []
+    monkeypatch.setattr(desktop.ctypes, "windll", types.SimpleNamespace(kernel32=kernel), raising=False)
+    monkeypatch.setattr(desktop, "read_instance_record", lambda: {"pid": 1, "version": "0.1.8"})
+    monkeypatch.setattr(desktop, "current_version", lambda: "0.1.12")
+    monkeypatch.setattr(desktop, "end_process", lambda pid: False)
+    monkeypatch.setattr(desktop, "message_box", shown.append)
+
+    assert desktop.claim_single_instance() is False
+    assert "could not be closed" in shown[0]
