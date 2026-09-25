@@ -320,6 +320,9 @@ def test_a_wrong_sha256_does_not_finish_the_upload(tmp_path, clock, free):
     assert (error.code, error.status) == ("checksum_mismatch", 422)
     assert manager.status(upload_id)["state"] == "receiving"
     assert not (manager.root / upload_id / "a.bin").exists()
+    # The bytes are discarded and the upload restarts at offset 0.
+    assert manager.status(upload_id)["received"] == 0
+    manager.write_chunk(upload_id, 0, b"abcd")
     good = hashlib.sha256(b"abcd").hexdigest().upper()
     assert manager.finish(upload_id, sha256=good)["sha256"] == good.lower()
 
@@ -411,19 +414,19 @@ def test_a_part_file_swapped_for_a_symlink_is_never_written_through(tmp_path, cl
 # ----------------- Limits -----------------
 
 def test_the_total_storage_quota_counts_finished_and_declared_bytes(tmp_path, clock, free):
-    manager = _manager(tmp_path, clock, max_total_bytes=100, max_per_peer=10, max_concurrent=10)
-    _upload(manager, b"x" * 60)
-    error = _code(manager.create, "b.bin", 50, None, PEER)
+    manager = _manager(tmp_path, clock, max_total_bytes=10_000, max_per_peer=10, max_concurrent=10)
+    _upload(manager, b"x" * 5000)
+    error = _code(manager.create, "b.bin", 6000, None, PEER)
     assert (error.code, error.status) == ("quota_exceeded", 507)
     # An unfinished upload holds its whole declared size.
-    manager.create("c.bin", 40, None, PEER)
+    manager.create("c.bin", 4100, None, PEER)
     assert _code(manager.create, "d.bin", 1, None, PEER).code == "quota_exceeded"
-    assert manager.storage_used() == 100
+    assert manager.storage_used() == 9100
 
 
 def test_deleting_an_upload_frees_its_quota(tmp_path, clock, free):
-    manager = _manager(tmp_path, clock, max_total_bytes=100)
-    reply = _upload(manager, b"x" * 100)
+    manager = _manager(tmp_path, clock, max_total_bytes=10_000)
+    reply = _upload(manager, b"x" * 10_000)
     assert _code(manager.create, "b.bin", 1, None, PEER).code == "quota_exceeded"
     manager.cancel(reply["upload_id"])
     assert manager.create("b.bin", 1, None, PEER)

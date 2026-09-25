@@ -254,7 +254,7 @@ def test_deleting_a_missing_job_is_a_404_response(hub):
 def test_a_delete_removes_only_the_named_job(hub):
     app, transport, token = hub
     first = _call(transport, token, "POST", "/api/jobs", _job(id="keep"))[0][1]["body"]["id"]
-    second = _call(transport, token, "POST", "/api/jobs", _job(id="drop"))[0][1]["body"]["id"]
+    second = _call(transport, token, "POST", "/api/jobs", _job(id="drop", tasks=[_task(id="t2")]))[0][1]["body"]["id"]
     _call(transport, token, "DELETE", f"/api/jobs/{second}")
     assert [j["id"] for j in _jobs(app)] == [first]
 
@@ -333,7 +333,8 @@ def test_another_peers_wrong_keys_do_not_block_a_valid_create(hub):
     blocked, _ = _call(transport, secrets.token_urlsafe(32), "POST", "/api/jobs", _job(), peer="peer-a")
     assert blocked == [{"type": "error", "detail": "rate_limited"}]
     assert _call(transport, token, "POST", "/api/jobs", _job(id="a"), peer="peer-a")[0][1]["status"] == 200
-    assert _call(transport, token, "POST", "/api/jobs", _job(id="b"), peer="peer-b")[0][1]["status"] == 200
+    other = _job(id="b", tasks=[_task(id="t2")])
+    assert _call(transport, token, "POST", "/api/jobs", other, peer="peer-b")[0][1]["status"] == 200
 
 
 def test_a_full_connection_or_hub_refuses_a_create_and_a_delete(hub):

@@ -31,7 +31,7 @@ import unicodedata
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Deque, Dict, Optional
+from typing import Any, Callable, Deque, Dict, Iterable, Optional
 
 logger = logging.getLogger("agnview.uploads")
 
@@ -48,6 +48,12 @@ DEFAULT_MAX_PER_PEER = 2
 DEFAULT_MAX_CONCURRENT = 4
 DEFAULT_IDLE_EXPIRY_SECONDS = 3600
 DEFAULT_RETENTION_DAYS = 14
+DEFAULT_MAX_FILES = 500
+
+# Every upload counts as at least this many bytes against the total, so a
+# stream of tiny files cannot fill the disk with folders while the byte count
+# stays near zero.
+MIN_ACCOUNTED_BYTES = 4096
 
 # How many uploads one peer, and all peers together, can start in a minute.
 CREATE_RATE_PER_PEER = 20
@@ -56,6 +62,8 @@ CREATE_RATE_WINDOW_SECONDS = 60.0
 
 MAX_NAME_INPUT_CHARS = 1024
 MAX_NAME_BYTES = 180
+# A stored name is never cut below this, whatever the folder path length.
+MIN_NAME_BYTES = 40
 MAX_EXTENSION_CHARS = 16
 FALLBACK_NAME = "upload"
 
@@ -73,6 +81,7 @@ ERROR_TOO_LARGE = "too_large"
 ERROR_QUOTA = "quota_exceeded"
 ERROR_DISK_LOW = "insufficient_storage"
 ERROR_TOO_MANY = "too_many_uploads"
+ERROR_FILE_LIMIT = "too_many_files"
 ERROR_RATE_LIMITED = "rate_limited"
 ERROR_OFFSET = "offset_mismatch"
 ERROR_BEYOND_SIZE = "beyond_declared_size"
@@ -91,6 +100,7 @@ _STATUS = {
     ERROR_QUOTA: 507,
     ERROR_DISK_LOW: 507,
     ERROR_TOO_MANY: 429,
+    ERROR_FILE_LIMIT: 507,
     ERROR_RATE_LIMITED: 429,
     ERROR_OFFSET: 409,
     ERROR_NOT_RECEIVING: 409,
@@ -131,13 +141,13 @@ class UploadError(Exception):
         return {"detail": self.code, **self.extra}
 
 
-def sanitise_filename(raw: Any) -> str:
+def sanitise_filename(raw: Any, max_bytes: int = MAX_NAME_BYTES) -> str:
     """Reduce a name from a phone to a safe base name, or raise invalid_name.
 
     Keeps the last path segment only (either separator), drops a drive letter,
     control and format characters, and characters Windows refuses. Strips
     leading dots and spaces and trailing dots and spaces. Refuses a Windows
-    device name. Caps the length in bytes and keeps the extension.
+    device name. Caps the length to max_bytes and keeps the extension.
     """
     if not isinstance(raw, str) or not raw.strip() or len(raw) > MAX_NAME_INPUT_CHARS:
         raise UploadError(ERROR_INVALID_NAME)
@@ -164,24 +174,32 @@ def sanitise_filename(raw: Any) -> str:
     if stem in _RESERVED_NAMES:
         raise UploadError(ERROR_INVALID_NAME)
 
-    name = _cap_length(name)
+    name = _cap_length(name, max_bytes)
     if not name or name.startswith("."):
         raise UploadError(ERROR_INVALID_NAME)
     return name
 
 
-def _cap_length(name: str) -> str:
-    if len(name.encode("utf-8")) <= MAX_NAME_BYTES:
+def _cap_length(name: str, max_bytes: int = MAX_NAME_BYTES) -> str:
+    if len(name.encode("utf-8")) <= max_bytes:
         return name
     stem, dot, extension = name.rpartition(".")
     if not dot or not stem or len(extension) > MAX_EXTENSION_CHARS:
         stem, extension = name, ""
     else:
         extension = "." + extension
-    budget = MAX_NAME_BYTES - len(extension.encode("utf-8"))
+    if len(extension.encode("utf-8")) >= max_bytes:
+        # No room to keep an extension at all.
+        stem, extension = name, ""
+    budget = max_bytes - len(extension.encode("utf-8"))
     while stem and len(stem.encode("utf-8")) > budget:
         stem = stem[:-1]
     return (stem.rstrip(". ") + extension) if stem else FALLBACK_NAME + extension
+
+
+def _accounted(size: int) -> int:
+    """What an upload of this size counts for against the total."""
+    return max(size, MIN_ACCOUNTED_BYTES)
 
 
 def free_bytes(path: str) -> int:
@@ -198,6 +216,7 @@ class UploadLimits:
     max_concurrent: int = DEFAULT_MAX_CONCURRENT
     idle_expiry_seconds: int = DEFAULT_IDLE_EXPIRY_SECONDS
     retention_days: int = DEFAULT_RETENTION_DAYS
+    max_files: int = DEFAULT_MAX_FILES
 
     @classmethod
     def from_config(cls, config: Any) -> "UploadLimits":
@@ -209,6 +228,7 @@ class UploadLimits:
             max_concurrent=config.uploads_max_concurrent,
             idle_expiry_seconds=config.uploads_idle_expiry_seconds,
             retention_days=config.uploads_retention_days,
+            max_files=config.uploads_max_files,
         )
 
 
@@ -259,12 +279,19 @@ class UploadManager:
         root: Any,
         limits: Optional[UploadLimits] = None,
         clock: Callable[[], float] = time.time,
+        in_use: Optional[Callable[[], Iterable[str]]] = None,
     ):
         self.root = Path(root)
         self.limits = limits or UploadLimits()
         self._clock = clock
+        # Returns the file paths that tasks still list. A finished upload on
+        # that list is never deleted by retention.
+        self._in_use = in_use
         self._lock = threading.Lock()
         self._uploads: Dict[str, _Upload] = {}
+        # Running totals, so a create never walks the uploads or the folders.
+        self._committed = 0
+        self._active: Dict[str, _Upload] = {}
         self._create_total = _RateWindow(CREATE_RATE_TOTAL, CREATE_RATE_WINDOW_SECONDS)
         self._create_by_owner: Dict[str, _RateWindow] = {}
         self._ensure_root()
@@ -273,7 +300,7 @@ class UploadManager:
     # ----------------- Public calls -----------------
 
     def create(self, name: Any, size: Any, mime: Any, owner: str) -> Dict[str, Any]:
-        stored_name = sanitise_filename(name)
+        stored_name = self._clean_name(name)
         if isinstance(size, bool) or not isinstance(size, int) or size < 1:
             raise UploadError(ERROR_BAD_REQUEST)
         if size > self.limits.max_file_bytes:
@@ -285,15 +312,17 @@ class UploadManager:
         with self._lock:
             if not self._rate_ok(owner, now):
                 raise UploadError(ERROR_RATE_LIMITED)
-            active = [u for u in self._uploads.values() if u.state == STATE_RECEIVING]
+            active = list(self._active.values())
             if len(active) >= self.limits.max_concurrent:
                 raise UploadError(ERROR_TOO_MANY)
             if sum(1 for u in active if u.owner == owner) >= self.limits.max_per_peer:
                 raise UploadError(ERROR_TOO_MANY)
+            if len(self._uploads) >= self.limits.max_files:
+                raise UploadError(ERROR_FILE_LIMIT, max_files=self.limits.max_files)
             # Finished files count at their size and unfinished ones at the size
             # they declared, so a set of uploads can never overshoot together.
-            committed = sum(u.size for u in self._uploads.values())
-            if committed + size > self.limits.max_total_bytes:
+            # Nothing counts for less than MIN_ACCOUNTED_BYTES.
+            if self._committed + _accounted(size) > self.limits.max_total_bytes:
                 raise UploadError(ERROR_QUOTA)
             still_to_come = sum(u.size - u.received for u in active)
             if self._free() - still_to_come - size < self.limits.min_free_bytes:
@@ -305,7 +334,7 @@ class UploadManager:
                 created_at=now, updated_at=now, hasher=hashlib.sha256(),
             )
             self._make_folder(upload)
-            self._uploads[upload_id] = upload
+            self._register(upload)
         logger.info("upload %s started, %d bytes", upload_id, size)
         return {
             "upload_id": upload_id,
@@ -364,30 +393,48 @@ class UploadManager:
                 if expected is not None and upload.sha256 != expected:
                     raise UploadError(ERROR_CHECKSUM)
                 return self._finished_body(upload)
+            if upload.state != STATE_RECEIVING:
+                raise UploadError(ERROR_NOT_FOUND)
             if upload.received != upload.size:
                 raise UploadError(ERROR_INCOMPLETE, received=upload.received, size=upload.size)
 
             part = self._folder(upload.id) / PART_NAME
             digest = upload.hasher.hexdigest() if upload.hasher is not None else self._hash_file(part)
             if expected is not None and digest != expected:
-                raise UploadError(ERROR_CHECKSUM)
+                # The bytes are proven wrong, so they are thrown away and the
+                # upload starts again at offset 0. The client sends the file
+                # again and finishes with the right digest, or without one.
+                self._restart(upload, part)
+                logger.info("upload %s failed its checksum and was restarted", upload.id)
+                raise UploadError(ERROR_CHECKSUM, received=upload.received)
 
-            final = self._folder(upload.id) / upload.name
-            try:
-                if os.path.lexists(final):
-                    raise UploadError(ERROR_STORAGE)
-                os.replace(part, final)
-                self._private_file(final)
-            except UploadError:
-                raise
-            except OSError:
-                raise UploadError(ERROR_STORAGE)
+            final = self._place(part, upload)
             upload.sha256 = digest
             upload.state = STATE_FINISHED
             upload.finished_at = self._clock()
             upload.updated_at = upload.finished_at
             upload.hasher = None
-            self._write_meta(upload)
+            try:
+                self._write_meta(upload)
+            except OSError:
+                # The bookkeeping could not be saved. Put the file back so the
+                # upload is still consistent and the client can try again.
+                upload.state = STATE_RECEIVING
+                upload.sha256 = None
+                upload.finished_at = None
+                try:
+                    os.replace(final, part)
+                except OSError:
+                    # The file is in place and usable, only its record is
+                    # stale. Report success rather than a broken state.
+                    upload.state = STATE_FINISHED
+                    upload.sha256 = digest
+                    upload.finished_at = upload.updated_at
+                    logger.warning("upload %s finished but its record could not be saved", upload.id)
+                else:
+                    raise UploadError(ERROR_STORAGE)
+            with self._lock:
+                self._active.pop(upload.id, None)
             logger.info("upload %s finished, %d bytes", upload.id, upload.size)
             return self._finished_body(upload)
 
@@ -407,15 +454,25 @@ class UploadManager:
         removed = 0
         with self._lock:
             snapshot = list(self._uploads.values())
+        protected: Optional[set] = None
+        looked = False
         for upload in snapshot:
-            if upload.state == STATE_RECEIVING:
-                expired = now - upload.updated_at >= idle
-            else:
-                expired = now - (upload.finished_at or upload.updated_at) >= keep
-            if expired:
-                with upload.lock:
-                    self._remove(upload)
-                removed += 1
+            if not self._expired(upload, now, idle, keep):
+                continue
+            if upload.state == STATE_FINISHED:
+                # A finished file that a task still lists is kept. When the
+                # list cannot be read, no finished file is deleted this pass.
+                if not looked:
+                    protected, looked = self._protected_paths(), True
+                if protected is None or self._path_key(self._folder(upload.id) / upload.name) in protected:
+                    continue
+            with upload.lock:
+                # A chunk can land between the check above and this lock, so
+                # the upload is judged again before anything is deleted.
+                if upload.state == STATE_REMOVED or not self._expired(upload, now, idle, keep):
+                    continue
+                self._remove(upload)
+            removed += 1
         removed += self._remove_strays(now, idle)
         if removed:
             logger.info("upload cleanup removed %d folders", removed)
@@ -423,14 +480,11 @@ class UploadManager:
 
     def storage_used(self) -> int:
         with self._lock:
-            return sum(u.size for u in self._uploads.values())
+            return self._committed
 
     def active_count(self, owner: Optional[str] = None) -> int:
         with self._lock:
-            return sum(
-                1 for u in self._uploads.values()
-                if u.state == STATE_RECEIVING and (owner is None or u.owner == owner)
-            )
+            return sum(1 for u in self._active.values() if owner is None or u.owner == owner)
 
     # ----------------- Internals -----------------
 
@@ -564,8 +618,84 @@ class UploadManager:
     def _remove(self, upload: _Upload) -> None:
         upload.state = STATE_REMOVED
         with self._lock:
-            self._uploads.pop(upload.id, None)
+            self._unregister(upload)
         self._delete_folder(self._folder(upload.id))
+
+    def _register(self, upload: _Upload) -> None:
+        """Add an upload to the registry and the running totals."""
+        self._uploads[upload.id] = upload
+        self._committed += _accounted(upload.size)
+        if upload.state == STATE_RECEIVING:
+            self._active[upload.id] = upload
+
+    def _unregister(self, upload: _Upload) -> None:
+        if self._uploads.pop(upload.id, None) is not None:
+            self._committed -= _accounted(upload.size)
+        self._active.pop(upload.id, None)
+
+    def _clean_name(self, raw: Any) -> str:
+        """The stored name: safe, and short enough that the whole path
+        <root>/<id>/<name> stays inside the limit of a Windows path."""
+        room = max(MIN_NAME_BYTES, 240 - len(str(self.root)) - 34)
+        return sanitise_filename(raw, min(MAX_NAME_BYTES, room))
+
+    def _place(self, part: Path, upload: _Upload) -> Path:
+        """Move the finished bytes to their visible name and return that path.
+
+        A path the system refuses, because it is too long or otherwise, falls
+        back to a short name, so finishing never fails over a name.
+        """
+        folder = self._folder(upload.id)
+        extension = ""
+        stem, dot, tail = upload.name.rpartition(".")
+        if dot and stem and len(tail) <= MAX_EXTENSION_CHARS:
+            extension = "." + tail
+        for name in dict.fromkeys((upload.name, FALLBACK_NAME + extension, FALLBACK_NAME)):
+            final = folder / name
+            try:
+                if os.path.lexists(final):
+                    continue
+                os.replace(part, final)
+            except OSError:
+                continue
+            self._private_file(final)
+            upload.name = name
+            return final
+        raise UploadError(ERROR_STORAGE)
+
+    def _restart(self, upload: _Upload, part: Path) -> None:
+        """Throw away the bytes held so far and start again at offset 0."""
+        try:
+            fd = os.open(part, os.O_WRONLY | os.O_TRUNC | _O_BINARY | getattr(os, "O_NOFOLLOW", 0))
+            os.close(fd)
+            upload.received = 0
+        except OSError:
+            try:
+                upload.received = part.stat().st_size
+            except OSError:
+                upload.received = 0
+        upload.hasher = hashlib.sha256() if upload.received == 0 else None
+        upload.last_chunk = None
+        upload.updated_at = self._clock()
+
+    def _expired(self, upload: _Upload, now: float, idle: float, keep: float) -> bool:
+        if upload.state == STATE_RECEIVING:
+            return now - upload.updated_at >= idle
+        return now - (upload.finished_at or upload.updated_at) >= keep
+
+    @staticmethod
+    def _path_key(path: Any) -> str:
+        return os.path.normcase(os.path.realpath(str(path)))
+
+    def _protected_paths(self) -> Optional[set]:
+        """The real paths tasks still list, or None when that cannot be read."""
+        if self._in_use is None:
+            return set()
+        try:
+            return {self._path_key(entry) for entry in self._in_use() if isinstance(entry, str) and entry}
+        except Exception as exc:
+            logger.warning("upload cleanup could not read the files tasks use: %s", exc)
+            return None
 
     def _delete_folder(self, folder: Path) -> None:
         """Delete one upload folder. Refuses anything that is not a real folder
@@ -611,7 +741,7 @@ class UploadManager:
                 continue
             upload = self._read_upload(entry)
             if upload is not None:
-                self._uploads[upload.id] = upload
+                self._register(upload)
 
     def _read_upload(self, folder: Path) -> Optional[_Upload]:
         try:

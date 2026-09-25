@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
-from .local_only import PAIRING_PREFIX, pairing_request_allowed, refuse_pairing_request
+from .local_only import PAIRING_PREFIX, local_browser_request, pairing_request_allowed, refuse_pairing_request
 from .routes import router as api_router
 from .upload_routes import router as upload_router
 from ..core.engine import RelayEngine
@@ -88,14 +88,11 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
             path = request.url.path
             if path.startswith("/api") and not path.startswith("/api/mobile/pairing"):
                 client_ip = request.client.host if request.client else "127.0.0.1"
-                # Allow unauthenticated access only for local browser same-origin sessions (not programmatic API clients/tests)
-                is_local_browser = (
-                    client_ip in ("127.0.0.1", "::1", "localhost")
-                    and (
-                        request.headers.get("Sec-Fetch-Site") == "same-origin"
-                        or request.headers.get("Referer", "").startswith(("http://localhost:", "http://127.0.0.1:", "http://[::1]:"))
-                    )
-                )
+                # Allow unauthenticated access only for the hub's own dashboard
+                # on this computer: a loopback client, this hub's own Host and
+                # port, and a same-origin sign. Not programmatic API clients,
+                # and not a DNS-rebound page or a page on another local port.
+                is_local_browser = local_browser_request(request, port)
                 if not is_local_browser:
                     from ..core.pairing import check_auth_rate_limit, record_failed_auth, reset_auth_rate_limit
 
@@ -157,14 +154,20 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
     # Phone uploads. A configuration the hub cannot act on turns them off,
     # because a write path is never left on by guesswork.
     upload_manager = None
-    if _env_switch(UPLOADS_ENV) and config.uploads_enabled and config.is_valid:
-        try:
-            upload_manager = UploadManager(
-                resolve_uploads_dir(config.uploads_dir, db.db_path),
-                UploadLimits.from_config(config),
-            )
-        except OSError as exc:
-            logger.warning("uploads are off: the uploads folder is not usable: %s", exc)
+    upload_janitor = None
+    uploads_folder = resolve_uploads_dir(config.uploads_dir, db.db_path)
+    upload_limits = UploadLimits.from_config(config) if config.is_valid else UploadLimits()
+    try:
+        if _env_switch(UPLOADS_ENV) and config.uploads_enabled and config.is_valid:
+            upload_manager = UploadManager(uploads_folder, upload_limits, in_use=db.list_task_file_paths)
+        elif os.path.isdir(uploads_folder):
+            # Uploads are off, but files an earlier run stored are still on
+            # disk. A manager that is never reachable from a route still clears
+            # away the expired ones. It creates nothing.
+            upload_janitor = UploadManager(uploads_folder, upload_limits, in_use=db.list_task_file_paths)
+    except OSError as exc:
+        logger.warning("uploads are off: the uploads folder is not usable: %s", exc)
+    upload_cleaner = upload_manager or upload_janitor
     iroh_uploads_enabled = (
         upload_manager is not None and _env_switch(IROH_UPLOADS_ENV) and config.iroh_uploads_enabled
     )
@@ -240,13 +243,13 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
 
     @app.on_event("startup")
     async def _start_upload_cleanup():
-        if upload_manager is None:
+        if upload_cleaner is None:
             return
 
         async def loop_forever():
             while True:
                 try:
-                    await asyncio.to_thread(upload_manager.cleanup)
+                    await asyncio.to_thread(upload_cleaner.cleanup)
                 except Exception as exc:
                     logger.warning("upload cleanup failed: %s", exc)
                 await asyncio.sleep(UPLOAD_CLEANUP_SECONDS)

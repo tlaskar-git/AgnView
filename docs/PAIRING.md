@@ -224,6 +224,9 @@ Creating and deleting a pipeline over iroh:
   through the allowlist. Otherwise the answer is 422 with detail
   `invalid_job_id` or `invalid_task_id`. Leave the job `id` out and the hub
   picks one. The LAN accepts any id, as before.
+- A create over iroh never replaces anything. A job `id` that exists, or a task
+  `id` that exists in any job, gets status 409 with detail `duplicate_id` and
+  nothing is saved. The LAN keeps replacing a job with the same id.
 - Each task's `model` and `effort` are checked against the lists in
   `GET /api/system/capabilities` for the task's agent (422 when unknown), and
   each entry in `files` must be an upload path or a listed file (422
@@ -265,9 +268,14 @@ on both transports:
    answers `{"upload_id", "path", "name", "size", "sha256"}`. `path` is the
    absolute path on the hub that `files` in dispatch and in pipeline tasks
    accept. It answers 409 `incomplete` when `received` is below `size`, and
-   422 `checksum_mismatch` when the digest differs, and in both cases the
-   upload stays open. Calling it again on a finished upload gives the same
-   answer.
+   the upload stays open. It answers 422 `checksum_mismatch` when the digest
+   differs. The hub then throws the bytes away and restarts the upload at
+   offset 0 (the body carries `received: 0`), so the client sends the file
+   again and finishes with the right digest, or without one. Calling finish
+   again on a finished upload gives the same answer. A refusal to save the
+   upload's record answers 500 `storage_error` and leaves the upload open, so
+   finish can be tried again. Uploads are limited to `uploads_max_files`
+   (default 500) at once: a create beyond it gets 507 `too_many_files`.
 5. `DELETE /api/uploads/{upload_id}` cancels an upload and deletes what was
    stored.
 
@@ -327,6 +335,11 @@ and it ends the request. An error before `hello` also closes the connection.
 - Anyone who holds the pairing key can run the enabled agents on this
   computer, which amounts to remote code execution. Keep the key private and
   regenerate it if it leaks.
+- A dispatch over iroh checks `model` and `effort` against the agent's lists in
+  `GET /api/system/capabilities`, as a task does (`auto` and `default` are
+  always accepted), and refuses an unknown value, or a value for an agent
+  with no list, with 422. It accepts at most 32 `files`, else 422
+  `too_many_files`. The LAN is not affected.
 - A dispatch over iroh reaches only the named built-in agents and the enabled
   adapters. Any other `agent` gets status 422 with detail `unknown_agent`, and
   the generic shell runner is never reached. `working_directory` must be an

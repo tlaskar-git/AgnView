@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import threading
 import uuid
 from typing import Dict, List, Optional, Any, Set
 from pathlib import Path
@@ -47,6 +48,10 @@ class NotFoundError(Exception):
     pass
 
 
+class DuplicateIdError(ValueError):
+    """A job or task id that already exists, refused when replacing is not allowed."""
+
+
 class RelayEngine:
     def __init__(self, db: Optional[Database] = None, port: int = 8765, agents_file: Optional[Path] = None):
         self.db = db or Database()
@@ -56,6 +61,9 @@ class RelayEngine:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self.runner = AgentRunner(self.db, broadcast_callback=self.broadcast_event, adapter_manager=self.adapter_manager)
         self.notification_manager = NotificationManager()
+        # Makes "is this id taken" and "save it" one step, so two creates that
+        # race cannot both pass the check.
+        self._create_lock = threading.Lock()
 
     def bind_loop(self, loop: Optional[asyncio.AbstractEventLoop] = None) -> None:
         """Remember the serving event loop.
@@ -192,7 +200,16 @@ class RelayEngine:
         self._fanout(event_data)
 
     # Job Management
-    def create_job(self, req: CreateJobRequest) -> Job:
+    def create_job(self, req: CreateJobRequest, allow_replace: bool = True) -> Job:
+        """Create a job. The database saves by id, so a job or task id that
+        already exists is replaced, which the dashboard relies on. With
+        allow_replace False such an id raises DuplicateIdError and nothing is
+        saved, so a caller cannot overwrite or take over an existing job or
+        task."""
+        with self._create_lock:
+            return self._create_job(req, allow_replace)
+
+    def _create_job(self, req: CreateJobRequest, allow_replace: bool) -> Job:
         job_id = req.id or f"job-{uuid.uuid4().hex[:8]}"
         now = _get_utc_now_iso()
 
@@ -246,6 +263,13 @@ class RelayEngine:
 
         for t in req.tasks:
             validate_task_options(t.id, t.assigned_agent, t.model, t.effort)
+
+        if not allow_replace:
+            if self.db.get_job(job_id) is not None:
+                raise DuplicateIdError(f"Job '{job_id}' already exists.")
+            for t in req.tasks:
+                if self.db.get_task(t.id) is not None:
+                    raise DuplicateIdError(f"Task '{t.id}' already exists.")
 
         job = Job(
             id=job_id,

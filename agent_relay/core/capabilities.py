@@ -105,21 +105,27 @@ def provider_for_agent(agent: str) -> Optional[str]:
 
 
 def validate_task_options(
-    task_id: str, agent: str, model: Optional[str], effort: Optional[str]
+    task_id: str,
+    agent: str,
+    model: Optional[str],
+    effort: Optional[str],
+    subject: Optional[str] = None,
 ) -> None:
     """Raise TaskOptionError unless model and effort are on the agent's lists.
 
     An agent with no list (a custom adapter, a web LLM) accepts neither, since
-    there is nothing to check the value against.
+    there is nothing to check the value against. `subject` names what is being
+    checked in the message and defaults to the task.
     """
     if model is None and effort is None:
         return
+    label = subject or f"Task '{task_id}'"
     provider = provider_for_agent(agent)
     if model is not None:
         allowed = {m["id"] for m in MODELS.get(provider or "", [])} | NEUTRAL_MODELS
         if provider is None or model not in allowed:
-            raise TaskOptionError(f"Task '{task_id}' asks for model '{model[:64]}', which agent '{agent}' does not offer.")
+            raise TaskOptionError(f"{label} asks for model '{model[:64]}', which agent '{agent}' does not offer.")
     if effort is not None:
         allowed = {e["id"] for e in EFFORTS_BY_PROVIDER.get(provider or "", [])} | NEUTRAL_EFFORTS
         if provider is None or effort not in allowed:
-            raise TaskOptionError(f"Task '{task_id}' asks for effort '{effort[:64]}', which agent '{agent}' does not offer.")
+            raise TaskOptionError(f"{label} asks for effort '{effort[:64]}', which agent '{agent}' does not offer.")

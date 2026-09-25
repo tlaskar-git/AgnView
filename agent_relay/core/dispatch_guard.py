@@ -90,6 +90,11 @@ def check_working_directory(working_directory: Optional[str], roots: Iterable[st
 
 
 ERROR_FORBIDDEN_FILE = "forbidden_file"
+ERROR_TOO_MANY_FILES = "too_many_files"
+
+# The most files one dispatch or one task may name. It matches the cap on a
+# task's files in the job models.
+MAX_FILES_PER_REQUEST = 32
 
 # What GET /api/system/files never lists: hidden files and folders, tool and
 # build folders, and these file types. A phone on iroh can attach a project
@@ -185,5 +190,7 @@ def check_files(
         return None
     if not isinstance(files, list):
         raise DispatchRefused(ERROR_FORBIDDEN_FILE)
+    if len(files) > MAX_FILES_PER_REQUEST:
+        raise DispatchRefused(ERROR_TOO_MANY_FILES)
     root_list = list(roots)
     return [_check_one_file(entry, working_directory, root_list, uploads_root) for entry in files]

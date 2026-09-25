@@ -313,7 +313,8 @@
             "description": "Job created. Each task carries model, effort and files, null when not set. Over iroh the whole request, key included, must fit in 64 KiB, else the error frame too_large."
           },
           "400": { "description": "The job is malformed" },
-          "422": { "description": "A task asks for a model or effort its agent does not offer, or (over iroh) a file it may not name (forbidden_file) or a job or task id that could not be addressed again (invalid_job_id, invalid_task_id)" }
+          "422": { "description": "A task asks for a model or effort its agent does not offer, or (over iroh) a file it may not name (forbidden_file) or a job or task id that could not be addressed again (invalid_job_id, invalid_task_id)" },
+          "409": { "description": "Over iroh only: a job id or task id already exists (duplicate_id). Nothing is saved. The LAN replaces a job with the same id." }
         }
       }
     },
@@ -416,7 +417,7 @@
           "413": { "description": "too_large" },
           "422": { "description": "invalid_name, for example a Windows device name" },
           "429": { "description": "too_many_uploads or rate_limited" },
-          "507": { "description": "quota_exceeded or insufficient_storage" }
+          "507": { "description": "quota_exceeded, insufficient_storage or too_many_files (uploads_max_files, default 500)" }
         }
       }
     },
@@ -484,7 +485,8 @@
             }
           },
           "409": { "description": "incomplete: received is less than size" },
-          "422": { "description": "checksum_mismatch" }
+          "422": { "description": "checksum_mismatch. The bytes are discarded and the upload restarts at offset 0 (body carries received: 0). Send the file again and finish with the right sha256 or none." },
+          "500": { "description": "storage_error. The record could not be saved. The upload stays open, try again." }
         }
       }
     },

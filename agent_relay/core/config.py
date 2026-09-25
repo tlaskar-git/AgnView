@@ -38,6 +38,7 @@ UPLOAD_LIMIT_KEYS = (
     "uploads_max_concurrent",
     "uploads_idle_expiry_seconds",
     "uploads_retention_days",
+    "uploads_max_files",
 )
 
 DEFAULT_CONFIG_TEMPLATE = """# AgnView hub configuration.
@@ -85,6 +86,10 @@ uploads_max_per_peer: 2
 uploads_max_concurrent: 4
 uploads_idle_expiry_seconds: 3600
 uploads_retention_days: 14
+
+# uploads_max_files: the most uploads kept at once, finished and unfinished. Each
+# also counts for at least 4096 bytes against uploads_max_total_bytes.
+uploads_max_files: 500
 """
 
 
@@ -110,6 +115,7 @@ class HubConfig:
     uploads_max_concurrent: int = 4
     uploads_idle_expiry_seconds: int = 3600
     uploads_retention_days: int = 14
+    uploads_max_files: int = 500
     path: Optional[Path] = None
     errors: List[str] = field(default_factory=list)
 
@@ -134,6 +140,7 @@ class HubConfig:
             "uploads_max_concurrent": self.uploads_max_concurrent,
             "uploads_idle_expiry_seconds": self.uploads_idle_expiry_seconds,
             "uploads_retention_days": self.uploads_retention_days,
+            "uploads_max_files": self.uploads_max_files,
             "errors": list(self.errors),
         }
 

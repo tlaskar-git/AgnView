@@ -14,7 +14,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from sse_starlette.sse import EventSourceResponse
 
 from ..core.engine import (
-    RelayEngine, NotFoundError, InvalidStateError, DependencyCycleError
+    RelayEngine, NotFoundError, InvalidStateError, DependencyCycleError, DuplicateIdError
 )
 from ..core.models import (
     Job, Task, CreateJobRequest, ClaimTaskRequest,
@@ -58,7 +58,7 @@ from ..core.cli_path import which_any
 from ..core.config import ConfigError, DEFAULT_CONFIG_TEMPLATE, get_config_path, validate_relay_url
 from ..core.iroh_transport import IrohTransport
 from ..core import dispatch_guard, iroh_api
-from ..core.capabilities import EFFORTS_BY_PROVIDER, MODELS, TaskOptionError
+from ..core.capabilities import EFFORTS_BY_PROVIDER, MODELS, TaskOptionError, validate_task_options
 
 router = APIRouter(prefix="/api")
 
@@ -133,9 +133,13 @@ def create_job(req: CreateJobRequest, request: Request):
         except dispatch_guard.DispatchRefused as refused:
             raise HTTPException(status_code=422, detail=refused.detail)
     try:
-        return engine.create_job(req)
+        # A phone on iroh may not replace or take over an existing job or task.
+        # The dashboard on the LAN keeps replacing a job with the same id.
+        return engine.create_job(req, allow_replace=not dispatch_guard.is_iroh_request(request))
     except TaskOptionError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    except DuplicateIdError:
+        raise HTTPException(status_code=409, detail="duplicate_id")
     except (ValueError, DependencyCycleError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -982,8 +986,15 @@ async def dispatch_console_command(payload: ConsoleDispatchPayload, request: Req
                 payload.files, working_directory, roots,
                 getattr(request.app.state, "uploads_dir", None),
             )
+            # Model and effort must be ones the agent offers, as for a task.
+            validate_task_options(
+                "dispatch", payload.agent, payload.model or None, payload.effort or None,
+                subject="Dispatch",
+            )
         except dispatch_guard.DispatchRefused as refused:
             raise HTTPException(status_code=422, detail=refused.detail)
+        except TaskOptionError as invalid:
+            raise HTTPException(status_code=422, detail=str(invalid))
 
     # session_id groups messages in the UI. The client sends back the id it
     # already holds for this target, so a follow-up message stays in the same
