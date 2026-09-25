@@ -199,8 +199,8 @@ def test_anything_off_the_allowlist_is_forbidden(target):
 
 
 @pytest.mark.parametrize("method,target", [
-    ("POST", "/api/jobs"),
-    ("DELETE", "/api/jobs/job-1"),
+    ("PUT", "/api/jobs"),
+    ("POST", "/api/jobs/job-1"),
     ("GET", "/api/console/dispatch"),
     ("PUT", "/api/usage/accounts"),
     ("get", "/api/jobs"),

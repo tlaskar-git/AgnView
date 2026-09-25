@@ -199,6 +199,8 @@ Allowlist. Everything else is refused with `forbidden_path`:
 | POST | `/api/console/dispatch` | none |
 | POST | `/api/tasks/{id}/request-revision` | none |
 | POST | `/api/tasks/{id}/fail` | none |
+| POST | `/api/jobs` | none |
+| DELETE | `/api/jobs/{id}` | none |
 | POST | `/api/uploads` | none |
 | GET | `/api/uploads/{upload_id}` | none |
 | POST | `/api/uploads/{upload_id}/finish` | none |
@@ -208,6 +210,33 @@ Allowlist. Everything else is refused with `forbidden_path`:
 mints. Anything else on these routes is refused with `forbidden_path`, and so
 is `PUT /api/uploads/{upload_id}`: chunks go in the `upload_chunk` op below.
 `GET` and `DELETE` take no body.
+
+Creating and deleting a pipeline over iroh:
+
+- `POST /api/jobs` takes the same body as on the LAN. It is the request line,
+  so the whole request, key included, must fit in 64 KiB. A larger pipeline
+  gets the error frame `too_large` before `hello`, the connection is closed,
+  and nothing is created. The hub is not affected. A phone splits a very
+  large pipeline into several smaller ones. As a guide, 64 KiB holds about 60
+  tasks with 1 KiB descriptions, or several hundred with short ones.
+- An `id` the phone picks for the job, and every task `id`, must have the
+  shape of `{id}` below, so the phone can always fetch or delete it again
+  through the allowlist. Otherwise the answer is 422 with detail
+  `invalid_job_id` or `invalid_task_id`. Leave the job `id` out and the hub
+  picks one. The LAN accepts any id, as before.
+- Each task's `model` and `effort` are checked against the lists in
+  `GET /api/system/capabilities` for the task's agent (422 when unknown), and
+  each entry in `files` must be an upload path or a listed file (422
+  `forbidden_file`), exactly as for a dispatch. Nothing is created when any
+  task is refused.
+- `model` and `effort` on a task are advisory text. The hub stores them and
+  delivers them to the agent that claims the task, in the Run Options section
+  of the task prompt and in the MCP claim reply. The hub does not launch the
+  agent, so it does not enforce them.
+- `DELETE /api/jobs/{id}` answers 200 when the job existed and a 404
+  `response` when it did not. It takes no body.
+- Both calls pass the same key check, per-peer limiter and API limits as
+  every other call.
 
 `{id}` is one path segment of letters, digits, `_`, `-` and `.`, up to 128
 characters, not starting with a dot. A path with `..`, `//`, a backslash,

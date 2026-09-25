@@ -57,7 +57,7 @@ from ..core import autostart, cli_path
 from ..core.cli_path import which_any
 from ..core.config import ConfigError, DEFAULT_CONFIG_TEMPLATE, get_config_path, validate_relay_url
 from ..core.iroh_transport import IrohTransport
-from ..core import dispatch_guard
+from ..core import dispatch_guard, iroh_api
 from ..core.capabilities import EFFORTS_BY_PROVIDER, MODELS, TaskOptionError
 
 router = APIRouter(prefix="/api")
@@ -121,6 +121,12 @@ def create_job(req: CreateJobRequest, request: Request):
         config = getattr(request.app.state, "config", None)
         roots = getattr(config, "iroh_dispatch_roots", []) or []
         uploads_root = getattr(request.app.state, "uploads_dir", None)
+        # An id the phone chooses must be one it can name again on the
+        # allowlisted GET and DELETE routes.
+        if req.id is not None and not iroh_api.ID_SEGMENT.fullmatch(req.id):
+            raise HTTPException(status_code=422, detail="invalid_job_id")
+        if any(not iroh_api.ID_SEGMENT.fullmatch(spec.id) for spec in req.tasks):
+            raise HTTPException(status_code=422, detail="invalid_task_id")
         try:
             for spec in req.tasks:
                 spec.files = dispatch_guard.check_files(spec.files, None, roots, uploads_root)

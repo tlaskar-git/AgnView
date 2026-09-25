@@ -39,6 +39,10 @@ API_ALLOWLIST: Tuple[Tuple[str, str, bool], ...] = (
     ("POST", "/api/console/dispatch", False),
     ("POST", "/api/tasks/{id}/request-revision", False),
     ("POST", "/api/tasks/{id}/fail", False),
+    # Create and delete a pipeline. The body of a create is the request line,
+    # so a job over 64 KiB is refused with too_large before anything runs.
+    ("POST", "/api/jobs", False),
+    ("DELETE", "/api/jobs/{id}", False),
     # Phone uploads. {upload_id} is exactly 32 lowercase hex characters, the
     # form the hub mints, so nothing else reaches the upload routes. The bytes
     # travel in the upload_chunk op below, never in an API body.
@@ -91,6 +95,9 @@ ERROR_RATE_LIMITED = "rate_limited"
 ERROR_UPSTREAM = "upstream_error"
 
 _SEGMENT = r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}"
+# The shape of a job or task id a phone may create, so that it can always be
+# addressed again through the allowlisted routes above.
+ID_SEGMENT = re.compile(_SEGMENT)
 _PATH_CHARS = re.compile(r"[A-Za-z0-9/._-]+")
 _QUERY_CHARS = re.compile(r"[A-Za-z0-9._~=&@:-]*")
 

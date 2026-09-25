@@ -126,8 +126,11 @@ Phone features the hub now serves, on the LAN and over iroh:
   `GET /api/system/capabilities`, and files follow the same rule as a
   dispatch. The task prompt, the task's API record and the MCP claim reply
   all carry them. The hub does not launch an agent for a pipeline task: the
-  agent that claims the task reads the options. `POST /api/jobs` is not on the
-  iroh allowlist, so a phone creates a job over the LAN only.
+  agent that claims the task reads the options, so `model` and `effort` are
+  advisory and not enforced. A phone can create (`POST /api/jobs`) and delete
+  (`DELETE /api/jobs/{id}`) a pipeline over the LAN and over iroh. Over iroh
+  the job must fit in one 64 KiB request, and its file, model, effort and id
+  rules are in `docs/PAIRING.md` section 5.
 
 The Windows desktop app has an Allow phones on my network setting, in the
 tray menu and on the pairing screen, off by default. Off, it listens on

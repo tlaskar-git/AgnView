@@ -36,6 +36,14 @@ curl http://127.0.0.1:8765/api/transport
 
 Over iroh a paired phone gets the live console and the parts of the mobile API it needs: status, Usage, Pipelines, Sessions, prompt dispatch and file uploads (section 6). Every call passes the same pairing key check and rate limit as on the LAN, and only an allowlist of routes answers. `docs/PAIRING.md` section 5 has the protocol. Anyone who holds the pairing key can run the enabled agents on this computer, which amounts to remote code execution. Keep the key private and regenerate it if it leaks. To confine phone dispatches to certain folders, set `iroh_dispatch_roots` in `~/.agnview/config.yaml`. Keep iroh on but serve only the console with `AGNVIEW_IROH_API=0`, or with `iroh_api_enabled: false` in `~/.agnview/config.yaml`.
 
+**Pipelines from the phone.** Over iroh a paired phone can also create a pipeline (`POST /api/jobs`) and delete one (`DELETE /api/jobs/{id}`). Both pass the same pairing key check, per-peer limiter and API limits as every other call.
+
+- A job over iroh must fit in one request of 64 KiB, key included. A larger one gets the error `too_large`, nothing is created and the hub carries on. Split a very large pipeline into smaller ones.
+- Ids the phone chooses for a job or a task must be up to 128 letters, digits, `_`, `-` and `.`, not starting with a dot, so the phone can address them again. The LAN accepts any id, as before.
+- Each task's `files` must be an upload path or a file the project listing would show (inside `iroh_dispatch_roots` when a task has no folder), else 422 `forbidden_file`. Each task's `model` and `effort` must be on the assigned agent's list in `GET /api/system/capabilities`, else 422.
+- **Pipeline task `model` and `effort` are advisory text, not enforced.** AgnView does not launch agents for pipeline tasks. The agent that claims a task reads the values in the Run Options section of the task prompt and in the MCP claim reply, and can ignore them. Only a console dispatch, which the hub does launch, applies `model` and `effort` itself.
+- Creating a pipeline does not start an agent. A created pipeline stays on the hub until it is deleted.
+
 ---
 
 ## 3. What this depends on

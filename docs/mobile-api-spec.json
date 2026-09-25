@@ -34,6 +34,8 @@
       "POST /api/console/dispatch",
       "POST /api/tasks/{id}/request-revision",
       "POST /api/tasks/{id}/fail",
+      "POST /api/jobs",
+      "DELETE /api/jobs/{id}",
       "POST /api/uploads",
       "GET /api/uploads/{upload_id}",
       "POST /api/uploads/{upload_id}/finish",
@@ -145,8 +147,8 @@
             "items": { "type": "string" }
           },
           "output_summary": { "type": "string", "nullable": true },
-          "model": { "type": "string", "nullable": true, "description": "Model the task asks for. Must be on the assigned agent's list in GET /api/system/capabilities, or auto." },
-          "effort": { "type": "string", "nullable": true, "description": "Effort the task asks for. Must be on the assigned agent's list in GET /api/system/capabilities, or default." },
+          "model": { "type": "string", "nullable": true, "description": "Advisory: delivered to the agent that claims the task, not enforced by the hub. Must be on the assigned agent's list in GET /api/system/capabilities, or auto." },
+          "effort": { "type": "string", "nullable": true, "description": "Advisory: delivered to the agent that claims the task, not enforced by the hub. Must be on the assigned agent's list in GET /api/system/capabilities, or default." },
           "files": { "type": "array", "nullable": true, "maxItems": 32, "items": { "type": "string", "maxLength": 1024 }, "description": "Files for the agent to read. Over iroh each must be an upload path from /api/uploads or a file under an iroh_dispatch_roots folder, else 422 forbidden_file." }
         }
       },
@@ -159,8 +161,8 @@
           "description": { "type": "string" },
           "assigned_agent": { "type": "string" },
           "dependencies": { "type": "array", "items": { "type": "string" } },
-          "model": { "type": "string", "nullable": true, "description": "Model the task asks for. Must be on the assigned agent's list in GET /api/system/capabilities, or auto." },
-          "effort": { "type": "string", "nullable": true, "description": "Effort the task asks for. Must be on the assigned agent's list in GET /api/system/capabilities, or default." },
+          "model": { "type": "string", "nullable": true, "description": "Advisory: delivered to the agent that claims the task, not enforced by the hub. Must be on the assigned agent's list in GET /api/system/capabilities, or auto." },
+          "effort": { "type": "string", "nullable": true, "description": "Advisory: delivered to the agent that claims the task, not enforced by the hub. Must be on the assigned agent's list in GET /api/system/capabilities, or default." },
           "files": { "type": "array", "nullable": true, "maxItems": 32, "items": { "type": "string", "maxLength": 1024 }, "description": "Files for the agent to read. Over iroh each must be an upload path from /api/uploads or a file under an iroh_dispatch_roots folder, else 422 forbidden_file." }
         }
       },
@@ -308,10 +310,10 @@
         },
         "responses": {
           "200": {
-            "description": "Job created. Each task carries model, effort and files, null when not set."
+            "description": "Job created. Each task carries model, effort and files, null when not set. Over iroh the whole request, key included, must fit in 64 KiB, else the error frame too_large."
           },
           "400": { "description": "The job is malformed" },
-          "422": { "description": "A task asks for a model or effort its agent does not offer, or (over iroh) a file it may not name" }
+          "422": { "description": "A task asks for a model or effort its agent does not offer, or (over iroh) a file it may not name (forbidden_file) or a job or task id that could not be addressed again (invalid_job_id, invalid_task_id)" }
         }
       }
     },
@@ -355,6 +357,22 @@
               }
             }
           }
+        }
+      }
+    },
+    "/api/jobs/{job_id}": {
+      "get": {
+        "summary": "One pipeline with its tasks",
+        "responses": {
+          "200": { "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Job" } } } },
+          "404": { "description": "Job not found" }
+        }
+      },
+      "delete": {
+        "summary": "Delete a pipeline. Allowed over iroh.",
+        "responses": {
+          "200": { "description": "Job deleted" },
+          "404": { "description": "Job not found" }
         }
       }
     },
