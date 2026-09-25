@@ -23,11 +23,26 @@ logger = logging.getLogger(__name__)
 IROH_ENV = "AGNVIEW_IROH"
 
 
-def _iroh_enabled_from_env() -> bool:
-    value = os.environ.get(IROH_ENV)
+# Set AGNVIEW_IROH_API=0 to serve only the live console over iroh. The mobile
+# API over iroh is on whenever iroh is, gated by the same pairing key as the
+# LAN. The Allow phones on my network switch does not govern it: that switch
+# only picks the LAN address, and iroh never depended on it.
+IROH_API_ENV = "AGNVIEW_IROH_API"
+
+
+def _env_switch(name: str) -> bool:
+    value = os.environ.get(name)
     if value is None:
         return True
     return value.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _iroh_enabled_from_env() -> bool:
+    return _env_switch(IROH_ENV)
+
+
+def _iroh_api_enabled_from_env() -> bool:
+    return _env_switch(IROH_API_ENV)
 
 
 def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, port: int = 8765) -> FastAPI:
@@ -128,6 +143,8 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
         relay_url=config.relay_url,
         enabled=iroh_enabled,
         disabled_reason=disabled_reason,
+        asgi_app=app,
+        api_enabled=_iroh_api_enabled_from_env() and config.iroh_api_enabled,
     )
     app.state.iroh = iroh_transport
 

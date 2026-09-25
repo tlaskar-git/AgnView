@@ -19,6 +19,31 @@
       "description": "Private Tailscale Mesh VPN (100.64.0.0/10 CGNAT)"
     }
   ],
+  "x-agnview-iroh": {
+    "description": "Away from the LAN, the same calls travel over iroh in API mode. Full protocol in docs/PAIRING.md section 5. Each request is one JSON object plus newline on its own bidirectional stream: {token, op: 'api', method, path, body}. The hub answers with a hello frame and then one {type: 'response', status, body} frame, where status and body are exactly what the HTTP route returns, or one {type: 'error', detail} frame.",
+    "alpn": "agnview/console/1",
+    "hello_capabilities": ["console", "api"],
+    "allowlist": [
+      "GET /api/mobile/status",
+      "GET /api/usage/accounts",
+      "GET /api/jobs",
+      "GET /api/jobs/{id}",
+      "GET /api/console/live-sessions",
+      "GET /api/console/logs?agent&limit&session_id&after_id",
+      "POST /api/console/dispatch",
+      "POST /api/tasks/{id}/request-revision",
+      "POST /api/tasks/{id}/fail"
+    ],
+    "error_codes": ["unauthorised", "forbidden_path", "bad_request", "too_large", "timeout", "rate_limited", "upstream_error"],
+    "limits": {
+      "request_bytes": 65536,
+      "response_body_bytes": 1048576,
+      "timeout_seconds": 30,
+      "streams_per_connection": 8,
+      "api_calls_per_connection": 4,
+      "api_calls_per_hub": 16
+    }
+  },
   "security": [
     {
       "AgnViewToken": []

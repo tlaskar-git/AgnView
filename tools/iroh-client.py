@@ -16,6 +16,15 @@ Give it whatever the hub handed you:
   # a bare ticket, with the token supplied separately
   python tools/iroh-client.py endpointa... --token <pairing token>
 
+  # one call to the mobile API instead of the console stream
+  python tools/iroh-client.py "agnview://pair?..." --api GET /api/usage/accounts
+  python tools/iroh-client.py "agnview://pair?..." --api POST /api/console/dispatch \\
+      --body '{"agent": "codex", "prompt": "run the tests"}'
+
+With --api the response body is printed to stdout as JSON. Over iroh the call
+uses API mode of the protocol in docs/PAIRING.md, so only the allowlisted
+routes answer.
+
 Connection order, as defined in docs/PAIRING.md:
 
   1. the LAN address, given 800ms to answer
@@ -33,7 +42,7 @@ import socket
 import sys
 import time
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # Keep these in step with agent_relay/core/network.py and
 # agent_relay/core/iroh_transport.py. This file runs standalone, so it does not
@@ -41,6 +50,8 @@ from typing import Any, Dict, Optional
 IROH_ALPN = b"agnview/console/1"
 LAN_CONNECT_TIMEOUT_SECONDS = 0.8
 LAN_POLL_SECONDS = 0.5
+# The hub gives one API call 30s over iroh. The LAN call gets the same budget.
+API_TIMEOUT_SECONDS = 30.0
 
 
 def log(message: str) -> None:
@@ -167,14 +178,35 @@ def stream_over_lan(lan: str, token: Optional[str], agent: str, backlog: int) ->
             time.sleep(LAN_POLL_SECONDS)
 
 
+def request_over_lan(lan: str, token: Optional[str], method: str, path: str, body: Any) -> int:
+    """Make one API call over the hub's HTTP API."""
+    try:
+        import httpx
+    except ImportError:
+        log("httpx is not installed, so the LAN rung is unavailable")
+        return 2
+
+    base = f"http://{lan}"
+    headers = {"X-AgnView-Token": token} if token else {}
+    log(f"resolved transport: lan ({base})")
+    with httpx.Client(timeout=API_TIMEOUT_SECONDS, headers=headers) as client:
+        response = client.request(method, f"{base}{path}", json=body if method != "GET" else None)
+    try:
+        value: Any = response.json()
+    except ValueError:
+        value = response.text
+    return print_response(response.status_code, value)
+
+
 # ----------------- Rungs 2 and 3: iroh -----------------
 
-async def stream_over_iroh(ticket: str, token: Optional[str], agent: str, backlog: int) -> int:
+async def _connect_iroh(ticket: str) -> Tuple[Any, Any]:
+    """Bind a client endpoint and connect it to the hub. (None, None) without iroh."""
     try:
         import iroh
     except ImportError:
         log("the iroh package is not installed, run: pip install iroh==1.1.0")
-        return 2
+        return None, None
 
     try:
         endpoint_ticket = iroh.EndpointTicket.from_string(ticket)
@@ -185,8 +217,65 @@ async def stream_over_iroh(ticket: str, token: Optional[str], agent: str, backlo
     endpoint = await iroh.Endpoint.bind(iroh.EndpointOptions(preset=iroh.preset_n0()))
     try:
         conn = await endpoint.connect(addr, IROH_ALPN)
-        log(f"resolved transport: {classify(conn)} (node {conn.remote_id().fmt_short()})")
+    except BaseException:
+        await endpoint.close()
+        raise
+    log(f"resolved transport: {classify(conn)} (node {conn.remote_id().fmt_short()})")
+    return endpoint, conn
 
+
+async def request_over_iroh(ticket: str, token: Optional[str], method: str, path: str, body: Any) -> int:
+    """Make one API call over iroh: one request in, hello and one response out."""
+    endpoint, conn = await _connect_iroh(ticket)
+    if endpoint is None:
+        return 2
+    try:
+        stream = await conn.open_bi()
+        send, recv = stream.send(), stream.recv()
+        request = {"token": token, "op": "api", "method": method, "path": path, "body": body}
+        await send.write_all((json.dumps(request) + "\n").encode("utf-8"))
+        await send.finish()
+
+        buffer = b""
+        while True:
+            chunk = await recv.read(64 * 1024)
+            if not chunk:
+                break
+            buffer += chunk
+
+        for line in buffer.split(b"\n"):
+            if not line.strip():
+                continue
+            frame = json.loads(line.decode("utf-8"))
+            kind = frame.get("type")
+            if kind == "hello":
+                capabilities = frame.get("capabilities") or ["console"]
+                log(f"connected to {frame.get('hostname')} over {frame.get('transport')}, "
+                    f"capabilities: {', '.join(capabilities)}")
+            elif kind == "response":
+                return print_response(int(frame.get("status") or 0), frame.get("body"))
+            elif kind == "error":
+                log(f"the hub refused the request: {frame.get('detail')}")
+                return 3
+        log("the hub ended the stream without a response")
+        return 3
+    finally:
+        conn.close(0, b"bye")
+        await endpoint.close()
+
+
+def print_response(status: int, body: Any) -> int:
+    """Print an API response body to stdout. Returns 0 for a 2xx status."""
+    log(f"HTTP status {status}")
+    print(json.dumps(body, indent=2), flush=True)
+    return 0 if 200 <= status < 300 else 5
+
+
+async def stream_over_iroh(ticket: str, token: Optional[str], agent: str, backlog: int) -> int:
+    endpoint, conn = await _connect_iroh(ticket)
+    if endpoint is None:
+        return 2
+    try:
         stream = await conn.open_bi()
         send, recv = stream.send(), stream.recv()
         request = {"token": token, "agent": agent, "backlog": backlog}
@@ -271,6 +360,13 @@ def main() -> int:
         default="auto",
         help="auto follows the documented connection order (default), the others force one rung"
     )
+    parser.add_argument(
+        "--api",
+        nargs=2,
+        metavar=("METHOD", "PATH"),
+        help="make one mobile API call, for example --api GET /api/jobs, instead of streaming the console"
+    )
+    parser.add_argument("--body", help="JSON request body for --api POST")
     args = parser.parse_args()
 
     source = parse_source(args.payload or args.source or "")
@@ -278,8 +374,21 @@ def main() -> int:
     ticket = source.get("ticket")
     lan = source.get("lan")
 
+    api_body: Any = None
+    if args.api:
+        args.api[0] = args.api[0].upper()
+        if args.body is not None:
+            try:
+                api_body = json.loads(args.body)
+            except json.JSONDecodeError as exc:
+                raise SystemExit(f"--body is not valid JSON: {exc}")
+    elif args.body is not None:
+        raise SystemExit("--body only goes with --api")
+
     if args.transport in ("auto", "lan"):
         if lan_reachable(lan):
+            if args.api:
+                return request_over_lan(lan, token, args.api[0], args.api[1], api_body)
             return stream_over_lan(lan, token, args.agent, args.backlog)
         if args.transport == "lan":
             log(f"the LAN address {lan} did not answer inside {LAN_CONNECT_TIMEOUT_SECONDS}s")
@@ -294,6 +403,8 @@ def main() -> int:
         return 4
 
     try:
+        if args.api:
+            return asyncio.run(request_over_iroh(ticket, token, args.api[0], args.api[1], api_body))
         return asyncio.run(stream_over_iroh(ticket, token, args.agent, args.backlog))
     except KeyboardInterrupt:
         return 0

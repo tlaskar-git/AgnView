@@ -1648,6 +1648,8 @@ async def set_relay_config(request: Request):
         relay_url=relay_url,
         enabled=was_enabled,
         disabled_reason="" if was_enabled else (old_status.get("error") or ""),
+        asgi_app=request.app,
+        api_enabled=old_transport.api_enabled if old_transport is not None else False,
     )
     if old_transport is not None:
         await old_transport.stop()
