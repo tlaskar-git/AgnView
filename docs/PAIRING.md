@@ -132,12 +132,14 @@ On an iroh rung it connects to the ticket's endpoint with the ALPN
 
 ```json
 {"type": "hello", "app": "AgnView", "protocol": 1, "hostname": "<machine name>",
- "transport": "iroh-direct", "capabilities": ["console", "api"]}
+ "transport": "iroh-direct", "capabilities": ["console", "api", "uploads"]}
 ```
 
 `capabilities` is new and optional. A hub from before API mode omits it,
 and a client treats a missing value as `["console"]`. A hub with API mode
-switched off sends `["console"]`.
+switched off sends `["console"]`. `uploads` is listed only when phone uploads
+over iroh are on (see "Upload mode" below). A hub with them off sends
+`["console", "api"]`, and a client must not try an upload over iroh.
 
 ### Console mode
 
@@ -166,7 +168,7 @@ The request carries `"op": "api"` and names one call to the mobile API:
  "path": "/api/console/dispatch", "body": {"agent": "codex", "prompt": "run the tests"}}
 ```
 
-- `method` is `GET` or `POST`, in capitals.
+- `method` is `GET`, `POST` or `DELETE`, in capitals.
 - `path` is the API path, with a query string only where the allowlist
   permits one. `body` is any JSON value for `POST`, and `null` for `GET`.
 - The hub sends `hello`, then exactly one `response` or `error` frame, then
@@ -197,12 +199,117 @@ Allowlist. Everything else is refused with `forbidden_path`:
 | POST | `/api/console/dispatch` | none |
 | POST | `/api/tasks/{id}/request-revision` | none |
 | POST | `/api/tasks/{id}/fail` | none |
+| POST | `/api/jobs` | none |
+| DELETE | `/api/jobs/{id}` | none |
+| POST | `/api/uploads` | none |
+| GET | `/api/uploads/{upload_id}` | none |
+| POST | `/api/uploads/{upload_id}/finish` | none |
+| DELETE | `/api/uploads/{upload_id}` | none |
+
+`{upload_id}` is exactly 32 lowercase hexadecimal characters, the form the hub
+mints. Anything else on these routes is refused with `forbidden_path`, and so
+is `PUT /api/uploads/{upload_id}`: chunks go in the `upload_chunk` op below.
+`GET` and `DELETE` take no body.
+
+Creating and deleting a pipeline over iroh:
+
+- `POST /api/jobs` takes the same body as on the LAN. It is the request line,
+  so the whole request, key included, must fit in 64 KiB. A larger pipeline
+  gets the error frame `too_large` before `hello`, the connection is closed,
+  and nothing is created. The hub is not affected. A phone splits a very
+  large pipeline into several smaller ones. As a guide, 64 KiB holds about 60
+  tasks with 1 KiB descriptions, or several hundred with short ones.
+- An `id` the phone picks for the job, and every task `id`, must have the
+  shape of `{id}` below, so the phone can always fetch or delete it again
+  through the allowlist. Otherwise the answer is 422 with detail
+  `invalid_job_id` or `invalid_task_id`. Leave the job `id` out and the hub
+  picks one. The LAN accepts any id, as before.
+- A create over iroh never replaces anything. A job `id` that exists, or a task
+  `id` that exists in any job, gets status 409 with detail `duplicate_id` and
+  nothing is saved. The LAN keeps replacing a job with the same id.
+- Each task's `model` and `effort` are checked against the lists in
+  `GET /api/system/capabilities` for the task's agent (422 when unknown), and
+  each entry in `files` must be an upload path or a listed file (422
+  `forbidden_file`), exactly as for a dispatch. Nothing is created when any
+  task is refused.
+- `model` and `effort` on a task are advisory text. The hub stores them and
+  delivers them to the agent that claims the task, in the Run Options section
+  of the task prompt and in the MCP claim reply. The hub does not launch the
+  agent, so it does not enforce them.
+- `DELETE /api/jobs/{id}` answers 200 when the job existed and a 404
+  `response` when it did not. It takes no body.
+- Both calls pass the same key check, per-peer limiter and API limits as
+  every other call.
 
 `{id}` is one path segment of letters, digits, `_`, `-` and `.`, up to 128
 characters, not starting with a dot. A path with `..`, `//`, a backslash,
 any percent-encoding, a scheme or a host is refused. So is a query on any
 other route, an unknown or repeated query key, and a method the route does
 not serve. Pairing, settings and the event stream stay LAN only.
+
+### Upload mode
+
+A phone can send a file to the hub, in ordered chunks, to attach to a prompt
+or a pipeline task. Only a hub whose `hello` lists `uploads` accepts them.
+The calls that are not chunks use API mode, so the same validation answers
+on both transports:
+
+1. `POST /api/uploads` with `{"name", "size", "mime"?}` answers 201 with
+   `{"upload_id", "chunk_size", "max_size", "name", "size"}`. `name` is the
+   name the hub will store, reduced to a safe base name. A Windows device
+   name such as `NUL` is refused with 422 and detail `invalid_name`. `size`
+   above `max_size` is refused with 413.
+2. Send the bytes with `upload_chunk` requests, described next. `chunk_size`
+   is the most one chunk may carry, 1 MiB.
+3. `GET /api/uploads/{upload_id}` answers `{"upload_id", "received", "size",
+   "state", "name"}`, with `state` `receiving` or `finished`. Use it to
+   resume after a dropped connection.
+4. `POST /api/uploads/{upload_id}/finish` with an optional `{"sha256"}`
+   answers `{"upload_id", "path", "name", "size", "sha256"}`. `path` is the
+   absolute path on the hub that `files` in dispatch and in pipeline tasks
+   accept. It answers 409 `incomplete` when `received` is below `size`, and
+   the upload stays open. It answers 422 `checksum_mismatch` when the digest
+   differs. The hub then throws the bytes away and restarts the upload at
+   offset 0 (the body carries `received: 0`), so the client sends the file
+   again and finishes with the right digest, or without one. Calling finish
+   again on a finished upload gives the same answer. A refusal to save the
+   upload's record answers 500 `storage_error` and leaves the upload open, so
+   finish can be tried again. Uploads are limited to `uploads_max_files`
+   (default 500) at once: a create beyond it gets 507 `too_many_files`.
+5. `DELETE /api/uploads/{upload_id}` cancels an upload and deletes what was
+   stored.
+
+The `upload_chunk` request is one JSON line, then exactly `length` raw bytes,
+then the client finishes its send side:
+
+```
+{"token": "<pairing key>", "op": "upload_chunk", "upload_id": "<32 hex>", "offset": 1048576, "length": 1048576}\n
+<length raw bytes>
+```
+
+- The line is at most 64 KiB and ends at the first newline. `length` is 1 to
+  1048576. `offset` is a whole number from 0. No other keys are allowed.
+- The hub checks the key from the line alone, before it reads any body byte.
+  A wrong key gets `unauthorised` and the body is never read.
+- The body must be exactly `length` bytes. A shorter body, a longer body, or a
+  body that does not end at the end of the stream is `bad_request`, and
+  nothing is stored. The body must arrive within 60 s of the line
+  (`timeout`). Nothing is stored until every byte has arrived, so a dropped
+  connection leaves the upload as it was.
+- The hub answers `hello`, then one `response` frame with `status` 200 and
+  `body` `{"upload_id", "received", "size", "state", "name"}`, or one `error`
+  frame, and ends the stream. The connection stays open for the next chunk.
+- `offset` must equal `received`. Sending the last chunk again (a lost reply)
+  is answered 200 and stored once. Any other offset is a `response` with
+  status 409 and `body` `{"detail": "offset_mismatch", "received": <n>}`: a
+  gap or an overlap. Bytes past `size` are 413 `beyond_declared_size`.
+- Other refusals arrive as `response` frames with the status the LAN route
+  gives: 404 `not_found`, 409 `not_receiving`, 507 `insufficient_storage`.
+  An upload chunk counts as one API call for the per-connection limit of 4
+  and the hub-wide limit of 16.
+
+On the LAN the same upload uses `PUT /api/uploads/{upload_id}?offset=N` with
+the chunk as the raw request body, and every other call as above.
 
 ### Errors
 
@@ -216,8 +323,8 @@ and it ends the request. An error before `hello` also closes the connection.
 | `too_large` | The request is over 64 KiB, or the response body is over 1 MiB | yes for the request, no for the response |
 | `timeout` | The request did not arrive within 30 s, or the call took over 30 s | yes for the request, no for the call |
 | `malformed request` | The request is not a JSON object (unchanged from console mode) | yes |
-| `bad_request` | An unknown `op`, a method or path that is not a string, or a `GET` with a body | no |
-| `forbidden_path` | The call is not on the allowlist, or API mode is switched off | no |
+| `bad_request` | An unknown `op`, a method or path that is not a string, a `GET` or `DELETE` with a body, or an `upload_chunk` line or body that does not match (see Upload mode) | no |
+| `forbidden_path` | The call is not on the allowlist, API mode is switched off, or an upload call arrives while uploads over iroh are off | no |
 | `upstream_error` | The hub's API failed without answering | no |
 
 ### Limits and security
@@ -228,6 +335,11 @@ and it ends the request. An error before `hello` also closes the connection.
 - Anyone who holds the pairing key can run the enabled agents on this
   computer, which amounts to remote code execution. Keep the key private and
   regenerate it if it leaks.
+- A dispatch over iroh checks `model` and `effort` against the agent's lists in
+  `GET /api/system/capabilities`, as a task does (`auto` and `default` are
+  always accepted), and refuses an unknown value, or a value for an agent
+  with no list, with 422. It accepts at most 32 `files`, else 422
+  `too_many_files`. The LAN is not affected.
 - A dispatch over iroh reaches only the named built-in agents and the enabled
   adapters. Any other `agent` gets status 422 with detail `unknown_agent`, and
   the generic shell runner is never reached. `working_directory` must be an
@@ -254,3 +366,16 @@ and it ends the request. An error before `hello` also closes the connection.
   on the LAN, and phones reach a hub with it off over iroh. Turn API mode off
   with `iroh_api_enabled: false` in `~/.agnview/config.yaml` or
   `AGNVIEW_IROH_API=0`. The console stays available.
+- `files` in a dispatch or a pipeline task that arrives over iroh must be
+  either a path returned by `POST /api/uploads/{upload_id}/finish`, or a
+  file that `GET /api/system/files` would list, inside the folder the agent
+  runs in (or inside an `iroh_dispatch_roots` folder for a task, which has no
+  folder). Hidden files and folders, `.git`, `node_modules` and the like, and
+  `.db`, `.log`, `.png`, `.jpg` and `.pyc` files are never listed and so are
+  refused. Anything else gets status 422 with detail `forbidden_file`. Paths
+  are resolved first, so a `..` or a symlink cannot climb out. The LAN is not
+  affected.
+- Uploads over iroh are on by default. Turn them off with
+  `iroh_uploads_enabled: false` in `~/.agnview/config.yaml` or
+  `AGNVIEW_IROH_UPLOADS=0`. Turn every upload off with `uploads_enabled:
+  false` or `AGNVIEW_UPLOADS=0`. `docs/REMOTE-ACCESS.md` lists the limits.

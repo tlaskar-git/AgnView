@@ -17,6 +17,8 @@ import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import uploads
+
 # The value of the request's "op" key that selects API mode. A request with no
 # "op" key is a console request, exactly as before this mode existed.
 API_OP = "api"
@@ -37,7 +39,32 @@ API_ALLOWLIST: Tuple[Tuple[str, str, bool], ...] = (
     ("POST", "/api/console/dispatch", False),
     ("POST", "/api/tasks/{id}/request-revision", False),
     ("POST", "/api/tasks/{id}/fail", False),
+    # Create and delete a pipeline. The body of a create is the request line,
+    # so a job over 64 KiB is refused with too_large before anything runs.
+    ("POST", "/api/jobs", False),
+    ("DELETE", "/api/jobs/{id}", False),
+    # Phone uploads. {upload_id} is exactly 32 lowercase hex characters, the
+    # form the hub mints, so nothing else reaches the upload routes. The bytes
+    # travel in the upload_chunk op below, never in an API body.
+    ("POST", "/api/uploads", False),
+    ("GET", "/api/uploads/{upload_id}", False),
+    ("POST", "/api/uploads/{upload_id}/finish", False),
+    ("DELETE", "/api/uploads/{upload_id}", False),
 )
+
+# The route prefix an upload request uses, so it can be refused as a group when
+# uploads over iroh are off.
+UPLOADS_PREFIX = "/api/uploads"
+
+# The request op that carries one chunk of an upload: one JSON line, then
+# exactly `length` raw bytes, then the end of the client's stream.
+UPLOAD_CHUNK_OP = "upload_chunk"
+MAX_UPLOAD_CHUNK_BYTES = uploads.CHUNK_SIZE
+# How long the body of one chunk has to arrive once its line has been accepted.
+UPLOAD_BODY_TIMEOUT_SECONDS = 60.0
+_UPLOAD_CHUNK_KEYS = frozenset({"token", "op", "upload_id", "offset", "length"})
+# Offsets are whole numbers below this, well under the largest file allowed.
+_MAX_OFFSET = 2**50
 
 # Query keys GET /api/console/logs accepts. A query is passed through only when
 # every key is one of these.
@@ -68,6 +95,9 @@ ERROR_RATE_LIMITED = "rate_limited"
 ERROR_UPSTREAM = "upstream_error"
 
 _SEGMENT = r"[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}"
+# The shape of a job or task id a phone may create, so that it can always be
+# addressed again through the allowlisted routes above.
+ID_SEGMENT = re.compile(_SEGMENT)
 _PATH_CHARS = re.compile(r"[A-Za-z0-9/._-]+")
 _QUERY_CHARS = re.compile(r"[A-Za-z0-9._~=&@:-]*")
 
@@ -82,7 +112,8 @@ _DIGITS = re.compile(r"[0-9]+")
 
 
 def _compile(template: str) -> "re.Pattern[str]":
-    return re.compile(re.escape(template).replace(re.escape("{id}"), _SEGMENT))
+    pattern = re.escape(template).replace(re.escape("{id}"), _SEGMENT)
+    return re.compile(pattern.replace(re.escape("{upload_id}"), "[0-9a-f]{32}"))
 
 
 _COMPILED_ALLOWLIST = tuple(
@@ -166,13 +197,37 @@ def parse_api_request(request: Dict[str, Any]) -> ApiRequest:
     path, query, template = match_allowlist(method, target)
 
     body = request.get("body")
-    if method == "GET":
+    if method in ("GET", "DELETE"):
         if body is not None:
             raise ApiError(ERROR_BAD_REQUEST)
         encoded: Optional[bytes] = None
     else:
         encoded = None if body is None else json.dumps(body).encode("utf-8")
     return ApiRequest(method=method, path=path, query=query, template=template, body=encoded)
+
+
+def parse_upload_chunk_request(request: Dict[str, Any]) -> Tuple[str, int, int]:
+    """Validate the line of an upload chunk request: (upload_id, offset, length).
+
+    Raises ApiError(bad_request) for a missing, unknown or mistyped key, an id
+    that is not 32 lowercase hex characters, a negative or absurd offset, or a
+    length that is not 1 to MAX_UPLOAD_CHUNK_BYTES. Booleans are not numbers.
+    """
+    if not set(request) <= _UPLOAD_CHUNK_KEYS:
+        raise ApiError(ERROR_BAD_REQUEST)
+    upload_id = request.get("upload_id")
+    offset = request.get("offset")
+    length = request.get("length")
+    if not isinstance(upload_id, str) or not uploads.UPLOAD_ID_PATTERN.fullmatch(upload_id):
+        raise ApiError(ERROR_BAD_REQUEST)
+    for number in (offset, length):
+        if isinstance(number, bool) or not isinstance(number, int):
+            raise ApiError(ERROR_BAD_REQUEST)
+    if not 0 <= offset <= _MAX_OFFSET:
+        raise ApiError(ERROR_BAD_REQUEST)
+    if not 1 <= length <= MAX_UPLOAD_CHUNK_BYTES:
+        raise ApiError(ERROR_TOO_LARGE if length > MAX_UPLOAD_CHUNK_BYTES else ERROR_BAD_REQUEST)
+    return upload_id, offset, length
 
 
 class ApiSlots:
@@ -214,6 +269,7 @@ async def forward_to_app(
     token: Optional[str],
     timeout: Optional[float] = None,
     max_body: Optional[int] = None,
+    peer: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Run one request through the hub's ASGI app and return the response frame.
 
@@ -249,6 +305,10 @@ async def forward_to_app(
         "server": ("iroh", 0),
         "extensions": {},
     }
+    if peer:
+        # Which iroh peer this is, for limits that count per peer. It is set
+        # here, in the scope the hub builds, so a client cannot supply it.
+        scope["agnview_peer"] = peer
 
     response: Dict[str, Any] = {"status": None, "headers": [], "size": 0, "chunks": []}
     finished = asyncio.Event()

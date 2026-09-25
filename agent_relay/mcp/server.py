@@ -98,7 +98,10 @@ class AgentRelayMCPServer:
                 "status": "claimed",
                 "task_id": task.id,
                 "assigned_agent": task.assigned_agent,
-                "current_status": task.status.value
+                "current_status": task.status.value,
+                "model": task.model,
+                "effort": task.effort,
+                "files": task.files,
             }, indent=2)
 
         elif name == "relay_complete_task":

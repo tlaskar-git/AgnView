@@ -209,6 +209,20 @@ class Database:
             rows = conn.execute("SELECT data_json FROM tasks WHERE job_id = ? ORDER BY id ASC", (job_id,)).fetchall()
             return [json.loads(row["data_json"]) for row in rows]
 
+    def list_task_file_paths(self) -> List[str]:
+        """Every file path any task lists in its files, for the uploads cleanup."""
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT data_json FROM tasks").fetchall()
+        paths: List[str] = []
+        for row in rows:
+            try:
+                files = json.loads(row["data_json"]).get("files")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(files, list):
+                paths.extend(entry for entry in files if isinstance(entry, str))
+        return paths
+
     def list_tasks_by_agent(self, agent: str) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             rows = conn.execute("SELECT data_json FROM tasks WHERE assigned_agent = ? ORDER BY updated_at DESC", (agent,)).fetchall()
