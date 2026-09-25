@@ -64,7 +64,7 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
     app = FastAPI(
         title="AgnView API",
         description="Cross-Agent Coordination Hub & Live Console for Claude Code, Codex, AntiGravity, and Web LLMs",
-        version="0.1.12"
+        version="0.1.13"
     )
 
     # No CORS. The dashboard is served by the hub itself, so its requests are
