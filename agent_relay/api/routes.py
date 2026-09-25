@@ -53,7 +53,8 @@ from ..core.network import (
     get_bind_mode, get_network_endpoints, get_resolved_transport_label,
     get_transport_label, resolve_hub_transport
 )
-from ..core import autostart
+from ..core import autostart, cli_path
+from ..core.cli_path import which_any
 from ..core.config import ConfigError, DEFAULT_CONFIG_TEMPLATE, get_config_path, validate_relay_url
 from ..core.iroh_transport import IrohTransport
 
@@ -1047,11 +1048,19 @@ def clear_console_logs(request: Request, agent: Optional[str] = Query(None)):
 
 # ----------------- System Capabilities & Skills Endpoints -----------------
 
+@router.get("/diagnostics/path")
+def get_path_diagnostics():
+    """Read-only: the PATH this hub sees, the last PATH repair and where each agent CLI resolves.
+
+    The home folder is shown as ~. Reachable on the same terms as every other
+    /api route, so it inherits the loopback and token rules.
+    """
+    return cli_path.diagnostics()
+
+
 @router.get("/system/capabilities")
 def get_system_capabilities(request: Request):
     """Detect local agent CLIs, skills, models, browser profiles, and working directories."""
-    import shutil
-
     engine = get_engine(request)
 
     # 1. Detect Installed CLI Agents
@@ -1064,7 +1073,7 @@ def get_system_capabilities(request: Request):
     ]:
         found_path = None
         for name in exe_names:
-            p = shutil.which(name)
+            p = which_any(name)
             if p:
                 found_path = p
                 break

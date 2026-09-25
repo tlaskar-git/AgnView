@@ -11,8 +11,8 @@ from agent_relay.core.runner import missing_agent_message
 def _fake_run(stdout="", exc=None):
     def run(cmd, **kwargs):
         assert kwargs["stdin"] == subprocess.DEVNULL
-        assert kwargs["timeout"] == cli_path.SHELL_TIMEOUT_SECONDS
-        assert cmd[1:4] == ["-l", "-i", "-c"]
+        assert kwargs["timeout"] <= cli_path.SHELL_TIMEOUT_SECONDS
+        assert cmd[1] in ("-l", "-i") and cmd[-2] == "-c"
         if exc:
             raise exc
         return types.SimpleNamespace(stdout=stdout)
@@ -54,7 +54,7 @@ def test_login_shell_path_falls_back_and_never_raises():
         return types.SimpleNamespace(stdout=_wrap("/from/bash"))
 
     assert cli_path.login_shell_path(["/bin/zsh", "/bin/bash"], run) == ["/from/bash"]
-    assert calls == ["/bin/zsh", "/bin/bash"]
+    assert calls == ["/bin/zsh", "/bin/zsh", "/bin/bash", "/bin/bash"]
     assert cli_path.login_shell_path(["/bin/zsh"], _fake_run(exc=OSError("no shell"))) == []
 
 
@@ -66,7 +66,8 @@ def test_known_dirs_only_lists_existing_and_picks_newest_nvm(tmp_path):
     assert str(tmp_path / ".bun/bin") in dirs
     assert str(tmp_path / ".cargo/bin") not in dirs
     nvm = [d for d in dirs if ".nvm" in d]
-    assert nvm == [str(tmp_path / ".nvm/versions/node/v20.11.1/bin")]
+    assert nvm[0] == str(tmp_path / ".nvm/versions/node/v20.11.1/bin")
+    assert len(nvm) == 3
 
 
 def test_repaired_path_lets_which_find_a_cli_outside_the_minimal_path(tmp_path):
