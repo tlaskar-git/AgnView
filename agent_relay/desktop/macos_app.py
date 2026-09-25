@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from agent_relay.core import cli_path
+
 from . import app as desktop
 from . import macos
 
@@ -366,6 +368,10 @@ def claim_single_instance(instance: macos.SingleInstance, attempts: int = 20) ->
 
 def main(args) -> int:
     desktop.configure_logging()
+
+    # Finder, the Dock and the LaunchAgent give a minimal PATH. Repair it
+    # before the hub starts so every chat process finds the agent CLIs.
+    cli_path.repair_environment()
 
     instance = macos.SingleInstance()
     if not claim_single_instance(instance):

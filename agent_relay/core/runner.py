@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from .db import Database
 from .proc import no_window
+from .cli_path import searched_note
 from .adapters import AdapterManager, AgentAdapter
 from .live_sessions import (
     LIVE_SESSION_IDLE_TIMEOUT_SECONDS,
@@ -412,11 +413,14 @@ MISSING_AGENT_HELP = {
 
 def missing_agent_message(agent: str) -> str:
     """What to tell a person whose message went to an agent that cannot run."""
-    return MISSING_AGENT_HELP.get(
+    base = MISSING_AGENT_HELP.get(
         agent,
         f"The command for {agent} is not installed or not on PATH, so nothing ran. "
         "Install it, then restart AgnView.",
     )
+    if agent in ("deepseek", "custom"):
+        return base
+    return base + searched_note()
 
 
 def _is_codex_reply(item) -> bool:
