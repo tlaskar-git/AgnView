@@ -16,7 +16,7 @@ from agent_relay.core import iroh_api
 from agent_relay.core.iroh_api import ApiError, forward_to_app, match_allowlist, parse_api_request
 from agent_relay.core.iroh_transport import IrohTransport
 from agent_relay.core.pairing import check_auth_rate_limit, reset_auth_rate_limit
-from tests.test_iroh_api import FakeBi, FakeConn, _api, _fake_token, _serve
+from test_iroh_api import FakeBi, FakeConn, _api, _fake_token, _serve
 
 PORT = 8765
 LOOPBACK = ("127.0.0.1", 50000)
