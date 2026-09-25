@@ -45,7 +45,8 @@ jobs:
         run: ruff check .
 
       - name: Test
-        run: pytest tests/ -q
+        timeout-minutes: 20
+        run: pytest tests/ -v --durations=10 --timeout=60 --timeout-method=thread
 
       - name: Import the signing certificate
         if: env.HAS_SIGNING == 'true'
