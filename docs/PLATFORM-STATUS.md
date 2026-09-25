@@ -109,6 +109,26 @@ exercises it. Tested over real iroh endpoints on the loopback interface in
 relay. Turn API mode off with `iroh_api_enabled: false` in
 `~/.agnview/config.yaml` or `AGNVIEW_IROH_API=0`.
 
+Phone features the hub now serves, on the LAN and over iroh:
+
+- **Uploads.** A phone can upload files, including files of several hundred
+  megabytes, in resumable 1 MiB chunks, and attach the returned path to a chat
+  prompt or a pipeline task. The LAN uses `PUT /api/uploads/{id}?offset=N`.
+  Over iroh a new `upload_chunk` op carries one request line and then exactly
+  `length` raw bytes. Files are stored in a private folder per upload, capped
+  by size, total storage, free disk, concurrent uploads and age. The
+  `uploads` capability in the hello frame says whether the hub accepts them
+  over iroh. `docs/REMOTE-ACCESS.md` section 6 has the limits and the
+  switches, `docs/PAIRING.md` section 5 the framing. Tested over real iroh
+  endpoints in `tests/test_iroh_uploads_live.py`.
+- **Per-task options.** A task in `POST /api/jobs` can carry `model`,
+  `effort` and `files`. Model and effort are checked against the lists in
+  `GET /api/system/capabilities`, and files follow the same rule as a
+  dispatch. The task prompt, the task's API record and the MCP claim reply
+  all carry them. The hub does not launch an agent for a pipeline task: the
+  agent that claims the task reads the options. `POST /api/jobs` is not on the
+  iroh allowlist, so a phone creates a job over the LAN only.
+
 The Windows desktop app has an Allow phones on my network setting, in the
 tray menu and on the pairing screen, off by default. Off, it listens on
 loopback and the QR code's `lan` field is `127.0.0.1:<port>`, which a client

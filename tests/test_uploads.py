@@ -868,3 +868,12 @@ def test_uploads_over_iroh_are_refused_when_that_switch_is_off(tmp_path, free):
     assert list(app.state.uploads.root.iterdir()) == []
     # The LAN is not affected.
     assert _client(app).post("/api/uploads", json={"name": "a.bin", "size": 1}).status_code == 201
+
+
+@pytest.mark.skipif(not POSIX, reason="POSIX permission bits")
+def test_a_folder_the_operator_chose_keeps_its_permissions(tmp_path, clock, free):
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    os.chmod(chosen, 0o755)
+    UploadManager(chosen, UploadLimits(min_free_bytes=1), clock=clock)
+    assert os.stat(chosen).st_mode & 0o777 == 0o755

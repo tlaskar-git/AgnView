@@ -480,11 +480,15 @@ class UploadManager:
         return self.root / upload_id
 
     def _ensure_root(self) -> None:
+        created = not self.root.exists()
         self.root.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(self.root, 0o700)
-        except OSError:
-            pass
+        if created:
+            # Only a folder the hub made is locked down. A folder the operator
+            # pointed uploads_dir at keeps its own permissions.
+            try:
+                os.chmod(self.root, 0o700)
+            except OSError:
+                pass
 
     def _make_folder(self, upload: _Upload) -> None:
         folder = self._folder(upload.id)

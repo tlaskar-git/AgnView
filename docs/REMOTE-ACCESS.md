@@ -34,7 +34,7 @@ curl http://127.0.0.1:8765/api/transport
 
 `resolved_transport` is one of `lan`, `iroh-direct`, `iroh-relay` or `offline`. Turn iroh off entirely with `AGNVIEW_IROH=0`, or with `iroh_enabled: false` in `~/.agnview/config.yaml`.
 
-Over iroh a paired phone gets the live console and the parts of the mobile API it needs: status, Usage, Pipelines, Sessions and prompt dispatch. Every call passes the same pairing key check and rate limit as on the LAN, and only an allowlist of routes answers. `docs/PAIRING.md` section 5 has the protocol. Anyone who holds the pairing key can run the enabled agents on this computer, which amounts to remote code execution. Keep the key private and regenerate it if it leaks. To confine phone dispatches to certain folders, set `iroh_dispatch_roots` in `~/.agnview/config.yaml`. Keep iroh on but serve only the console with `AGNVIEW_IROH_API=0`, or with `iroh_api_enabled: false` in `~/.agnview/config.yaml`.
+Over iroh a paired phone gets the live console and the parts of the mobile API it needs: status, Usage, Pipelines, Sessions, prompt dispatch and file uploads (section 6). Every call passes the same pairing key check and rate limit as on the LAN, and only an allowlist of routes answers. `docs/PAIRING.md` section 5 has the protocol. Anyone who holds the pairing key can run the enabled agents on this computer, which amounts to remote code execution. Keep the key private and regenerate it if it leaks. To confine phone dispatches to certain folders, set `iroh_dispatch_roots` in `~/.agnview/config.yaml`. Keep iroh on but serve only the console with `AGNVIEW_IROH_API=0`, or with `iroh_api_enabled: false` in `~/.agnview/config.yaml`.
 
 ---
 
@@ -85,6 +85,42 @@ This binds to your machine's address inside `100.64.0.0/10` and advertises only 
 4. **An existing WireGuard tunnel.** If your WireGuard setup hands out a `100.64.0.0/10` address, `--listen-overlay` works the same as it does for Tailscale or NetBird. A tunnel using a different address range works too; bind AgnView to that address with `--host`.
 
 None of these touch n0's relays. All of them keep traffic on infrastructure you already trust.
+
+---
+
+## 6. Phone uploads
+
+A paired phone can send files to the hub, so it can attach them to a chat prompt or to a pipeline task. This adds a write path onto this computer's disk. Anyone who holds the pairing key can use it, on the LAN and, with the default settings, over iroh from anywhere. The pairing key already lets that person run the enabled agents here, so uploads widen what the key can do only by letting it store files, within the limits below.
+
+**What a phone can write, and where.** Each upload gets its own folder, `<uploads folder>/<random 128-bit id>/<file name>`. The uploads folder is `uploads` beside the hub database (`~/.agent_relay/uploads` by default), or the folder named by `uploads_dir`. The hub creates its own folders private to the hub's user. It never writes uploads into a project folder or an agent's working folder.
+
+- The name comes from the phone and is reduced to a safe base name. Path parts, drive letters, control and invisible characters, characters Windows refuses, square brackets, leading dots and spaces and trailing dots and spaces are removed. A Windows device name (`CON`, `NUL`, `COM1` and so on) is refused. The name is capped at 180 bytes and keeps its extension.
+- The stored file is plain data with no execute permission. The hub never runs it and never reads it, except to hash it. An agent that is given the path can read it, and its content is untrusted like any other file. A file can carry text that tries to instruct the agent.
+- Bytes arrive in ordered chunks of at most 1 MiB at an exact offset, and a chunk is stored only when all of it has arrived. A gap, an overlap or bytes past the declared size are refused.
+- `files` in a dispatch or a pipeline task that arrives over iroh must be an upload the hub stored, or a project file that `GET /api/system/files` would list, inside the folder the agent runs in. Anything else gets 422 `forbidden_file`. The LAN keeps its old behaviour.
+
+**Limits.** All are set in `~/.agnview/config.yaml`, and a value that is not a whole number above zero stops uploads until it is fixed.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `uploads_max_file_bytes` | 2147483648 (2 GiB) | Largest single file |
+| `uploads_max_total_bytes` | 10737418240 (10 GiB) | All stored uploads together, counting an unfinished upload at its declared size |
+| `uploads_min_free_bytes` | 2147483648 (2 GiB) | Free disk that must remain. An upload that would cross it is refused, and every chunk is checked again |
+| `uploads_max_per_peer` | 2 | Unfinished uploads per iroh peer, or per LAN address |
+| `uploads_max_concurrent` | 4 | Unfinished uploads across the hub |
+| `uploads_idle_expiry_seconds` | 3600 | An unfinished upload with no chunk for this long is deleted |
+| `uploads_retention_days` | 14 | A finished upload is deleted after this many days |
+
+Starting uploads is also rate limited: 20 a minute per peer and 60 a minute across the hub. Wrong pairing keys are limited per peer as for every other iroh call, and a valid key is never blocked by another peer's wrong ones. Up to 16 chunks are in memory across the hub at once, 1 MiB each.
+
+**Cleanup.** The hub removes expired and finished-past-retention uploads every five minutes and at start. It deletes only folders named like an upload id directly under the uploads folder. To delete one now, call `DELETE /api/uploads/{upload_id}`, or remove its folder while the hub is stopped.
+
+**Switching off.**
+
+- `uploads_enabled: false` in `~/.agnview/config.yaml`, or `AGNVIEW_UPLOADS=0`, refuses every upload on both transports. A path that an earlier upload returned is no longer accepted in `files`.
+- `iroh_uploads_enabled: false`, or `AGNVIEW_IROH_UPLOADS=0`, keeps uploads on the LAN and refuses them over iroh. The hello frame then omits `uploads` from `capabilities`. Uploads over iroh also need iroh API mode, so `iroh_api_enabled: false` turns them off too.
+
+**The trade-off.** Uploads over iroh let a phone attach photos and files to prompts away from home, which the LAN alone cannot do. The cost is that a leaked pairing key can also fill up to `uploads_max_total_bytes` of disk from anywhere until you regenerate the key or switch iroh uploads off. Set `iroh_uploads_enabled: false` if you never need that. Lower `uploads_max_total_bytes` and `uploads_max_file_bytes` to fit the disk. A LAN-only hub with `--listen-lan` off reaches uploads only from this computer.
 
 ---
 

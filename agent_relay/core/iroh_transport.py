@@ -14,7 +14,9 @@ the dashboard over LAN.
 
 A connection carries one or more bidirectional streams, each with one request.
 A request with no "op" key streams the console, as it always has. A request
-with "op": "api" is one call to the mobile API, answered by iroh_api.
+with "op": "api" is one call to the mobile API, answered by iroh_api. A request
+with "op": "upload_chunk" is one line followed by raw bytes, one chunk of a
+phone upload, stored by the UploadManager.
 """
 
 import asyncio
