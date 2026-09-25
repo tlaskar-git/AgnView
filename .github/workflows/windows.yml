@@ -159,7 +159,7 @@ jobs:
           }
           function Fail($message) {
             Write-Host "::group::Diagnostics"
-            Write-Host "AgnView processes:"
+            Write-Host "Running copies of the app:"
             Get-Process AgnView -ErrorAction SilentlyContinue | ForEach-Object { Write-Host ("  pid {0}, started {1}, {2}" -f $_.Id, $_.StartTime, $_.Path) }
             $ids = @(Get-Process AgnView -ErrorAction SilentlyContinue | ForEach-Object { $_.Id })
             if ($ids.Count) {
