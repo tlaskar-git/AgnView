@@ -105,3 +105,31 @@ def test_api_mobile_endpoints(client):
     # Clean up environment token so subsequent test suites with unauthenticated client do not fail with 401
     os.environ.pop("AGENT_RELAY_TOKEN", None)
 
+
+def test_a_hostname_lookup_that_never_returns_does_not_block_the_endpoints(monkeypatch):
+    import threading
+    import time
+
+    from agent_relay.core import network
+
+    release = threading.Event()
+    monkeypatch.setattr(network, "HOSTNAME_LOOKUP_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(network.socket, "gethostname", lambda: "example-host")
+    monkeypatch.setattr(network.socket, "gethostbyname", lambda name: release.wait(30))
+    monkeypatch.setattr(network.socket, "getaddrinfo", lambda *a, **k: release.wait(30))
+    started = time.monotonic()
+    try:
+        endpoints = get_network_endpoints(port=8765)
+        assert time.monotonic() - started < 3.0
+        assert "hostname" not in endpoints
+        assert endpoints["localhost"] == "http://127.0.0.1:8765"
+    finally:
+        release.set()
+
+
+def test_a_lookup_result_is_returned_and_an_error_gives_the_default():
+    from agent_relay.core.network import resolve_with_timeout
+
+    assert resolve_with_timeout(lambda name: "192.0.2.7", "example-host") == "192.0.2.7"
+    assert resolve_with_timeout(lambda name: 1 / 0, "example-host", default="none") == "none"
+
