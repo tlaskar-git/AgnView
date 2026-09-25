@@ -137,7 +137,24 @@
             "type": "array",
             "items": { "type": "string" }
           },
-          "output_summary": { "type": "string", "nullable": true }
+          "output_summary": { "type": "string", "nullable": true },
+          "model": { "type": "string", "nullable": true, "description": "Model the task asks for. Must be on the assigned agent's list in GET /api/system/capabilities, or auto." },
+          "effort": { "type": "string", "nullable": true, "description": "Effort the task asks for. Must be on the assigned agent's list in GET /api/system/capabilities, or default." },
+          "files": { "type": "array", "nullable": true, "maxItems": 32, "items": { "type": "string", "maxLength": 1024 }, "description": "Files for the agent to read. Over iroh each must be an upload path from /api/uploads or a file under an iroh_dispatch_roots folder, else 422 forbidden_file." }
+        }
+      },
+      "TaskSpec": {
+        "type": "object",
+        "required": ["id", "title", "assigned_agent"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "description": { "type": "string" },
+          "assigned_agent": { "type": "string" },
+          "dependencies": { "type": "array", "items": { "type": "string" } },
+          "model": { "type": "string", "nullable": true, "description": "Model the task asks for. Must be on the assigned agent's list in GET /api/system/capabilities, or auto." },
+          "effort": { "type": "string", "nullable": true, "description": "Effort the task asks for. Must be on the assigned agent's list in GET /api/system/capabilities, or default." },
+          "files": { "type": "array", "nullable": true, "maxItems": 32, "items": { "type": "string", "maxLength": 1024 }, "description": "Files for the agent to read. Over iroh each must be an upload path from /api/uploads or a file under an iroh_dispatch_roots folder, else 422 forbidden_file." }
         }
       },
       "UsageAccount": {
@@ -256,10 +273,28 @@
       },
       "post": {
         "summary": "Create and launch a new multi-agent pipeline",
-        "responses": {
-          "201": {
-            "description": "Job created"
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["title", "tasks"],
+                "properties": {
+                  "id": { "type": "string" },
+                  "title": { "type": "string" },
+                  "description": { "type": "string" },
+                  "tasks": { "type": "array", "items": { "$ref": "#/components/schemas/TaskSpec" } }
+                }
+              }
+            }
           }
+        },
+        "responses": {
+          "200": {
+            "description": "Job created. Each task carries model, effort and files, null when not set."
+          },
+          "400": { "description": "The job is malformed" },
+          "422": { "description": "A task asks for a model or effort its agent does not offer, or (over iroh) a file it may not name" }
         }
       }
     },

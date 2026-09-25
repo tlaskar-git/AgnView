@@ -13,6 +13,7 @@ from .models import (
     AgentInstance, AgentHeartbeatRequest
 )
 from .db import Database
+from .capabilities import validate_task_options
 from .runner import AgentRunner
 from .adapters import AdapterManager
 from .notifications import NotificationManager
@@ -243,6 +244,9 @@ class RelayEngine:
                     f"'{t.assigned_agent}'. Known agents: {known}."
                 )
 
+        for t in req.tasks:
+            validate_task_options(t.id, t.assigned_agent, t.model, t.effort)
+
         job = Job(
             id=job_id,
             title=req.title,
@@ -265,6 +269,9 @@ class RelayEngine:
                 description=t.description,
                 assigned_agent=t.assigned_agent,
                 dependencies=t.dependencies,
+                model=t.model,
+                effort=t.effort,
+                files=t.files,
                 status=initial_status,
                 created_at=now,
                 updated_at=now

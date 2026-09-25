@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 from .db import Database
 from .proc import no_window
+from .prompts import append_files_context
 from .cli_path import child_env, searched_note, which_any
 from .adapters import AdapterManager, AgentAdapter
 from .live_sessions import (
@@ -722,9 +723,7 @@ class AgentRunner:
         effective_prompt = prompt
         if skill and not effective_prompt.strip().startswith(skill.strip()):
             effective_prompt = f"{skill.strip()} {effective_prompt}"
-        if files:
-            files_context = ", ".join(files)
-            effective_prompt = f"{effective_prompt}\n[Context Files: {files_context}]"
+        effective_prompt = append_files_context(effective_prompt, files)
 
         # Log the user's turn tagged with the actual target, not a generic
         # "user" label, so a single-agent filter shows both sides of the

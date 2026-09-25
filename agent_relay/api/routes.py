@@ -58,6 +58,7 @@ from ..core.cli_path import which_any
 from ..core.config import ConfigError, DEFAULT_CONFIG_TEMPLATE, get_config_path, validate_relay_url
 from ..core.iroh_transport import IrohTransport
 from ..core import dispatch_guard
+from ..core.capabilities import EFFORTS_BY_PROVIDER, MODELS, TaskOptionError
 
 router = APIRouter(prefix="/api")
 
@@ -114,8 +115,21 @@ def list_jobs(request: Request):
 @router.post("/jobs", response_model=Job)
 def create_job(req: CreateJobRequest, request: Request):
     engine = get_engine(request)
+    # Files a phone on iroh names must be uploads or files under a dispatch
+    # root. The LAN keeps its behaviour.
+    if dispatch_guard.is_iroh_request(request):
+        config = getattr(request.app.state, "config", None)
+        roots = getattr(config, "iroh_dispatch_roots", []) or []
+        uploads_root = getattr(request.app.state, "uploads_dir", None)
+        try:
+            for spec in req.tasks:
+                spec.files = dispatch_guard.check_files(spec.files, None, roots, uploads_root)
+        except dispatch_guard.DispatchRefused as refused:
+            raise HTTPException(status_code=422, detail=refused.detail)
     try:
         return engine.create_job(req)
+    except TaskOptionError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except (ValueError, DependencyCycleError) as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -949,13 +963,18 @@ async def dispatch_console_command(payload: ConsoleDispatchPayload, request: Req
     # enabled adapters, in a real local folder. It never reaches the generic
     # shell runner. The LAN keeps its behaviour.
     working_directory = payload.working_directory
+    files = payload.files
     if dispatch_guard.is_iroh_request(request):
         try:
             dispatch_guard.check_agent(payload.agent, engine.runner.adapter_manager)
             config = getattr(request.app.state, "config", None)
+            roots = getattr(config, "iroh_dispatch_roots", []) or []
             working_directory = dispatch_guard.check_working_directory(
-                payload.working_directory,
-                getattr(config, "iroh_dispatch_roots", []) or [],
+                payload.working_directory, roots
+            )
+            files = dispatch_guard.check_files(
+                payload.files, working_directory, roots,
+                getattr(request.app.state, "uploads_dir", None),
             )
         except dispatch_guard.DispatchRefused as refused:
             raise HTTPException(status_code=422, detail=refused.detail)
@@ -979,7 +998,7 @@ async def dispatch_console_command(payload: ConsoleDispatchPayload, request: Req
             session_id=session_id,
             model=payload.model,
             effort=payload.effort,
-            files=payload.files,
+            files=files,
             skill=payload.skill,
             reset_session=payload.reset_session
         )
@@ -1153,76 +1172,9 @@ def get_system_capabilities(request: Request):
             pass
 
     # 4. Supported Models & Efforts matching Desktop Apps & CLIs (Latest 2026/2027)
-    models = {
-        "claude_code": [
-            {"id": "claude-fable-5-1", "name": "Fable 5.1"},
-            {"id": "claude-fable-5", "name": "Fable 5"},
-            {"id": "claude-opus-5", "name": "Opus 5"},
-            {"id": "claude-opus-4-8", "name": "Opus 4.8"},
-            {"id": "claude-opus-4-7", "name": "Opus 4.7"},
-            {"id": "claude-opus-4-6-thinking", "name": "Opus 4.6"},
-            {"id": "claude-sonnet-5", "name": "Sonnet 5"},
-            {"id": "claude-sonnet-4-6", "name": "Sonnet 4.6"},
-            {"id": "claude-3-7-sonnet-20250219", "name": "Sonnet 3.7"},
-            {"id": "claude-3-5-sonnet-20241022", "name": "Sonnet 3.5"},
-            {"id": "claude-3-5-haiku-20241022", "name": "Haiku 3.5"},
-            {"id": "claude-3-opus-20240229", "name": "Claude 3 Opus"}
-        ],
-        "codex": [
-            {"id": "gpt-6-astra", "name": "GPT-6 Astra"},
-            {"id": "gpt-5-codex", "name": "GPT-5 Codex"},
-            {"id": "gpt-5", "name": "GPT-5"},
-            {"id": "o3-mini", "name": "o3-mini"},
-            {"id": "o3", "name": "o3"},
-            {"id": "o1", "name": "o1"},
-            {"id": "o1-mini", "name": "o1-mini"},
-            {"id": "gpt-4.5-preview", "name": "GPT-4.5 Preview"},
-            {"id": "gpt-4o", "name": "GPT-4o"},
-            {"id": "gpt-4o-mini", "name": "GPT-4o-mini"}
-        ],
-        "antigravity": [
-            {"id": "gemini-3.8-flash", "name": "Gemini 3.8 Flash"},
-            {"id": "gemini-3.7-flash", "name": "Gemini 3.7 Flash"},
-            {"id": "gemini-3.6-flash", "name": "Gemini 3.6 Flash"},
-            {"id": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"},
-            {"id": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
-            {"id": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
-            {"id": "claude-sonnet-4-6", "name": "Claude Sonnet 4.6"},
-            {"id": "claude-opus-4-6-thinking", "name": "Claude Opus 4.6"},
-            {"id": "gpt-oss-120b", "name": "GPT-OSS 120B"}
-        ],
-        "all": [
-            {"id": "auto", "name": "Auto"}
-        ]
-    }
+    models = MODELS
+    efforts_by_provider = EFFORTS_BY_PROVIDER
 
-    efforts_by_provider = {
-        "claude_code": [
-            {"id": "default", "name": "Default"},
-            {"id": "low", "name": "Low Effort"},
-            {"id": "medium", "name": "Medium Effort"},
-            {"id": "high", "name": "High Effort"},
-            {"id": "xhigh", "name": "Extra High Effort"},
-            {"id": "max", "name": "Maximum Effort"}
-        ],
-        "codex": [
-            {"id": "default", "name": "Default"},
-            {"id": "low", "name": "Low Reasoning"},
-            {"id": "medium", "name": "Medium Reasoning"},
-            {"id": "high", "name": "High Reasoning"},
-            {"id": "max", "name": "Maximum Reasoning"}
-        ],
-        "antigravity": [
-            {"id": "default", "name": "Default"},
-            {"id": "low", "name": "Low Reasoning"},
-            {"id": "medium", "name": "Medium Reasoning"},
-            {"id": "high", "name": "High Reasoning"}
-        ],
-        "all": [
-            {"id": "default", "name": "Auto"},
-            {"id": "high", "name": "High Reasoning"}
-        ]
-    }
 
     slash_commands_by_provider = {
         "claude_code": [
@@ -1339,12 +1291,11 @@ def list_workspace_files(request: Request, cwd: Optional[str] = None):
     if not os.path.exists(target_dir):
         return {"files": []}
 
-    ignored_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", ".pytest_cache", ".idea", ".vscode", "dist", "build"}
     for root, dirs, files in os.walk(target_dir):
-        dirs[:] = [d for d in dirs if d not in ignored_dirs and not d.startswith(".")]
+        dirs[:] = [d for d in dirs if dispatch_guard.listing_shows_dir(d)]
         rel_root = os.path.relpath(root, target_dir)
         for f in files:
-            if f.startswith(".") or f.endswith((".pyc", ".log", ".png", ".jpg", ".jpeg", ".db")):
+            if not dispatch_guard.listing_shows_file(f):
                 continue
             rel_path = f if rel_root == "." else os.path.join(rel_root, f).replace("\\", "/")
             file_list.append(rel_path)

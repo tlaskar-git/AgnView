@@ -4,11 +4,39 @@ import uuid
 from enum import Enum
 from typing import List, Dict, Optional, Any
 from datetime import datetime, timezone
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from .usage.models import UsageObservation
 from .usage.snippets import USAGE_PAGES
 from .usage.render import legacy_status, project_legacy_fields, render_observation
+
+# Limits on the files a task names. Whether a path may be read is decided by
+# dispatch_guard.check_files, not here.
+MAX_TASK_FILES = 32
+MAX_TASK_FILE_CHARS = 1024
+MAX_OPTION_CHARS = 128
+
+
+def _clean_files(value: Optional[List[str]]) -> Optional[List[str]]:
+    if value is None:
+        return None
+    if len(value) > MAX_TASK_FILES:
+        raise ValueError(f"a task can name at most {MAX_TASK_FILES} files")
+    for entry in value:
+        if not entry or len(entry) > MAX_TASK_FILE_CHARS:
+            raise ValueError("a file path must be 1 to %d characters" % MAX_TASK_FILE_CHARS)
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in entry):
+            raise ValueError("a file path must not contain control characters")
+    return value
+
+
+def _clean_option(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    value = value.strip()
+    if not value or len(value) > MAX_OPTION_CHARS:
+        raise ValueError("must be 1 to %d characters" % MAX_OPTION_CHARS)
+    return value
 
 
 def _get_utc_now_iso() -> str:
@@ -74,6 +102,11 @@ class Task(BaseModel):
     created_at: str = Field(default_factory=_get_utc_now_iso)
     updated_at: str = Field(default_factory=_get_utc_now_iso)
     completed_at: Optional[str] = None
+    # Optional run options for whoever works the task. Absent on tasks made
+    # before these existed, and null when the creator set none.
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    files: Optional[List[str]] = None
 
 
 class Job(BaseModel):
@@ -114,6 +147,19 @@ class TaskSpec(BaseModel):
     description: str = ""
     assigned_agent: str
     dependencies: List[str] = Field(default_factory=list)
+    model: Optional[str] = None
+    effort: Optional[str] = None
+    files: Optional[List[str]] = None
+
+    @field_validator("model", "effort")
+    @classmethod
+    def _check_option(cls, value: Optional[str]) -> Optional[str]:
+        return _clean_option(value)
+
+    @field_validator("files")
+    @classmethod
+    def _check_files(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        return _clean_files(value)
 
 
 class CreateJobRequest(BaseModel):
