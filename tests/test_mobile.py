@@ -20,7 +20,8 @@ from agent_relay.core.pairing import (
 def client(tmp_path):
     db_file = str(tmp_path / "mobile_test.db")
     app = create_app(db_path=db_file, port=8765)
-    return TestClient(app)
+    # The dashboard on this computer: a loopback client with the hub's own Host.
+    return TestClient(app, base_url="http://127.0.0.1:8765", client=("127.0.0.1", 50000))
 
 
 def test_network_detection():

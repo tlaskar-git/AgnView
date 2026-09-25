@@ -11,6 +11,10 @@ restarts. Nothing about it is ever shown to the user.
 Reachability is never on the startup path. start() schedules the work and
 returns, so a hub with no route to the internet still starts and still serves
 the dashboard over LAN.
+
+A connection carries one or more bidirectional streams, each with one request.
+A request with no "op" key streams the console, as it always has. A request
+with "op": "api" is one call to the mobile API, answered by iroh_api.
 """
 
 import asyncio
@@ -19,10 +23,14 @@ import logging
 import os
 import secrets
 import socket
+import time
+from collections import deque
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
 
+from . import iroh_api
 from .network import Transport, resolve_iroh_path_transport
+from .pairing import check_auth_rate_limit, record_failed_auth, reset_auth_rate_limit
 
 logger = logging.getLogger("agnview.iroh")
 
@@ -45,6 +53,34 @@ CONSOLE_POLL_SECONDS = 0.5
 CONSOLE_PING_SECONDS = 15.0
 
 MAX_REQUEST_BYTES = 64 * 1024
+
+# How long a client has to send its request and finish its send side.
+REQUEST_READ_TIMEOUT_SECONDS = 30.0
+
+# Streams a client may hold open on one connection at once: the console plus
+# a few API calls. QUIC holds any further stream back until one ends.
+MAX_STREAMS_PER_CONNECTION = 8
+
+# How long an error frame is given to reach the client before the connection
+# that carried it is closed.
+FLUSH_BEFORE_CLOSE_SECONDS = 2.0
+
+# The client address the in-process API request carries. The hub's own auth
+# middleware counts a wrong key from it under this name.
+IROH_RATE_LIMIT_KEY = iroh_api.IROH_CLIENT_ADDRESS[0]
+
+# Wrong pairing keys are counted per peer, in the limiter the LAN uses, under
+# "iroh:" plus the peer's endpoint id. A valid key is checked first and is never
+# refused. A peer id costs nothing to make, so a second cap counts wrong keys
+# across all peers. It throttles only wrong keys, so it cannot lock out a
+# valid one.
+IROH_PEER_KEY_PREFIX = IROH_RATE_LIMIT_KEY + ":"
+IROH_GLOBAL_INVALID_LIMIT = 60
+IROH_GLOBAL_WINDOW_SECONDS = 60.0
+
+
+class _RequestTooLarge(Exception):
+    pass
 
 
 def _set_posix_permissions_0600(file_path: Path) -> None:
@@ -87,7 +123,7 @@ def iroh_available() -> bool:
 
 
 class IrohTransport(Transport):
-    """Accept AgnView console connections over iroh.
+    """Accept AgnView console and mobile API connections over iroh.
 
     States reported by status()['state']:
       disabled     turned off by configuration
@@ -107,12 +143,20 @@ class IrohTransport(Transport):
         enabled: bool = True,
         disabled_reason: str = "",
         secret_key_path: Optional[Path] = None,
+        asgi_app: Any = None,
+        api_enabled: bool = True,
     ):
         self._db = db
         self._token_provider = token_provider
         self._relay_url = (relay_url or "").strip()
         self._enabled = enabled
         self._secret_key_path = secret_key_path
+        # The hub's own FastAPI app. API mode hands requests to it in-process.
+        self._asgi_app = asgi_app
+        self._api_enabled = api_enabled
+        self._api_slots = iroh_api.ApiSlots(iroh_api.MAX_API_CALLS_TOTAL)
+        # When each recent invalid key arrived, across every peer.
+        self._invalid_attempts: Deque[float] = deque()
 
         self._state = "disabled" if not enabled else "starting"
         self._error = disabled_reason if not enabled else ""
@@ -185,6 +229,7 @@ class IrohTransport(Transport):
             "direct_addresses": list(self._direct_addresses),
             "connections": self._connections,
             "last_resolved_transport": self._last_resolved,
+            "capabilities": self.capabilities,
         }
 
     # ----------------- Convenience -----------------
@@ -201,6 +246,18 @@ class IrohTransport(Transport):
     @property
     def last_resolved_transport(self) -> Optional[str]:
         return self._last_resolved
+
+    @property
+    def api_enabled(self) -> bool:
+        """True when API mode is switched on, whether or not an app is attached."""
+        return self._api_enabled
+
+    @property
+    def capabilities(self) -> List[str]:
+        """What a client can ask for on this hub, as sent in the hello frame."""
+        if self._api_enabled and self._asgi_app is not None:
+            return ["console", "api"]
+        return ["console"]
 
     # ----------------- Endpoint lifecycle -----------------
 
@@ -268,38 +325,167 @@ class IrohTransport(Transport):
 
     async def _handle_incoming(self, incoming: Any) -> None:
         conn = None
+        streams: List[asyncio.Task] = []
         try:
             accepting = await incoming.accept()
             conn = await accepting.connect()
             self._connections += 1
             resolved = resolve_iroh_path_transport(conn.paths())
             self._last_resolved = resolved
+            try:
+                conn.set_max_concurrent_bi_streams(MAX_STREAMS_PER_CONNECTION)
+            except Exception as exc:
+                logger.debug("could not cap streams on an iroh connection: %s", exc)
 
-            bi = await conn.accept_bi()
-            recv = bi.recv()
-            send = bi.send()
-
-            raw = await recv.read_to_end(MAX_REQUEST_BYTES)
-            request = self._parse_request(raw)
-            if request is None:
-                await self._write_frame(send, {"type": "error", "detail": "malformed request"})
-                return
-
-            if not self._authorised(request.get("token")):
-                await self._write_frame(send, {"type": "error", "detail": "unauthorised"})
-                return
-
-            await self._stream_console(conn, send, request)
+            # Every stream is one request. A console request holds its stream
+            # and closes the connection when it ends, as it always has. An API
+            # request ends its stream and leaves the connection open for the
+            # next one, so a phone need not reconnect for every call.
+            slots = iroh_api.ApiSlots(iroh_api.MAX_API_CALLS_PER_CONNECTION)
+            while not self._closing:
+                try:
+                    bi = await conn.accept_bi()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug("iroh connection ended: %s", exc)
+                    break
+                streams = [t for t in streams if not t.done()]
+                streams.append(asyncio.ensure_future(self._handle_stream(conn, bi, slots)))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             logger.debug("iroh connection ended: %s", exc)
         finally:
+            for task in streams:
+                if not task.done():
+                    task.cancel()
             if conn is not None:
+                self._close_connection(conn)
+
+    async def _handle_stream(self, conn: Any, bi: Any, slots: "iroh_api.ApiSlots") -> None:
+        """Serve the one request a stream carries."""
+        recv = bi.recv()
+        send = bi.send()
+        keep_connection = False
+        try:
+            try:
+                raw = await asyncio.wait_for(
+                    self._read_request(recv), timeout=REQUEST_READ_TIMEOUT_SECONDS
+                )
+            except _RequestTooLarge:
+                await self._write_error(send, iroh_api.ERROR_TOO_LARGE)
+                return
+            except asyncio.TimeoutError:
+                await self._write_error(send, iroh_api.ERROR_TIMEOUT)
+                return
+
+            request = self._parse_request(raw)
+            if request is None:
+                await self._write_error(send, "malformed request")
+                return
+
+            op = request.get("op")
+            # The key is checked first, in constant time. A valid key always
+            # proceeds, so no amount of wrong guesses from anyone can lock the
+            # owner out. Only invalid attempts are counted and throttled: per
+            # peer, and across all peers with a separate cap. API mode can
+            # dispatch prompts, so it always needs a pairing key, even on a
+            # hub that runs without one.
+            peer_key = self._peer_limit_key(conn)
+            if not self._authorised(request.get("token"), require_token=op is not None):
+                if not check_auth_rate_limit(peer_key) or not self._global_invalid_allowed():
+                    await self._write_error(send, iroh_api.ERROR_RATE_LIMITED)
+                    return
+                record_failed_auth(peer_key)
+                self._record_global_invalid()
+                await self._write_error(send, iroh_api.ERROR_UNAUTHORISED)
+                return
+            reset_auth_rate_limit(peer_key)
+
+            if op is None:
+                await self._stream_console(conn, send, request)
+                return
+
+            keep_connection = True
+            await self._serve_api(send, request, slots)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.debug("iroh stream ended: %s", exc)
+        finally:
+            await self._finish(send, wait=not keep_connection)
+            if not keep_connection:
+                self._close_connection(conn)
+
+    async def _serve_api(self, send: Any, request: Dict[str, Any], slots: "iroh_api.ApiSlots") -> None:
+        """Answer one API request: hello, then one response or error frame."""
+        await self._write_frame(send, self._hello_frame())
+
+        started = time.monotonic()
+        method, template, outcome = "-", "-", ""
+        try:
+            if request.get("op") != iroh_api.API_OP:
+                raise iroh_api.ApiError(iroh_api.ERROR_BAD_REQUEST)
+            if "api" not in self.capabilities:
+                raise iroh_api.ApiError(iroh_api.ERROR_FORBIDDEN_PATH)
+            api_request = iroh_api.parse_api_request(request)
+            method, template = api_request.method, api_request.template
+            with iroh_api.claim(slots, self._api_slots):
+                frame = await iroh_api.forward_to_app(
+                    self._asgi_app, api_request, token=self._expected_token()
+                )
+            outcome = str(frame["status"])
+        except iroh_api.ApiError as exc:
+            frame = {"type": "error", "detail": exc.code}
+            outcome = exc.code
+
+        # Method, route template, outcome and time only. Never the key, the
+        # body or the query.
+        logger.info(
+            "iroh api %s %s -> %s in %.0f ms",
+            method, template, outcome, (time.monotonic() - started) * 1000,
+        )
+        await self._write_frame(send, frame)
+
+    @staticmethod
+    async def _read_request(recv: Any) -> bytes:
+        """Read the request up to the client's end of stream, within the size cap."""
+        data = bytearray()
+        while True:
+            chunk = await recv.read(MAX_REQUEST_BYTES + 1 - len(data))
+            if not chunk:
+                return bytes(data)
+            data.extend(chunk)
+            if len(data) > MAX_REQUEST_BYTES:
                 try:
-                    await conn.close(0, b"bye")
+                    await recv.stop(0)
                 except Exception:
                     pass
+                raise _RequestTooLarge()
+
+    async def _write_error(self, send: Any, detail: str) -> None:
+        await self._write_frame(send, {"type": "error", "detail": detail})
+
+    @staticmethod
+    async def _finish(send: Any, wait: bool) -> None:
+        """End our side of the stream, and give the last frame time to land
+        when the connection is about to close under it."""
+        try:
+            await send.finish()
+            if wait:
+                await asyncio.wait_for(send.stopped(), timeout=FLUSH_BEFORE_CLOSE_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    @staticmethod
+    def _close_connection(conn: Any) -> None:
+        try:
+            conn.close(0, b"bye")
+        except Exception:
+            pass
 
     @staticmethod
     def _parse_request(raw: bytes) -> Optional[Dict[str, Any]]:
@@ -312,30 +498,56 @@ class IrohTransport(Transport):
         except Exception:
             return None
 
-    def _authorised(self, provided: Optional[str]) -> bool:
-        expected = None
-        if self._token_provider is not None:
-            try:
-                expected = self._token_provider()
-            except Exception:
-                expected = None
+    @staticmethod
+    def _peer_limit_key(conn: Any) -> str:
+        """The limiter key for the peer on this connection."""
+        try:
+            text = str(conn.remote_id()).strip()
+        except Exception:
+            text = ""
+        return f"{IROH_PEER_KEY_PREFIX}{text or 'unknown'}"
+
+    def _global_invalid_allowed(self) -> bool:
+        now = time.monotonic()
+        recent = self._invalid_attempts
+        while recent and now - recent[0] >= IROH_GLOBAL_WINDOW_SECONDS:
+            recent.popleft()
+        return len(recent) < IROH_GLOBAL_INVALID_LIMIT
+
+    def _record_global_invalid(self) -> None:
+        self._invalid_attempts.append(time.monotonic())
+
+    def _expected_token(self) -> Optional[str]:
+        if self._token_provider is None:
+            return None
+        try:
+            return self._token_provider()
+        except Exception:
+            return None
+
+    def _authorised(self, provided: Optional[str], require_token: bool = False) -> bool:
+        expected = self._expected_token()
         if not expected:
-            return True
+            return not require_token
         return bool(provided) and secrets.compare_digest(str(provided), str(expected))
 
-    async def _stream_console(self, conn: Any, send: Any, request: Dict[str, Any]) -> None:
-        agent = request.get("agent") or "all"
-        backlog = int(request.get("backlog") or 200)
-        after_id = request.get("after_id")
-        after_id = int(after_id) if after_id is not None else None
-
-        await self._write_frame(send, {
+    def _hello_frame(self) -> Dict[str, Any]:
+        return {
             "type": "hello",
             "app": "AgnView",
             "protocol": IROH_PROTOCOL_VERSION,
             "hostname": socket.gethostname(),
             "transport": self._last_resolved,
-        })
+            "capabilities": self.capabilities,
+        }
+
+    async def _stream_console(self, conn: Any, send: Any, request: Dict[str, Any]) -> None:
+        agent = request.get("agent") or "all"
+        backlog = min(max(int(request.get("backlog") or 200), 0), iroh_api.MAX_PAGE_SIZE)
+        after_id = request.get("after_id")
+        after_id = int(after_id) if after_id is not None else None
+
+        await self._write_frame(send, self._hello_frame())
 
         rows = await self._read_console(agent=agent, limit=backlog, after_id=after_id)
         for row in rows:

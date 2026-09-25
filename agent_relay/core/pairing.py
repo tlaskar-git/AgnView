@@ -34,6 +34,7 @@ PAIRING_URI_SCHEME = "agnview"
 _FAILED_ATTEMPTS: Dict[str, list] = {}
 RATE_LIMIT_MAX_ATTEMPTS = 10
 RATE_LIMIT_WINDOW_SECONDS = 60.0
+_PRUNE_ABOVE_KEYS = 512
 
 
 def check_auth_rate_limit(client_ip: str) -> bool:
@@ -49,6 +50,10 @@ def check_auth_rate_limit(client_ip: str) -> bool:
 def record_failed_auth(client_ip: str):
     """Record a failed authentication attempt for rate limiting."""
     now = time.time()
+    if len(_FAILED_ATTEMPTS) > _PRUNE_ABOVE_KEYS:
+        # Keys are cheap to invent, so drop the ones whose attempts all expired.
+        for key in [k for k, v in _FAILED_ATTEMPTS.items() if not any(now - t < RATE_LIMIT_WINDOW_SECONDS for t in v)]:
+            del _FAILED_ATTEMPTS[key]
     if client_ip not in _FAILED_ATTEMPTS:
         _FAILED_ATTEMPTS[client_ip] = []
     _FAILED_ATTEMPTS[client_ip].append(now)

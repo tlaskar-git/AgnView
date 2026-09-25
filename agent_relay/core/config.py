@@ -40,6 +40,16 @@ relay_url: ""
 
 # iroh_enabled: set to false to keep the hub on the LAN only.
 iroh_enabled: true
+
+# iroh_api_enabled: with iroh on, a paired phone can use Usage, Pipelines,
+# Sessions and prompt dispatch over iroh too, gated by the same pairing key as
+# on the LAN. Set to false to serve only the live console over iroh.
+iroh_api_enabled: true
+
+# iroh_dispatch_roots: folders a phone may run an agent in over iroh. Empty
+# means any existing folder. Set a list, for example ["/home/me/work"], to keep
+# phone dispatches inside those folders. The LAN is not affected.
+iroh_dispatch_roots: []
 """
 
 
@@ -53,6 +63,8 @@ class HubConfig:
 
     relay_url: str = ""
     iroh_enabled: bool = True
+    iroh_api_enabled: bool = True
+    iroh_dispatch_roots: List[str] = field(default_factory=list)
     path: Optional[Path] = None
     errors: List[str] = field(default_factory=list)
 
@@ -65,6 +77,8 @@ class HubConfig:
             "path": str(self.path) if self.path else None,
             "relay_url": self.relay_url,
             "iroh_enabled": self.iroh_enabled,
+            "iroh_api_enabled": self.iroh_api_enabled,
+            "iroh_dispatch_roots": list(self.iroh_dispatch_roots),
             "errors": list(self.errors),
         }
 
@@ -160,6 +174,24 @@ def load_config(path: Optional[Path] = None) -> HubConfig:
         config.iroh_enabled = enabled
     else:
         message = f"{config_path}: iroh_enabled must be true or false, got {enabled!r}"
+        logger.error("AgnView configuration error: %s", message)
+        config.errors.append(message)
+
+    api_enabled = raw.get("iroh_api_enabled", True)
+    if isinstance(api_enabled, bool):
+        config.iroh_api_enabled = api_enabled
+    else:
+        message = f"{config_path}: iroh_api_enabled must be true or false, got {api_enabled!r}"
+        logger.error("AgnView configuration error: %s", message)
+        config.errors.append(message)
+
+    roots = raw.get("iroh_dispatch_roots", [])
+    if roots is None:
+        roots = []
+    if isinstance(roots, list) and all(isinstance(r, str) and r.strip() and "\x00" not in r for r in roots):
+        config.iroh_dispatch_roots = [r.strip() for r in roots]
+    else:
+        message = f"{config_path}: iroh_dispatch_roots must be a list of folder paths, got {roots!r}"
         logger.error("AgnView configuration error: %s", message)
         config.errors.append(message)
 

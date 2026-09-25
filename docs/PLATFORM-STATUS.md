@@ -11,7 +11,7 @@ not Windows.
 | Windows | Desktop app (`AgnView.exe`), or `agnview serve` in a browser | Complete. Released as `AgnView-windows-x64.zip` on every GitHub release |
 | macOS | Desktop app (`AgnView.app`), or `agnview serve` in a browser | Desktop app built and tested on every change by `.github/workflows/macos.yml`, and attached to each GitHub release from the next `v*` tag on as `AgnView-macos.dmg`. Signed ad hoc until the signing secrets are set |
 | Linux | `agnview serve` in a browser | Works. No desktop app |
-| iOS and iPadOS | Companion app that pairs with a hub | Not built. Design and spec only, in a separate repository |
+| iOS and iPadOS | Companion app that pairs with a hub | Not built. Design and spec only, in a separate repository. The hub side is ready: console, status, Usage, Pipelines, Sessions and dispatch over the LAN and over iroh |
 | Android | Companion app | Not started |
 
 ## Windows desktop app
@@ -98,6 +98,17 @@ streams the console. Tested end to end against the Windows desktop app over
 iroh. `docs/PAIRING.md` and `docs/mobile-api-spec.json` are the contract a
 phone app must follow.
 
+Over iroh the hub serves the live console and, in API mode, the mobile API a
+phone needs away from the LAN: status, Usage, Pipelines (jobs and the
+request-revision and fail task actions), Sessions and prompt dispatch. Each
+call goes through the hub's own FastAPI app in-process, behind the same
+pairing key and rate limit as the LAN, and only allowlisted routes answer.
+`docs/PAIRING.md` section 5 has the protocol. `tools/iroh-client.py --api`
+exercises it. Tested over real iroh endpoints on the loopback interface in
+`tests/test_iroh_api_live.py`. Not yet tested from a phone through a public
+relay. Turn API mode off with `iroh_api_enabled: false` in
+`~/.agnview/config.yaml` or `AGNVIEW_IROH_API=0`.
+
 The Windows desktop app has an Allow phones on my network setting, in the
 tray menu and on the pairing screen, off by default. Off, it listens on
 loopback and the QR code's `lan` field is `127.0.0.1:<port>`, which a client
@@ -114,7 +125,7 @@ in its menu bar menu and on the pairing screen.
    across a log out and in, Allow phones on my network with a phone, and the
    AntiGravity card with a real AntiGravity sign-in.
 3. **iOS and iPadOS app**, pairing through the QR code and following
-   `docs/mobile-api-spec.json`.
+   `docs/mobile-api-spec.json`, over the LAN or over iroh in API mode.
 4. **Android app.**
 
 ## Rules for this repository

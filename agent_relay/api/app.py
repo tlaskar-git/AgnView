@@ -1,14 +1,15 @@
 import asyncio
 import logging
 import os
+import secrets
 import uuid
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 
+from .local_only import PAIRING_PREFIX, pairing_request_allowed, refuse_pairing_request
 from .routes import router as api_router
 from ..core.engine import RelayEngine
 from ..core.db import Database
@@ -23,11 +24,26 @@ logger = logging.getLogger(__name__)
 IROH_ENV = "AGNVIEW_IROH"
 
 
-def _iroh_enabled_from_env() -> bool:
-    value = os.environ.get(IROH_ENV)
+# Set AGNVIEW_IROH_API=0 to serve only the live console over iroh. The mobile
+# API over iroh is on whenever iroh is, gated by the same pairing key as the
+# LAN. The Allow phones on my network switch does not govern it: that switch
+# only picks the LAN address, and iroh never depended on it.
+IROH_API_ENV = "AGNVIEW_IROH_API"
+
+
+def _env_switch(name: str) -> bool:
+    value = os.environ.get(name)
     if value is None:
         return True
     return value.strip().lower() not in ("0", "false", "no", "off")
+
+
+def _iroh_enabled_from_env() -> bool:
+    return _env_switch(IROH_ENV)
+
+
+def _iroh_api_enabled_from_env() -> bool:
+    return _env_switch(IROH_API_ENV)
 
 
 def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, port: int = 8765) -> FastAPI:
@@ -39,14 +55,18 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
         version="0.1.11"
     )
 
-    # Enable CORS for external tools, mobile apps, and browser extensions
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    # No CORS. The dashboard is served by the hub itself, so its requests are
+    # same-origin, and native phone apps are not bound by CORS. A wildcard would
+    # let any web page the operator visits read the pairing key.
+
+    # The pairing routes hand out the pairing key. They are open to the local
+    # dashboard only, with or without an auth token, and whatever interface the
+    # hub listens on.
+    @app.middleware("http")
+    async def pairing_routes_are_local_only(request: Request, call_next):
+        if request.url.path.startswith(PAIRING_PREFIX) and not pairing_request_allowed(request, port):
+            return refuse_pairing_request()
+        return await call_next(request)
 
     # Token Authentication Middleware for distributed multi-computer and mobile setups
     if token:
@@ -91,7 +111,7 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
                         provided = token_param.strip()
 
                     expected = request.app.state.auth_token or token
-                    if not provided or provided != expected:
+                    if not provided or not secrets.compare_digest(provided.encode("utf-8"), str(expected).encode("utf-8")):
                         record_failed_auth(client_ip)
                         return JSONResponse(
                             status_code=401,
@@ -128,6 +148,8 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
         relay_url=config.relay_url,
         enabled=iroh_enabled,
         disabled_reason=disabled_reason,
+        asgi_app=app,
+        api_enabled=_iroh_api_enabled_from_env() and config.iroh_api_enabled,
     )
     app.state.iroh = iroh_transport
 
