@@ -1,0 +1,141 @@
+name: Windows desktop app
+
+# Builds the AgnView Windows desktop app with tools/build-windows.ps1 and
+# attaches AgnView-windows-x64.zip to the GitHub release of each v* tag.
+# To attach the zip to an existing release, run this workflow by hand and
+# enter the tag, for example v0.1.11.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and attach to, for example v0.1.11
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build, verify and attach the zip
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      EVENT_NAME: ${{ github.event_name }}
+      REF_NAME: ${{ github.ref_name }}
+      INPUT_TAG: ${{ inputs.tag }}
+    steps:
+      - name: Resolve the tag
+        id: tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            tag="$INPUT_TAG"
+          else
+            tag="$REF_NAME"
+          fi
+          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([.-][A-Za-z0-9.]+)?$'; then
+            echo "The tag is not a version tag like v0.1.11." >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ format('refs/tags/{0}', steps.tag.outputs.tag) }}
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # The script builds dist\AgnView\ with PyInstaller and packs
+      # dist\AgnView-windows-x64.zip. It installs nothing without -Install.
+      - name: Build
+        shell: pwsh
+        run: ./tools/build-windows.ps1
+
+      - name: Verify the zip
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $zip = "dist/AgnView-windows-x64.zip"
+          $size = (Get-Item $zip).Length
+          Write-Host ("Zip size: {0:N1} MB" -f ($size / 1MB))
+          if ($size -lt 20MB -or $size -gt 600MB) { throw "Zip size $size bytes is outside the expected range." }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip))
+          try {
+            $names = $archive.Entries | ForEach-Object { $_.FullName.Replace([string][char]92, '/') }
+          } finally { $archive.Dispose() }
+          Write-Host ("Entries: {0}" -f $names.Count)
+          $names | Select-Object -First 15 | ForEach-Object { Write-Host "  $_" }
+          if ($names -notcontains "AgnView/AgnView.exe") { throw "AgnView/AgnView.exe is not at the top of the zip." }
+          $outside = $names | Where-Object { -not $_.StartsWith("AgnView/") }
+          if ($outside) { throw "Entries outside the AgnView folder: $outside" }
+          if (-not ($names | Where-Object { $_ -like "AgnView/_internal/*" })) { throw "The support files are missing." }
+
+      # The app is windowed, so it has no console and no version flag. Start it
+      # minimised on a loopback port, read the version from the hub's OpenAPI
+      # document and compare it with pyproject.toml, then stop it. The tray
+      # and the window are not exercised.
+      - name: Smoke test the extracted app
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $dest = Join-Path $env:RUNNER_TEMP "smoke"
+          Expand-Archive -Path dist/AgnView-windows-x64.zip -DestinationPath $dest
+          $exe = Join-Path $dest "AgnView/AgnView.exe"
+          if (-not (Test-Path $exe)) { throw "AgnView.exe is missing after extraction." }
+          $expected = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $port = Get-Random -Minimum 20000 -Maximum 40000
+          $proc = Start-Process -FilePath $exe -ArgumentList "--minimized", "--port", $port -PassThru
+          try {
+            $version = $null
+            for ($i = 0; $i -lt 60 -and -not $version; $i++) {
+              Start-Sleep -Seconds 1
+              if ($proc.HasExited) { throw "AgnView exited early with code $($proc.ExitCode)." }
+              try {
+                $version = (Invoke-RestMethod "http://127.0.0.1:$port/openapi.json" -TimeoutSec 3).info.version
+              } catch { $version = $null }
+            }
+            if (-not $version) { throw "The hub did not answer on loopback within 60 seconds." }
+            Write-Host "Hub answered with version $version, expected $expected."
+            if ($version -ne $expected) { throw "Version mismatch." }
+          } finally {
+            Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
+
+      - name: Checksum
+        id: sum
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash dist/AgnView-windows-x64.zip -Algorithm SHA256).Hash.ToLower()
+          Write-Host "SHA-256: $hash"
+          "## AgnView-windows-x64.zip`n`nSHA-256: ``$hash```n" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      # Creates the release only when the macOS or PyPI workflow has not yet.
+      # Uploads only this workflow's file, so other assets stay untouched.
+      - name: Attach AgnView-windows-x64.zip
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --title "AgnView ${TAG#v}" --notes "AgnView ${TAG#v}" \
+              || gh release view "$TAG" >/dev/null
+          fi
+          gh release upload "$TAG" dist/AgnView-windows-x64.zip --clobber

@@ -129,7 +129,8 @@ is needed. Pick one of three ways to install it.
 [`AgnView-windows-x64.zip`](https://github.com/tlaskar-git/AgnView/releases/latest/download/AgnView-windows-x64.zip) from the
 [latest release](https://github.com/tlaskar-git/AgnView/releases/latest), extract the `AgnView` folder to
 `%LOCALAPPDATA%\Programs\AgnView` and run `AgnView.exe`. Keep the whole folder
-together, because the exe needs the files beside it.
+together, because the exe needs the files beside it. Each release carries
+`AgnView-windows-x64.zip`, built by CI from the release tag.
 
 The zip holds one folder named `AgnView`. When you extract it, check that
 `AgnView.exe` sits directly in `%LOCALAPPDATA%\Programs\AgnView`, not in a
