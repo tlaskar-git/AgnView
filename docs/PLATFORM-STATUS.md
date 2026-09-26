@@ -36,6 +36,21 @@ locally with PyInstaller, never on CI.
   after a timeout), and removes a leftover LaunchAgent when Start at login is
   off. Unit tests cover this. It is not yet checked on a real Mac.
 - Every child process starts without a console window (`agent_relay/core/proc.py`).
+- The download mark is cleared at start. A browser marks each downloaded file
+  with a `Zone.Identifier` stream and extracting the zip copies it to every
+  file. The .NET runtime then refuses to load pythonnet and the WebView2
+  libraries, so the window failed with "Failed to resolve
+  Python.Runtime.Loader.Initialize". Before the window starts, and before a
+  newer copy takes over, the frozen app deletes that stream from every file in
+  its own folder (`clear_own_download_mark` in `agent_relay/desktop/app.py`).
+  It never follows a symlink or junction. A note in
+  `~/.agnview/download-mark-cleared.json` skips the walk on later starts of
+  the same version and folder, and the walk runs again when Python.Runtime.dll
+  or a WebView2 library is marked. If the window still fails with a loader
+  error, the app clears the mark again and retries once, and then the error
+  dialog shows the exact `Unblock-File` command for the install folder. The
+  Windows workflow extracts the built zip, marks every file, and requires the
+  app to start clean.
 
 ## macOS desktop app
 

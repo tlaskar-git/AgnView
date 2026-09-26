@@ -118,6 +118,98 @@ jobs:
             Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
           }
 
+      # A zip downloaded in a browser leaves a Zone.Identifier stream (the
+      # download mark, ZoneId=3) on every file it extracts. The .NET runtime
+      # refuses to load a marked pythonnet or WebView2 assembly, and before
+      # the app cleared its own mark the window failed with "Failed to resolve
+      # Python.Runtime.Loader.Initialize". This step extracts the built zip,
+      # marks every file the way a browser does, and starts the exe with
+      # CreateProcess, which is what a double-click does after the security
+      # warning is accepted. The app must come up with the built version, the
+      # log must show no loader error, and no file may still carry the mark.
+      # A second start with only pythonnet and a WebView2 assembly marked
+      # again, as after extracting a zip over an existing install, must clear
+      # them too.
+      - name: Smoke test a zip downloaded in a browser
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = (Select-String -Path pyproject.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          $root = Join-Path $env:RUNNER_TEMP "browser-download"
+          Expand-Archive -Path dist/AgnView-windows-x64.zip -DestinationPath $root
+          $app = Join-Path $root "AgnView"
+          $exe = Join-Path $app "AgnView.exe"
+          $runtime = Join-Path $app "_internal/pythonnet/runtime/Python.Runtime.dll"
+
+          $data = Join-Path $env:USERPROFILE ".agnview"
+          $recordPath = Join-Path $data "desktop-instance.json"
+          $logPath = Join-Path $data "logs/desktop.log"
+          function Read-Json($path) { try { Get-Content $path -Raw | ConvertFrom-Json } catch { $null } }
+          function Get-Answer($port) {
+            if (-not $port) { return $null }
+            try { (Invoke-RestMethod "http://127.0.0.1:$port/openapi.json" -TimeoutSec 3).info.version } catch { $null }
+          }
+          function Set-Mark($path) {
+            Set-Content -Path $path -Stream Zone.Identifier -Value "[ZoneTransfer]`r`nZoneId=3"
+          }
+          function Get-MarkedFiles { Get-ChildItem $app -Recurse -File | Where-Object { Get-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue } }
+          function Start-Like-DoubleClick {
+            $psi = New-Object System.Diagnostics.ProcessStartInfo
+            $psi.FileName = $exe
+            $psi.WorkingDirectory = $app
+            $psi.UseShellExecute = $false
+            [System.Diagnostics.Process]::Start($psi)
+          }
+          function Fail($message) {
+            Write-Host "::group::Diagnostics"
+            Write-Host "Files still marked: $(@(Get-MarkedFiles).Count)"
+            Write-Host "Last lines of desktop.log:"
+            if (Test-Path $logPath) { Get-Content $logPath -Tail 40 | Write-Host } else { Write-Host "  none" }
+            Write-Host "::endgroup::"
+            throw $message
+          }
+          function Test-Start($label) {
+            Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
+            Start-Sleep -Seconds 2
+            Remove-Item $recordPath, $logPath -Force -ErrorAction SilentlyContinue
+            $proc = Start-Like-DoubleClick
+            $answer = $null
+            for ($i = 0; $i -lt 90 -and $answer -ne $expected; $i++) {
+              Start-Sleep -Seconds 1
+              if ($proc.HasExited) { Fail "${label}: AgnView exited early with code $($proc.ExitCode)." }
+              $record = Read-Json $recordPath
+              if ($record -and $record.port) { $answer = Get-Answer ([int]$record.port) }
+            }
+            if ($answer -ne $expected) { Fail "${label}: the hub answered '$answer', expected $expected." }
+            # The window opens after the hub answers, so give a loader failure
+            # time to show up before the log is read.
+            Start-Sleep -Seconds 15
+            if ($proc.HasExited) { Fail "${label}: AgnView exited with code $($proc.ExitCode) after it started." }
+            $log = if (Test-Path $logPath) { Get-Content $logPath -Raw } else { "" }
+            if ($log -match "Failed to resolve|clr_loader|The AgnView window stopped|NotSupportedException") { Fail "${label}: the log shows a window or loader error." }
+            $left = @(Get-MarkedFiles)
+            if ($left.Count) { Fail "${label}: $($left.Count) files still carry the download mark." }
+            Write-Host "${label}: version $answer answers, the log is clean and no file carries the mark."
+          }
+
+          try {
+            $files = @(Get-ChildItem $app -Recurse -File)
+            foreach ($f in $files) { Set-Mark $f.FullName }
+            $count = @(Get-MarkedFiles).Count
+            Write-Host "Marked $count of $($files.Count) files the way a browser download does."
+            if ($count -ne $files.Count) { throw "Not every file was marked." }
+            $stream = (Get-Content -Path $runtime -Stream Zone.Identifier) -join "|"
+            if ($stream -ne "[ZoneTransfer]|ZoneId=3") { throw "Python.Runtime.dll carries '$stream', not the download mark." }
+
+            Test-Start "Marked download"
+
+            Set-Mark $runtime
+            Set-Mark (Join-Path $app "_internal/webview/lib/Microsoft.Web.WebView2.Core.dll")
+            Test-Start "Marked again"
+          } finally {
+            Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
+
       # A person updates by starting the new AgnView.exe while the previous
       # release runs. The new copy must close the old one and answer on the
       # same port, and it must keep running.

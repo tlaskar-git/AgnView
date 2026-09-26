@@ -137,6 +137,17 @@ The zip holds one folder named `AgnView`. When you extract it, check that
 second `AgnView` folder inside it. A nested copy is easy to miss, and the old
 `AgnView.exe` one level up keeps starting instead.
 
+A zip downloaded in a browser carries Windows' download mark (Mark of the Web)
+on every file in it. AgnView clears that mark from its own folder each time it
+starts, before the window opens, so a plain extract and double-click works and
+you do not need to unblock anything. `Unblock-File` is only needed if a
+firewall or antivirus product stops AgnView from clearing the mark. AgnView
+then shows the exact command for your folder, and you can also run it yourself:
+
+```powershell
+Get-ChildItem "$env:LOCALAPPDATA\Programs\AgnView" -Recurse | Unblock-File
+```
+
 **To update**, download the new zip, extract it the same way and start the new
 `AgnView.exe`. From 0.1.8 on, a newer copy closes an older running copy by
 itself and takes its place, so there is no need to quit the old one first. For

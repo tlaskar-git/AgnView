@@ -302,6 +302,152 @@ def run_value_present() -> bool:
         return False
 
 
+# --- The download mark --------------------------------------------------------
+#
+# A browser marks every file it downloads with an NTFS alternate data stream
+# named Zone.Identifier (ZoneId=3, the internet zone). Extracting the zip
+# copies the mark onto every extracted file. The .NET runtime refuses to load
+# a marked assembly, so pythonnet failed with "Failed to resolve
+# Python.Runtime.Loader.Initialize" and the window never opened. Unblock-File
+# removes the mark, and so does this: the app deletes the stream from its own
+# files before the window starts.
+
+MOTW_STREAM = ":Zone.Identifier"
+MOTW_MARKER_PATH = DATA_DIR / "download-mark-cleared.json"
+FILE_ATTRIBUTE_REPARSE_POINT = 0x400
+# The .NET libraries whose mark stops the window: pythonnet's own assembly,
+# and the WebView2 assemblies in the webview library folder. A copy of the
+# 0.1.13 zip with only Python.Runtime.dll marked failed with "Failed to
+# resolve Python.Runtime.Loader.Initialize", and one with only the webview
+# libraries marked failed with "An attempt was made to load an assembly from a
+# network location". The exe and the .pyd files are not decisive. These are
+# checked first, so a start with nothing to clear reads a few streams and walks
+# nothing.
+MOTW_RUNTIME_DLL = ("_internal", "pythonnet", "runtime", "Python.Runtime.dll")
+MOTW_WEBVIEW_LIB = ("_internal", "webview", "lib")
+
+
+def install_folder() -> Path:
+    """The folder that holds AgnView.exe and its _internal folder."""
+    return Path(sys.executable).parent
+
+
+def decisive_files(folder: Path) -> list:
+    """The .NET libraries that must not carry the mark, as paths."""
+    found = [str(folder.joinpath(*MOTW_RUNTIME_DLL))]
+    try:
+        with os.scandir(folder.joinpath(*MOTW_WEBVIEW_LIB)) as scan:
+            found += [entry.path for entry in scan if entry.name.lower().endswith(".dll")]
+    except OSError:
+        pass
+    return found
+
+
+def _has_download_mark(path: str) -> bool:
+    try:
+        return os.path.exists(path + MOTW_STREAM)
+    except (OSError, ValueError):
+        return False
+
+
+def clear_download_mark(folder: Path) -> int:
+    """Remove the Zone.Identifier stream from every file under folder and
+    return how many streams went. Never raises.
+
+    The walk stays inside folder. A symlink or junction, which is any reparse
+    point, is neither followed nor cleared, so nothing outside the folder is
+    touched. A file without the stream is the normal case. A file that cannot
+    be changed is left as it is and noted at debug level, without its path.
+    """
+    removed = 0
+    stack = [os.fspath(folder)]
+    while stack:
+        current = stack.pop()
+        try:
+            with os.scandir(current) as scan:
+                entries = list(scan)
+        except OSError as exc:
+            logger.debug("Could not list a folder under %s: %s", Path(folder).name, exc.__class__.__name__)
+            continue
+        for entry in entries:
+            try:
+                info = entry.stat(follow_symlinks=False)
+                if entry.is_symlink() or getattr(info, "st_file_attributes", 0) & FILE_ATTRIBUTE_REPARSE_POINT:
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    stack.append(entry.path)
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            try:
+                os.remove(entry.path + MOTW_STREAM)
+                removed += 1
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.debug("Could not clear the download mark from one file under %s: %s", Path(folder).name, exc.__class__.__name__)
+    return removed
+
+
+def _mark_cleared_for(folder: Path, version: str) -> bool:
+    try:
+        data = json.loads(MOTW_MARKER_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("version") == version and data.get("folder") == os.fspath(folder)
+
+
+def _remember_cleared(folder: Path, version: str) -> None:
+    try:
+        MOTW_MARKER_PATH.parent.mkdir(parents=True, exist_ok=True)
+        MOTW_MARKER_PATH.write_text(json.dumps({"version": version, "folder": os.fspath(folder)}), encoding="utf-8")
+    except OSError:
+        logger.debug("Could not save the download mark note")
+
+
+def clear_own_download_mark(force: bool = False) -> int:
+    """Clear the download mark from this install, once per version and folder.
+
+    Runs only in the frozen Windows app. It runs again when the version or
+    the folder changes, and whenever one of the decisive files carries the
+    mark, which is what extracting a fresh zip over the folder does. force
+    walks the folder regardless. Returns the number of streams removed.
+    """
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return 0
+    try:
+        folder = install_folder()
+        version = current_version()
+        marked = any(_has_download_mark(path) for path in decisive_files(folder))
+        if not force and not marked and _mark_cleared_for(folder, version):
+            return 0
+        removed = clear_download_mark(folder)
+        if removed:
+            logger.info("Cleared the download mark from %d files in %s", removed, folder.name)
+        _remember_cleared(folder, version)
+        return removed
+    except Exception:
+        logger.debug("Clearing the download mark failed", exc_info=True)
+        return 0
+
+
+def unblock_command(folder: Path) -> str:
+    """The PowerShell command that does by hand what clear_own_download_mark
+    does, for the error dialog. The path is quoted so a space or an
+    apostrophe in it cannot break the command."""
+    quoted = os.fspath(folder).replace("'", "''")
+    return f"Get-ChildItem -LiteralPath '{quoted}' -Recurse | Unblock-File"
+
+
+def is_loader_error(exc: BaseException) -> bool:
+    """True for a failure to load pythonnet or a WebView2 assembly, which is
+    what a blocked file looks like from Python."""
+    text = str(exc)
+    return any(word in text for word in ("Python.Runtime", "clr_loader", "network location", "loadFromRemoteSources"))
+
+
 # --- Single instance -----------------------------------------------------------
 
 def claim_single_instance() -> bool:
@@ -685,8 +831,32 @@ class DesktopApp:
         self.tray.run_detached()
 
     def run(self) -> None:
+        watch_for_show_requests(self.show)
+        self.start_tray()
+        try:
+            try:
+                self.open_window()
+            except Exception as exc:
+                if self.quitting or not is_loader_error(exc):
+                    raise
+                # The start-up clean-up did not stop the .NET loader. Clear
+                # the mark again, whatever the saved note says, and try once
+                # more before the error reaches the person.
+                logger.warning("The window loader failed (%s). Clearing the download mark and trying once more", exc.__class__.__name__)
+                clear_own_download_mark(force=True)
+                self.open_window()
+        finally:
+            self.stop_tray()
+
+    def open_window(self) -> None:
         import webview
 
+        # A second try starts from an empty window list, so the failed
+        # first window is not opened beside the new one.
+        try:
+            webview.windows.clear()
+        except Exception:
+            pass
         self.window = webview.create_window(
             APP_NAME,
             self.hub.url,
@@ -696,16 +866,11 @@ class DesktopApp:
             hidden=self.start_hidden,
         )
         self.window.events.closing += self.on_closing
-        watch_for_show_requests(self.show)
-        self.start_tray()
-        try:
-            webview.start(
-                gui="edgechromium",
-                private_mode=False,
-                storage_path=str(DATA_DIR / "webview"),
-            )
-        finally:
-            self.stop_tray()
+        webview.start(
+            gui="edgechromium",
+            private_mode=False,
+            storage_path=str(DATA_DIR / "webview"),
+        )
 
 
 # --- Entry point ---------------------------------------------------------------
@@ -737,7 +902,14 @@ def run_window(desktop_app) -> int:
         desktop_app.run()
     except Exception as exc:
         logger.exception("The AgnView window stopped")
-        message_box(f"AgnView could not open its window: {exc}\n\nLog: {LOG_PATH}")
+        text = f"AgnView could not open its window: {exc}\n\n"
+        if is_loader_error(exc):
+            text += (
+                "Windows marked the downloaded files as blocked, and AgnView could not clear "
+                "the mark itself. In PowerShell, run this command, then start AgnView again:\n\n"
+                f"{unblock_command(install_folder())}\n\n"
+            )
+        message_box(text + f"Log: {LOG_PATH}")
         return 1
     if not desktop_app.quitting:
         logger.warning("The window ended without Quit AgnView being chosen")
@@ -763,6 +935,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     configure_logging()
+
+    # Before anything can load pythonnet, and before a newer copy takes over
+    # from an older one, so the copy that stays has clean files.
+    clear_own_download_mark()
 
     if not claim_single_instance():
         return 0
