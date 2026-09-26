@@ -8,7 +8,6 @@ name: Windows desktop app
 on:
   push:
     tags: ["v*"]
-    branches: ["bot/show-real-version"]
   workflow_dispatch:
     inputs:
       tag:
@@ -42,9 +41,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${GITHUB_REF_TYPE}" = "branch" ]; then
-            tag="v0.1.14"
-          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
             tag="$INPUT_TAG"
           else
             tag="$REF_NAME"
@@ -57,7 +54,7 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.ref_type == 'branch' && github.ref || format('refs/tags/{0}', steps.tag.outputs.tag) }}
+          ref: ${{ format('refs/tags/{0}', steps.tag.outputs.tag) }}
           persist-credentials: false
 
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
@@ -353,7 +350,6 @@ jobs:
       # Creates the release only when the macOS or PyPI workflow has not yet.
       # Uploads only this workflow's file, so other assets stay untouched.
       - name: Attach AgnView-windows-x64.zip
-        if: github.ref_type != 'branch'
         shell: bash
         env:
           TAG: ${{ steps.tag.outputs.tag }}
