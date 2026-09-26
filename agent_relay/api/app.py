@@ -3,11 +3,14 @@ import logging
 import os
 import secrets
 import uuid
+import html
 from pathlib import Path
 from typing import Optional
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+
+from .. import __version__
 
 from .local_only import PAIRING_PREFIX, local_browser_request, pairing_request_allowed, refuse_pairing_request
 from .routes import router as api_router
@@ -58,13 +61,33 @@ def _iroh_api_enabled_from_env() -> bool:
     return _env_switch(IROH_API_ENV)
 
 
+INDEX_VERSION_TOKEN = "{{AGNVIEW_VERSION}}"
+_INDEX_CACHE: dict = {}
+
+
+def _render_index(index_file: Path) -> str:
+    """The dashboard page with the running version in place of the token.
+
+    The version comes from agent_relay.__version__, the one source, so the
+    badge can never drift from the build. The page is re-read when its file
+    changes. Only the exact token is replaced, and the version is escaped.
+    """
+    mtime = index_file.stat().st_mtime_ns
+    cached = _INDEX_CACHE.get(index_file)
+    if cached and cached[0] == mtime and cached[1] == __version__:
+        return cached[2]
+    text = index_file.read_text(encoding="utf-8").replace(INDEX_VERSION_TOKEN, html.escape(__version__, quote=True))
+    _INDEX_CACHE[index_file] = (mtime, __version__, text)
+    return text
+
+
 def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, port: int = 8765) -> FastAPI:
     token = auth_token or os.environ.get("AGENT_RELAY_TOKEN")
 
     app = FastAPI(
         title="AgnView API",
         description="Cross-Agent Coordination Hub & Live Console for Claude Code, Codex, AntiGravity, and Web LLMs",
-        version="0.1.14"
+        version=__version__,
     )
 
     # No CORS. The dashboard is served by the hub itself, so its requests are
@@ -284,7 +307,7 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
     if index_file.exists():
         @app.get("/", include_in_schema=False)
         async def serve_index():
-            # FileResponse sets no Cache-Control of its own, so a browser is
+            # A file response sets no Cache-Control of its own, so a browser is
             # free to serve this page from its heuristic cache on a plain
             # navigation, load, or F5, and did: an operator reinstalling a
             # fixed build restarted the hub, and their already-open tab kept
@@ -292,8 +315,8 @@ def create_app(db_path: Optional[str] = None, auth_token: Optional[str] = None, 
             # browser this page had changed. This is the one HTML document
             # every fix in this dashboard depends on being current, so it is
             # never cached.
-            return FileResponse(
-                str(index_file),
+            return HTMLResponse(
+                _render_index(index_file),
                 headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
             )
 

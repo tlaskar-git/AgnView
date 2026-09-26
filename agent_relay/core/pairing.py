@@ -12,6 +12,7 @@ from typing import Dict, Any, Optional, Tuple
 import qrcode
 import qrcode.image.svg
 
+from .. import __version__
 from .certs import get_cert_fingerprint
 from .network import get_bind_mode, get_local_ip, is_rfc1918_address
 
@@ -235,7 +236,7 @@ def build_pairing_payload(
 
     return {
         "app": "AgnView",
-        "version": "0.1.14",
+        "version": __version__,
         "payload_version": PAIRING_PAYLOAD_VERSION if ticket else 1,
         "hostname": socket.gethostname(),
         "pair_id": pair_id,

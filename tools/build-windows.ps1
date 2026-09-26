@@ -33,12 +33,18 @@ New-Item -ItemType Directory -Force $Build | Out-Null
 $Icon = Join-Path $Build "agnview.ico"
 & $Python -c "from PIL import Image; Image.open(r'agent_relay\web\static\agnview-app-icon-dark.png').save(r'$Icon', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
 
+# The exe's file and product version resource, from agent_relay.__version__.
+$VersionFile = Join-Path $Build "agnview-version.txt"
+& $Python tools/make-version-file.py $VersionFile
+if ($LASTEXITCODE -ne 0) { throw "Could not write the version resource." }
+
 $Entry = Join-Path $Build "agnview_desktop.py"
 Set-Content -Encoding utf8 $Entry "import sys`nfrom agent_relay.desktop.app import main`nsys.exit(main())"
 
 & $Python -m PyInstaller --noconfirm --clean --windowed `
     --name AgnView `
     --icon $Icon `
+    --version-file $VersionFile `
     --distpath (Join-Path $Root "dist") `
     --workpath (Join-Path $Build "work") `
     --specpath $Build `

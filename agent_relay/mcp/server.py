@@ -8,6 +8,7 @@ import sys
 import json
 from typing import Dict, Any
 
+from .. import __version__
 from ..core.engine import RelayEngine
 from ..core.db import Database
 
@@ -157,7 +158,7 @@ class AgentRelayMCPServer:
                             },
                             "serverInfo": {
                                 "name": "AgentRelay MCP Server",
-                                "version": "0.1.14"
+                                "version": __version__
                             }
                         }
                     }
