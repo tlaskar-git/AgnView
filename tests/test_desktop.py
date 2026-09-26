@@ -3,8 +3,12 @@ registers a command that starts it hidden in the tray at sign-in."""
 
 import json
 import logging
+import os
 import sys
 import types
+from pathlib import Path
+
+import pytest
 
 from agent_relay.desktop import app as desktop
 
@@ -301,3 +305,393 @@ def test_an_older_copy_that_will_not_close_is_reported_not_ignored(monkeypatch):
 
     assert desktop.claim_single_instance() is False
     assert "could not be closed" in shown[0]
+
+
+# --- The download mark ----------------------------------------------------------------
+#
+# A zip downloaded in a browser leaves a Zone.Identifier stream on every
+# extracted file, and the .NET runtime then refuses to load pythonnet. The
+# app deletes the streams from its own folder before it opens the window.
+
+needs_ntfs = pytest.mark.skipif(sys.platform != "win32", reason="NTFS alternate data streams")
+STREAM = ":Zone.Identifier"
+
+
+def _mark(path):
+    with open(str(path) + STREAM, "w", encoding="ascii") as handle:
+        handle.write("[ZoneTransfer]\r\nZoneId=3\r\n")
+
+
+def _is_marked(path):
+    return os.path.exists(str(path) + STREAM)
+
+
+def _make_install(root):
+    """A small stand-in for the AgnView folder, every file marked."""
+    files = [
+        root / "AgnView.exe",
+        root / "_internal" / "base_library.zip",
+        root / "_internal" / "pythonnet" / "runtime" / "Python.Runtime.dll",
+        root / "_internal" / "webview" / "lib" / "Microsoft.Web.WebView2.Core.dll",
+        root / "_internal" / "deep" / "er" / "module.pyd",
+    ]
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"content of " + path.name.encode())
+        _mark(path)
+    return files
+
+
+@needs_ntfs
+def test_the_mark_is_removed_from_every_file_and_the_files_are_unchanged(tmp_path):
+    files = _make_install(tmp_path)
+    assert all(_is_marked(path) for path in files)
+
+    assert desktop.clear_download_mark(tmp_path) == len(files)
+
+    for path in files:
+        assert not _is_marked(path)
+        assert path.read_bytes() == b"content of " + path.name.encode()
+
+
+@needs_ntfs
+def test_files_without_the_mark_are_fine(tmp_path):
+    files = _make_install(tmp_path)
+    plain = tmp_path / "plain.txt"
+    plain.write_text("no mark here")
+
+    assert desktop.clear_download_mark(tmp_path) == len(files)
+    assert desktop.clear_download_mark(tmp_path) == 0
+    assert plain.read_text() == "no mark here"
+
+
+@needs_ntfs
+def test_the_walk_stays_inside_the_folder(tmp_path):
+    install = tmp_path / "AgnView"
+    _make_install(install)
+    neighbour = tmp_path / "Other" / "notes.txt"
+    neighbour.parent.mkdir()
+    neighbour.write_text("keep my mark")
+    _mark(neighbour)
+
+    desktop.clear_download_mark(install)
+
+    assert _is_marked(neighbour)
+
+
+@needs_ntfs
+def test_a_symlink_is_not_followed(tmp_path):
+    install = tmp_path / "AgnView"
+    _make_install(install)
+    outside = tmp_path / "Outside"
+    outside.mkdir()
+    target = outside / "file.txt"
+    target.write_text("outside")
+    _mark(target)
+    try:
+        os.symlink(outside, install / "link", target_is_directory=True)
+        os.symlink(target, install / "filelink.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("this account cannot create symlinks")
+
+    desktop.clear_download_mark(install)
+
+    assert _is_marked(target)
+
+
+@needs_ntfs
+def test_a_junction_is_not_followed(tmp_path):
+    import subprocess
+
+    install = tmp_path / "AgnView"
+    _make_install(install)
+    outside = tmp_path / "Outside"
+    outside.mkdir()
+    target = outside / "file.txt"
+    target.write_text("outside")
+    _mark(target)
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(install / "junction"), str(outside)],
+        capture_output=True,
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip("could not create a junction")
+
+    desktop.clear_download_mark(install)
+
+    assert _is_marked(target)
+
+
+def test_a_refused_removal_is_ignored(tmp_path, monkeypatch):
+    real_remove = os.remove
+    refused = []
+
+    def remove(path, *args, **kwargs):
+        if str(path).endswith(STREAM):
+            refused.append(path)
+            raise PermissionError("Access is denied.")
+        return real_remove(path, *args, **kwargs)
+
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.dll").write_bytes(b"a")
+    (tmp_path / "sub" / "b.dll").write_bytes(b"b")
+    monkeypatch.setattr(desktop.os, "remove", remove)
+
+    assert desktop.clear_download_mark(tmp_path) == 0
+    assert len(refused) == 2
+
+
+def test_a_missing_folder_is_ignored(tmp_path):
+    assert desktop.clear_download_mark(tmp_path / "gone") == 0
+
+
+def test_logs_name_the_install_folder_only(tmp_path, monkeypatch, caplog):
+    real_remove = os.remove
+
+    def remove(path, *args, **kwargs):
+        if str(path).endswith(STREAM):
+            raise PermissionError("Access is denied.")
+        return real_remove(path, *args, **kwargs)
+
+    monkeypatch.setattr(desktop.os, "remove", remove)
+    folder = tmp_path / "AgnView"
+    (folder / "inner").mkdir(parents=True)
+    (folder / "inner" / "secret-name.dll").write_bytes(b"x")
+
+    with caplog.at_level(logging.DEBUG, logger="agnview.desktop"):
+        desktop.clear_download_mark(folder)
+
+    assert str(tmp_path) not in caplog.text
+    assert "secret-name" not in caplog.text
+
+
+class _Install:
+    """Records what the start-up clean-up did, without touching a disk."""
+
+    def __init__(self, monkeypatch, tmp_path, marked=()):
+        self.walks = []
+        self.marked = set(marked)
+        self.folder = tmp_path / "AgnView"
+        library = self.folder / "_internal" / "webview" / "lib"
+        library.mkdir(parents=True)
+        (library / "Microsoft.Web.WebView2.Core.dll").write_bytes(b"x")
+        monkeypatch.setattr(sys, "platform", "win32")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", str(self.folder / "AgnView.exe"))
+        monkeypatch.setattr(desktop, "MOTW_MARKER_PATH", tmp_path / "note.json")
+        monkeypatch.setattr(desktop, "current_version", lambda: "1.2.3")
+        monkeypatch.setattr(desktop, "_has_download_mark", lambda path: Path(path).name in self.marked)
+        monkeypatch.setattr(desktop, "clear_download_mark", lambda folder: self.walks.append(folder) or 3)
+
+
+def test_the_first_start_walks_the_folder_once(monkeypatch, tmp_path):
+    install = _Install(monkeypatch, tmp_path)
+
+    assert desktop.clear_own_download_mark() == 3
+    assert desktop.clear_own_download_mark() == 0
+    assert install.walks == [install.folder]
+
+
+def test_a_new_version_walks_again(monkeypatch, tmp_path):
+    install = _Install(monkeypatch, tmp_path)
+    desktop.clear_own_download_mark()
+    monkeypatch.setattr(desktop, "current_version", lambda: "1.2.4")
+
+    desktop.clear_own_download_mark()
+
+    assert len(install.walks) == 2
+
+
+def test_a_moved_folder_walks_again(monkeypatch, tmp_path):
+    install = _Install(monkeypatch, tmp_path)
+    desktop.clear_own_download_mark()
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "Moved" / "AgnView.exe"))
+
+    desktop.clear_own_download_mark()
+
+    assert len(install.walks) == 2
+
+
+@pytest.mark.parametrize("name", ["Python.Runtime.dll", "Microsoft.Web.WebView2.Core.dll"])
+def test_a_marked_decisive_file_walks_again(monkeypatch, tmp_path, name):
+    # Extracting a fresh zip over the folder brings the mark back.
+    install = _Install(monkeypatch, tmp_path)
+    desktop.clear_own_download_mark()
+    install.marked.add(name)
+
+    desktop.clear_own_download_mark()
+
+    assert len(install.walks) == 2
+
+
+def test_a_marked_exe_alone_does_not_trigger_a_walk(monkeypatch, tmp_path):
+    install = _Install(monkeypatch, tmp_path)
+    desktop.clear_own_download_mark()
+    install.marked.add("AgnView.exe")
+
+    desktop.clear_own_download_mark()
+
+    assert len(install.walks) == 1
+
+
+def test_a_forced_clean_ignores_the_saved_note(monkeypatch, tmp_path):
+    install = _Install(monkeypatch, tmp_path)
+    desktop.clear_own_download_mark()
+
+    desktop.clear_own_download_mark(force=True)
+
+    assert len(install.walks) == 2
+
+
+def test_a_source_run_and_other_systems_are_left_alone(monkeypatch, tmp_path):
+    install = _Install(monkeypatch, tmp_path)
+    monkeypatch.delattr(sys, "frozen")
+    assert desktop.clear_own_download_mark() == 0
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "platform", "linux")
+    assert desktop.clear_own_download_mark() == 0
+    assert install.walks == []
+
+
+def test_a_failing_clean_up_never_stops_the_start(monkeypatch, tmp_path):
+    _Install(monkeypatch, tmp_path)
+
+    def boom(folder):
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(desktop, "clear_download_mark", boom)
+
+    assert desktop.clear_own_download_mark() == 0
+
+
+@needs_ntfs
+def test_the_real_clean_up_on_a_marked_install(monkeypatch, tmp_path):
+    install = tmp_path / "AgnView"
+    files = _make_install(install)
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(install / "AgnView.exe"))
+    monkeypatch.setattr(desktop, "MOTW_MARKER_PATH", tmp_path / "note.json")
+    monkeypatch.setattr(desktop, "current_version", lambda: "1.2.3")
+
+    assert desktop.clear_own_download_mark() == len(files)
+    assert not any(_is_marked(path) for path in files)
+    assert desktop.MOTW_MARKER_PATH.exists()
+
+
+def test_the_clean_up_runs_before_a_newer_copy_takes_over(monkeypatch):
+    order = []
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(desktop, "configure_logging", lambda: order.append("logging"))
+    monkeypatch.setattr(desktop, "clear_own_download_mark", lambda force=False: order.append("clean") or 0)
+    monkeypatch.setattr(desktop, "claim_single_instance", lambda: order.append("claim") or False)
+
+    assert desktop.main([]) == 0
+    assert order == ["logging", "clean", "claim"]
+
+
+# --- The window survives one loader failure -------------------------------------------
+
+LOADER_ERROR = "Failed to resolve Python.Runtime.Loader.Initialize from the install folder"
+
+
+def _fake_webview(monkeypatch, failures):
+    """A stand-in webview module whose start fails for the first failures calls."""
+    calls = {"created": 0, "started": 0}
+
+    class Closing:
+        def __iadd__(self, handler):
+            return self
+
+    def create_window(*args, **kwargs):
+        calls["created"] += 1
+        return types.SimpleNamespace(events=types.SimpleNamespace(closing=Closing()))
+
+    def start(**kwargs):
+        calls["started"] += 1
+        if calls["started"] <= failures:
+            raise RuntimeError(LOADER_ERROR)
+
+    module = types.SimpleNamespace(windows=[object()], create_window=create_window, start=start)
+    monkeypatch.setitem(sys.modules, "webview", module)
+    return calls, module
+
+
+def _desktop_app(monkeypatch):
+    monkeypatch.setattr(desktop, "watch_for_show_requests", lambda callback: None)
+    app = desktop.DesktopApp(hub=types.SimpleNamespace(url="http://127.0.0.1:1"), settings={}, start_hidden=True)
+    app.start_tray = lambda: None
+    return app
+
+
+def test_one_loader_failure_is_cleaned_and_retried(monkeypatch):
+    calls, module = _fake_webview(monkeypatch, failures=1)
+    forced = []
+    monkeypatch.setattr(desktop, "clear_own_download_mark", lambda force=False: forced.append(force) or 0)
+
+    _desktop_app(monkeypatch).run()
+
+    assert forced == [True]
+    assert calls == {"created": 2, "started": 2}
+    assert module.windows == []
+
+
+def test_a_second_loader_failure_reaches_the_person(monkeypatch):
+    calls, _module = _fake_webview(monkeypatch, failures=2)
+    monkeypatch.setattr(desktop, "clear_own_download_mark", lambda force=False: 0)
+
+    with pytest.raises(RuntimeError, match="Python.Runtime"):
+        _desktop_app(monkeypatch).run()
+
+    assert calls["started"] == 2
+
+
+def test_another_window_error_is_not_retried(monkeypatch):
+    calls, module = _fake_webview(monkeypatch, failures=0)
+
+    def start(**kwargs):
+        calls["started"] += 1
+        raise RuntimeError("WebView2 is not installed")
+
+    module.start = start
+    forced = []
+    monkeypatch.setattr(desktop, "clear_own_download_mark", lambda force=False: forced.append(force) or 0)
+
+    with pytest.raises(RuntimeError, match="WebView2"):
+        _desktop_app(monkeypatch).run()
+
+    assert calls["started"] == 1
+    assert forced == []
+
+
+def test_the_loader_error_dialog_gives_the_unblock_command(monkeypatch):
+    shown = []
+    monkeypatch.setattr(desktop, "message_box", shown.append)
+    monkeypatch.setattr(desktop, "install_folder", lambda: Path("C:/Apps/O'Neil Apps/AgnView"))
+
+    class Broken:
+        quitting = False
+
+        def run(self):
+            raise RuntimeError(LOADER_ERROR)
+
+    assert desktop.run_window(Broken()) == 1
+    text = shown[0]
+    assert LOADER_ERROR in text
+    assert "Get-ChildItem -LiteralPath 'C:" in text
+    assert "O''Neil Apps" in text
+    assert text.count("Unblock-File") == 1
+    assert f"Log: {desktop.LOG_PATH}" in text
+
+
+def test_a_blocked_webview_library_counts_as_a_loader_error():
+    blocked = RuntimeError("System.NotSupportedException: An attempt was made to load an assembly from a network location")
+    assert desktop.is_loader_error(blocked)
+    assert not desktop.is_loader_error(RuntimeError("WebView2 is not installed"))
+
+
+def test_the_unblock_command_quotes_the_path():
+    command = desktop.unblock_command(Path("C:/Apps/It's here/AgnView"))
+    assert command.startswith("Get-ChildItem -LiteralPath '")
+    assert "It''s here" in command
+    assert command.endswith("' -Recurse | Unblock-File")
