@@ -87,6 +87,21 @@ jobs:
           if ($outside) { throw "Entries outside the AgnView folder: $outside" }
           if (-not ($names | Where-Object { $_ -like "AgnView/_internal/*" })) { throw "The support files are missing." }
 
+      # AgnView.exe must carry the release version in its file properties.
+      # tools/make-version-file.py writes the resource from agent_relay.__version__,
+      # so a stale copy of the version cannot ship in the exe.
+      - name: Check the exe version resource
+        shell: pwsh
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $expected = $env:TAG.TrimStart("v")
+          $info = (Get-Item dist/AgnView/AgnView.exe).VersionInfo
+          Write-Host "Tag $expected, FileVersion $($info.FileVersion), ProductVersion $($info.ProductVersion), ProductName $($info.ProductName)"
+          if ($info.FileVersion -ne $expected) { throw "FileVersion '$($info.FileVersion)' is not $expected." }
+          if ($info.ProductVersion -ne $expected) { throw "ProductVersion '$($info.ProductVersion)' is not $expected." }
+
       # The app is windowed, so it has no console and no version flag. Start it
       # minimised on a loopback port, read the version from the hub's OpenAPI
       # document and compare it with pyproject.toml, then stop it. The tray
@@ -114,6 +129,11 @@ jobs:
             if (-not $version) { throw "The hub did not answer on loopback within 60 seconds." }
             Write-Host "Hub answered with version $version, expected $expected."
             if ($version -ne $expected) { throw "Version mismatch." }
+            # The dashboard header must show the same version.
+            $page = (Invoke-WebRequest "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 10).Content
+            if ($page -notmatch [regex]::Escape(">v$expected</span>")) { throw "The dashboard at / does not show v$expected." }
+            if ($page -match "v2\.4|AGNVIEW_VERSION") { throw "The dashboard at / still carries a stale or unfilled version." }
+            Write-Host "The dashboard at / shows v$expected."
           } finally {
             Get-Process AgnView -ErrorAction SilentlyContinue | Stop-Process -Force
           }

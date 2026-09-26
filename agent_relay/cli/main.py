@@ -20,6 +20,7 @@ from rich.table import Table
 from rich.panel import Panel
 from rich.text import Text
 
+from .. import __version__
 from ..core.engine import RelayEngine, NotFoundError, InvalidStateError
 from ..core.db import Database, DEFAULT_DB_PATH
 from ..core.models import (
@@ -847,6 +848,7 @@ def main():
         prog="agnview",
         description="AgnView: Distributed Multi-Agent & Multi-Machine Orchestration Hub"
     )
+    parser.add_argument("--version", action="version", version=f"agnview {__version__}")
     parser.add_argument("--url", default=DEFAULT_SERVER_URL, help="AgentRelay server URL (default http://127.0.0.1:8765)")
     parser.add_argument("--token", default=DEFAULT_TOKEN, help="Optional authentication token for multi-machine setups")
     subparsers = parser.add_subparsers(dest="command", required=True)

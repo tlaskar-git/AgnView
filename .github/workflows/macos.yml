@@ -81,6 +81,22 @@ jobs:
           MACOS_SIGNING_IDENTITY: ${{ env.HAS_SIGNING == 'true' && secrets.MACOS_SIGNING_IDENTITY || '' }}
         run: bash tools/build-macos.sh app
 
+      # Info.plist must carry the release version, the same one the hub reports.
+      - name: Check the bundle version
+        run: |
+          set -euo pipefail
+          expected="$(python -c 'import agent_relay; print(agent_relay.__version__)')"
+          plist="dist/AgnView.app/Contents/Info.plist"
+          short="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
+          build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
+          echo "Package $expected, CFBundleShortVersionString $short, CFBundleVersion $build"
+          [ "$short" = "$expected" ] || { echo "CFBundleShortVersionString is not $expected" >&2; exit 1; }
+          [ "$build" = "$expected" ] || { echo "CFBundleVersion is not $expected" >&2; exit 1; }
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$expected" ]; then
+            echo "The tag ${GITHUB_REF_NAME} does not match version $expected" >&2
+            exit 1
+          fi
+
       - name: Build AgnView-macos.dmg
         env:
           MACOS_SIGNING_IDENTITY: ${{ env.HAS_SIGNING == 'true' && secrets.MACOS_SIGNING_IDENTITY || '' }}
@@ -183,6 +199,18 @@ jobs:
           cat "$profile/.agnview/logs/desktop.log" 2>/dev/null | tail -40 || true
           tail -40 "$RUNNER_TEMP/agnview-stdout.log" || true
           exit 1
+
+      - name: Check the dashboard shows the version
+        run: |
+          set -euo pipefail
+          expected="$(python -c 'import agent_relay; print(agent_relay.__version__)')"
+          page="$(curl -fsS http://127.0.0.1:18845/)"
+          printf '%s' "$page" | grep -qF ">v${expected}</span>" || { echo "The dashboard at / does not show v${expected}" >&2; exit 1; }
+          if printf '%s' "$page" | grep -Eq 'v2\.4|AGNVIEW_VERSION'; then
+            echo "The dashboard at / carries a stale or unfilled version" >&2
+            exit 1
+          fi
+          echo "The dashboard at / shows v${expected}"
 
       - name: Check the app is a single instance
         run: |

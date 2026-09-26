@@ -41,7 +41,7 @@ build_app() {
 
     printf 'import sys\nfrom agent_relay.desktop.app import main\nsys.exit(main())\n' > "$BUILD/agnview_desktop.py"
     local version
-    version="$("$py" -c "import re;print(re.search(r'^version = \"(.+)\"', open('pyproject.toml').read(), re.M).group(1))")"
+    version="$("$py" -c "import re;print(re.search(r'^__version__ = \"(.+)\"', open('agent_relay/__init__.py').read(), re.M).group(1))")"
 
     "$py" -m PyInstaller --noconfirm --clean --windowed \
         --name AgnView \
