@@ -157,7 +157,7 @@ class AgentRelayMCPServer:
                             },
                             "serverInfo": {
                                 "name": "AgentRelay MCP Server",
-                                "version": "0.1.13"
+                                "version": "0.1.14"
                             }
                         }
                     }
