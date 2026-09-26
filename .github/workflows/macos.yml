@@ -204,9 +204,9 @@ jobs:
         run: |
           set -euo pipefail
           expected="$(python -c 'import agent_relay; print(agent_relay.__version__)')"
-          page="$(curl -fsS http://127.0.0.1:18845/)"
-          printf '%s' "$page" | grep -qF ">v${expected}</span>" || { echo "The dashboard at / does not show v${expected}" >&2; exit 1; }
-          if printf '%s' "$page" | grep -Eq 'v2\.4|AGNVIEW_VERSION'; then
+          curl -fsS http://127.0.0.1:18845/ > "$RUNNER_TEMP/dashboard.html"
+          grep -qF ">v${expected}</span>" "$RUNNER_TEMP/dashboard.html" || { echo "The dashboard at / does not show v${expected}" >&2; exit 1; }
+          if grep -Eq 'v2\.4|AGNVIEW_VERSION' "$RUNNER_TEMP/dashboard.html"; then
             echo "The dashboard at / carries a stale or unfilled version" >&2
             exit 1
           fi
