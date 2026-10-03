@@ -279,6 +279,7 @@ jobs:
           name: agnview-macos-menu
           path: screenshots/agnview-macos-menu.png
           if-no-files-found: warn
+          retention-days: 3
 
       - name: App log
         if: always()
@@ -306,6 +307,7 @@ jobs:
           name: agnview-macos-window
           path: screenshots/agnview-macos-window.png
           if-no-files-found: error
+          retention-days: 3
 
       - name: Upload the menu bar screenshot
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -313,6 +315,7 @@ jobs:
           name: agnview-macos-menubar
           path: screenshots/agnview-macos-menubar.png
           if-no-files-found: error
+          retention-days: 3
 
       - name: Upload the disk image
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -320,6 +323,7 @@ jobs:
           name: AgnView-macos-dmg
           path: dist/AgnView-macos.dmg
           if-no-files-found: error
+          retention-days: 14
 
       - name: Remove the signing keychain
         if: always() && env.SIGNING_KEYCHAIN != ''
